@@ -1,0 +1,8 @@
+{
+  "pubs": [
+    ["OPENQASM 3.0;\ninclude \"stdgates.inc\";\nbit[1] c;\nsx $0;\nc[0] = measure $0;\n"]
+  ],
+  "version": 2,
+  "shots": 256,
+  "support_qiskit": false
+}

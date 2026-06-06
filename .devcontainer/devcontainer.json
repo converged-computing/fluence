@@ -1,0 +1,18 @@
+{
+  "name": "Fluxion (Fluence) with Quantum",
+  "dockerFile": "Dockerfile",
+  "context": "../",
+
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+  },
+      "extensions": [
+        "ms-vscode.cmake-tools",
+        "golang.go"
+      ]
+    }
+  },
+  "postStartCommand": "git config --global --add safe.directory /workspaces/fluence"
+}

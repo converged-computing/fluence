@@ -1,0 +1,22 @@
+# kind create cluster --image kindest/node:v1.36.1 --config deploy/kind-config.yaml
+#
+# Enables the alpha Workload / PodGroup gang-scheduling feature (off by default
+# in 1.36). Gates are set per-component because GangScheduling is scheduler-only
+# (setting it on the apiserver would be rejected as an unknown gate).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: ClusterConfiguration
+        apiServer:
+          extraArgs:
+            # Turn on the alpha API group + the API itself.
+            runtime-config: "scheduling.k8s.io/v1alpha2=true"
+            feature-gates: "GenericWorkload=true"
+        scheduler:
+          extraArgs:
+            feature-gates: "GenericWorkload=true,GangScheduling=true"
+  - role: worker
+  - role: worker

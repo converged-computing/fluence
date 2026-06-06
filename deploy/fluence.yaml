@@ -1,0 +1,137 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluence
+  namespace: kube-system
+---
+# Bind the built-in scheduler roles so fluence (a full kube-scheduler build) has
+# every list/watch the scheduling framework needs (nodes, pods, PV/PVC, CSI,
+# storageclasses, resourceclaims/slices, volumeattachments, events, etc.).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluence-as-kube-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:kube-scheduler
+subjects:
+  - kind: ServiceAccount
+    name: fluence
+    namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluence-as-volume-scheduler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:volume-scheduler
+subjects:
+  - kind: ServiceAccount
+    name: fluence
+    namespace: kube-system
+---
+# Delegated authentication: read the auth configmap in kube-system. This is the
+# fix for the "extension-apiserver-authentication ... forbidden" errors.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: fluence-extension-apiserver-authentication-reader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: fluence
+    namespace: kube-system
+---
+# Extras the built-in scheduler role does not grant: the alpha PodGroup/Workload
+# API (gang), and leader-election leases under our scheduler name.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluence-extra
+rules:
+  - apiGroups: ["scheduling.k8s.io"]
+    resources: ["podgroups", "workloads", "podgroups/status", "workloads/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "get", "update", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluence-extra
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fluence-extra
+subjects:
+  - kind: ServiceAccount
+    name: fluence
+    namespace: kube-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluence-scheduler-config
+  namespace: kube-system
+data:
+  scheduler-config.yaml: |
+    apiVersion: kubescheduler.config.k8s.io/v1
+    kind: KubeSchedulerConfiguration
+    leaderElection:
+      leaderElect: false
+    profiles:
+      - schedulerName: fluence
+        plugins:
+          preFilter:
+            enabled: [{name: Fluence}]
+          filter:
+            enabled: [{name: Fluence}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluence
+  namespace: kube-system
+  labels: {app: fluence}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: fluence}
+  template:
+    metadata:
+      labels: {app: fluence}
+    spec:
+      serviceAccountName: fluence
+      containers:
+        - name: fluence
+          image: ghcr.io/converged-computing/fluence:latest
+          # For development only
+          imagePullPolicy: Never
+          command:
+            - /bin/fluence
+            - --config=/etc/fluence/scheduler-config.yaml
+            - --v=4
+          env:
+            - name: FLUENCE_QUANTUM_CONFIG
+              value: /etc/fluence/quantum-backends.yaml
+            - name: IBM_CLOUD_TOKEN
+              valueFrom: {secretKeyRef: {name: ibm-quantum, key: token, optional: true}}
+            - name: IBM_CLOUD_CRN
+              valueFrom: {secretKeyRef: {name: ibm-quantum, key: crn, optional: true}}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/fluence
+      volumes:
+        - name: config
+          projected:
+            sources:
+              - configMap: {name: fluence-scheduler-config}
+              - configMap: {name: fluence-quantum-backends, optional: true}
