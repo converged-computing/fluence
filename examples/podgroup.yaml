@@ -1,10 +1,10 @@
-# Native gang scheduling (k8s >= 1.35, GangScheduling/GenericWorkload gates on).
-# Fluence does placement; the PodGroup gives all-or-nothing semantics.
+# Native gang scheduling (k8s >= 1.36, GangScheduling/GenericWorkload gates on).
+# Fluence does placement; the PodGroup gives all-or-nothing semantics. Pods link
+# to the PodGroup via the first-class field spec.schedulingGroup.podGroupName.
 apiVersion: scheduling.k8s.io/v1alpha2
 kind: PodGroup
 metadata:
   name: training
-  namespace: default
 spec:
   schedulingPolicy:
     gang:
@@ -14,7 +14,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: training
-  namespace: default
 spec:
   replicas: 2
   selector:
@@ -23,14 +22,15 @@ spec:
     metadata:
       labels:
         app: training
-        scheduling.k8s.io/pod-group: training
     spec:
       schedulerName: fluence
+      schedulingGroup:
+        podGroupName: training
       containers:
         - name: worker
           image: busybox
           command: ["sleep", "3600"]
           resources:
             requests:
-              cpu: "2"
+              cpu: "4"
               memory: 8Gi

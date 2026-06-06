@@ -1,11 +1,7 @@
+# Mr. Fluence!
 # Multi-stage build for the fluence scheduler.
-#
 # The scheduler binary cgo-links flux-sched (Fluxion) for resource matching.
-# It does NOT depend on QRMI — quantum job submission is a separate workload
-# (github.com/converged-computing/qrmi-sampler). So this image needs only
-# flux-sched, no Rust/QRMI. Mirrors the .devcontainer build.
 
-# ---------- builder ----------
 FROM fluxrm/flux-core:noble AS builder
 
 USER root
@@ -37,7 +33,9 @@ COPY . .
 RUN CGO_ENABLED=1 \
     CGO_CFLAGS="-I/opt/flux-sched" \
     CGO_LDFLAGS="-L/opt/flux-sched/resource -L/opt/flux-sched/resource/libjobspec -L/opt/flux-sched/resource/reapi/bindings -lresource -ljobspec_conv -lreapi_cli -lflux-idset -lstdc++ -lczmq -ljansson -lhwloc -lboost_system -lflux-hostlist -lboost_graph -lyaml-cpp" \
-    go build -ldflags '-w' -o /bin/fluence ./cmd/fluence
+    go build -ldflags '-w' -o /bin/fluence ./cmd/fluence && \
+    CGO_ENABLED=0 go build -ldflags '-w' -o /bin/fluence-deviceplugin ./cmd/deviceplugin && \
+    CGO_ENABLED=0 go build -ldflags '-w' -o /bin/fluence-webhook ./cmd/webhook
 
 FROM fluxrm/flux-core:noble AS runtime
 
@@ -55,4 +53,6 @@ COPY --from=builder /usr/lib/libjobspec_conv.so* /usr/lib/
 RUN ldconfig
 
 COPY --from=builder /bin/fluence /bin/fluence
+COPY --from=builder /bin/fluence-deviceplugin /bin/fluence-deviceplugin
+COPY --from=builder /bin/fluence-webhook /bin/fluence-webhook
 ENTRYPOINT ["/bin/fluence"]
