@@ -62,6 +62,16 @@ rules:
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["create", "get", "update", "list", "watch"]
+  # PreBind stamps the allocated backend onto the pod as an annotation; the
+  # built-in system:kube-scheduler role only allows patching pods/status, not
+  # the pod object, so grant it here.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  # The webhook self-manages its TLS by patching its own config's caBundle.
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations"]
+    verbs: ["get", "list", "watch", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -90,9 +100,11 @@ data:
     profiles:
       - schedulerName: fluence
         plugins:
-          preFilter:
-            enabled: [{name: Fluence}]
-          filter:
+          # multiPoint wires Fluence into every extension point its Go type
+          # implements: PreFilter, Filter, and PreBind (which stamps the backend
+          # annotation). Listing points individually risks omitting one — that is
+          # exactly what left PreBind unwired and the backend annotation unset.
+          multiPoint:
             enabled: [{name: Fluence}]
 ---
 apiVersion: apps/v1
@@ -113,19 +125,21 @@ spec:
       containers:
         - name: fluence
           image: ghcr.io/converged-computing/fluence:latest
-          # For development only
           imagePullPolicy: Never
           command:
             - /bin/fluence
             - --config=/etc/fluence/scheduler-config.yaml
+            # fluence is its own scheduler binary, so it needs the gang gates set
+            # here (the cluster-level kube-scheduler gates don't apply to it).
+            # Without these its PodGroup/GangScheduling plugin is inactive, pods
+            # schedule with no gang semantics, and PodGroup status stays Pending.
+            - --feature-gates=GenericWorkload=true,GangScheduling=true
             - --v=4
           env:
-            - name: FLUENCE_QUANTUM_CONFIG
-              value: /etc/fluence/quantum-backends.yaml
-            - name: IBM_CLOUD_TOKEN
-              valueFrom: {secretKeyRef: {name: ibm-quantum, key: token, optional: true}}
-            - name: IBM_CLOUD_CRN
-              valueFrom: {secretKeyRef: {name: ibm-quantum, key: crn, optional: true}}
+            # Path to the resources config (e.g. quantum backends). Unset/empty
+            # file -> classical-only graph. Supplied by the quantum add-on.
+            - name: FLUENCE_RESOURCES
+              value: /etc/fluence/resources.yaml
           volumeMounts:
             - name: config
               mountPath: /etc/fluence
@@ -134,4 +148,75 @@ spec:
           projected:
             sources:
               - configMap: {name: fluence-scheduler-config}
-              - configMap: {name: fluence-quantum-backends, optional: true}
+              - configMap: {name: fluence-resources, optional: true}
+---
+# Mutating webhook: injects scheduler-chosen values into pods at creation time
+# (currently a downward-API QRMI_BACKEND env for quantum pods). It self-manages
+# TLS — generates a CA + serving cert at startup and patches the caBundle below —
+# so no cert-manager and no committed keys. failurePolicy Ignore keeps a webhook
+# outage from blocking pod creation cluster-wide.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fluence-webhook
+  namespace: kube-system
+  labels: {app: fluence-webhook}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: fluence-webhook}
+  template:
+    metadata:
+      labels: {app: fluence-webhook}
+    spec:
+      serviceAccountName: fluence
+      containers:
+        - name: webhook
+          image: ghcr.io/converged-computing/fluence:latest
+          imagePullPolicy: Never
+          command: ["/bin/fluence-webhook"]
+          ports:
+            - containerPort: 8443
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8443, scheme: HTTPS}
+            initialDelaySeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fluence-webhook
+  namespace: kube-system
+spec:
+  selector: {app: fluence-webhook}
+  ports:
+    - port: 443
+      targetPort: 8443
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: fluence-webhook
+webhooks:
+  - name: pods.fluence.flux-framework.org
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore        # never block pod creation if the webhook is down
+    # caBundle is filled in at runtime by the webhook patching this object.
+    clientConfig:
+      service:
+        name: fluence-webhook
+        namespace: kube-system
+        path: /mutate
+        port: 443
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+        scope: Namespaced
+    # Don't intercept system pods (and avoid bootstrap coupling).
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values: ["kube-system"]

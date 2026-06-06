@@ -18,13 +18,16 @@ CGO_LDFLAGS = -L$(FLUX_SCHED_ROOT)/resource \
               -lflux-hostlist -lboost_graph -lyaml-cpp
 
 .PHONY: build
-build: ## Build the fluence scheduler binary (needs flux-sched)
+build: ## Build all binaries (scheduler needs flux-sched; helpers are pure Go)
 	CGO_ENABLED=1 CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" \
 	  go build -o bin/fluence ./cmd/fluence
+	CGO_ENABLED=0 go build -o bin/fluence-deviceplugin ./cmd/deviceplugin
+	CGO_ENABLED=0 go build -o bin/fluence-webhook ./cmd/webhook
 
 .PHONY: test
 test: ## Pure-Go unit tests (no flux, no k8s scheduler libs, no cluster)
-	go test ./pkg/jgf/... ./pkg/cluster/... ./pkg/jobspec/... ./pkg/placement/... ./pkg/quantum/...
+	go test ./pkg/jgf/... ./pkg/cluster/... ./pkg/jobspec/... ./pkg/placement/... \
+	  ./pkg/quantum/... ./pkg/webhook/... ./pkg/deviceplugin/...
 
 .PHONY: test-graph
 test-graph: ## Matcher tests (needs flux-sched)

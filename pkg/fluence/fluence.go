@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	fwk "k8s.io/kube-scheduler/framework"
 )
 
@@ -37,13 +38,15 @@ type Fluence struct {
 	matcher *graph.FluxionGraph
 
 	mu sync.Mutex
-	// placement maps a pod-group key to the nodes chosen for the group.
-	placement map[string][]string
+	// placement maps a pod-group key to the placement chosen for the group
+	// (nodes + allocated backend).
+	placement map[string]placement.Placement
 }
 
 var (
 	_ fwk.PreFilterPlugin = (*Fluence)(nil)
 	_ fwk.FilterPlugin    = (*Fluence)(nil)
+	_ fwk.PreBindPlugin   = (*Fluence)(nil)
 )
 
 // New builds the plugin: discover cluster nodes, optionally inject quantum
@@ -51,7 +54,8 @@ var (
 //
 // Configuration (for now via env; can move to plugin args):
 //
-//	FLUENCE_QUANTUM_CONFIG  path to a YAML/JSON list of quantum backends
+//	FLUENCE_RESOURCES       path to a YAML/JSON resources config (e.g. quantum
+//	                        backends). Unset = classical-only graph.
 //	FLUENCE_MATCH_POLICY    Fluxion match policy (default "first")
 func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error) {
 	// List nodes via the API. The scheduler's shared snapshot is empty at
@@ -64,19 +68,25 @@ func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error
 		return nil, fmt.Errorf("list nodes: %w", err)
 	}
 
-	// Classical compute always comes from the cluster nodes. Quantum resources
-	// are added only when a backends config is provided.
+	// Classical compute always comes from the cluster nodes. Quantum/other
+	// resources are added only when a resources config is present. FLUENCE_RESOURCES
+	// is set on the base scheduler but the file only exists once the resources
+	// add-on is applied, so a missing file is normal (classical-only), not fatal.
 	opts := cluster.Options{}
-	if path := os.Getenv("FLUENCE_QUANTUM_CONFIG"); path != "" {
+	if path := os.Getenv("FLUENCE_RESOURCES"); path != "" {
 		raw, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read quantum config: %w", err)
+		switch {
+		case err == nil:
+			qc, err := cluster.LoadQuantumConfig(raw)
+			if err != nil {
+				return nil, err
+			}
+			opts.Quantum = qc.Backends
+		case os.IsNotExist(err):
+			// No resources config mounted -> classical-only graph.
+		default:
+			return nil, fmt.Errorf("read resources config %s: %w", path, err)
 		}
-		qc, err := cluster.LoadQuantumConfig(raw)
-		if err != nil {
-			return nil, err
-		}
-		opts.Quantum = qc.Backends
 	}
 
 	jgfBytes, err := cluster.BuildGraph(nodeList.Items, opts)
@@ -100,7 +110,7 @@ func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error
 	return &Fluence{
 		handle:    h,
 		matcher:   matcher,
-		placement: map[string][]string{},
+		placement: map[string]placement.Placement{},
 	}, nil
 }
 
@@ -147,16 +157,21 @@ func (f *Fluence) PreFilter(
 	if err != nil {
 		return nil, fwk.AsStatus(err)
 	}
-	if len(place.Nodes) == 0 {
-		return nil, fwk.NewStatus(fwk.Unschedulable, "fluxion returned no node placement")
+	if len(place.Nodes) == 0 && place.Backend == "" {
+		return nil, fwk.NewStatus(fwk.Unschedulable, "fluxion returned no allocation")
 	}
+	// Note: a quantum-only allocation has a Backend but no Nodes (a qpu vertex
+	// lives under the qgateway, not under a compute node). That is valid — the
+	// backend is a remote API reachable from any node — so we do not require a
+	// node here; Filter imposes no node constraint in that case.
 
 	f.mu.Lock()
-	f.placement[group] = place.Nodes
+	f.placement[group] = place
 	f.mu.Unlock()
 
-	// place.Backend (quantum) would be recorded on the pod(s) here so the
-	// workload knows which QRMI backend to submit to (e.g. via annotation/env).
+	// The allocated backend is recorded onto each pod in PreBind (container env
+	// is immutable post-creation, but annotations can be patched); the
+	// webhook-injected downward-API env then surfaces it as QRMI_BACKEND.
 	return nil, fwk.NewStatus(fwk.Success)
 }
 
@@ -173,8 +188,15 @@ func (f *Fluence) Filter(
 	group := groupKey(pod)
 
 	f.mu.Lock()
-	nodes := f.placement[group]
+	nodes := f.placement[group].Nodes
 	f.mu.Unlock()
+
+	// A quantum-only allocation pins no node (the backend is a remote API any
+	// node can reach), so impose no constraint; the qpu device plugin already
+	// gates which nodes can admit the pod.
+	if len(nodes) == 0 {
+		return fwk.NewStatus(fwk.Success)
+	}
 
 	for _, n := range nodes {
 		if n == nodeInfo.Node().Name {
@@ -184,29 +206,78 @@ func (f *Fluence) Filter(
 	return fwk.NewStatus(fwk.Unschedulable, "node not in fluxion allocation for this group")
 }
 
-// groupPods returns the pods belonging to the same group as pod, by label.
+// PreBindPreFlight runs before PreBind. It returns Success when this plugin has
+// a backend to stamp on the pod (a quantum group), and Skip otherwise so the
+// framework doesn't call PreBind needlessly. It is lightweight: it only reads
+// the cached group placement, no API calls.
+func (f *Fluence) PreBindPreFlight(
+	ctx context.Context,
+	state fwk.CycleState,
+	pod *corev1.Pod,
+	nodeName string,
+) (*fwk.PreBindPreFlightResult, *fwk.Status) {
+	f.mu.Lock()
+	backend := f.placement[groupKey(pod)].Backend
+	f.mu.Unlock()
+	if backend == "" {
+		return nil, fwk.NewStatus(fwk.Skip)
+	}
+	return nil, fwk.NewStatus(fwk.Success)
+}
+
+// PreBind writes the backend Fluxion allocated for this pod's group onto the pod
+// as the annotation placement.BackendAnnotation. The mutating webhook has
+// already wired a downward-API env (QRMI_BACKEND) that reads this annotation, so
+// the container sees the backend as an ordinary env var. Container env cannot be
+// patched after creation, which is why the value travels via an annotation.
+func (f *Fluence) PreBind(
+	ctx context.Context,
+	state fwk.CycleState,
+	pod *corev1.Pod,
+	nodeName string,
+) *fwk.Status {
+	f.mu.Lock()
+	backend := f.placement[groupKey(pod)].Backend
+	f.mu.Unlock()
+	if backend == "" {
+		return fwk.NewStatus(fwk.Success) // nothing to do; PreBindPreFlight skips these
+	}
+
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, placement.BackendAnnotation, backend)
+	_, err := f.handle.ClientSet().CoreV1().Pods(pod.Namespace).Patch(
+		ctx, pod.Name, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
+	if err != nil {
+		return fwk.AsStatus(fmt.Errorf("stamp backend annotation: %w", err))
+	}
+	return fwk.NewStatus(fwk.Success)
+}
+
+// groupPods returns the pods belonging to the same native PodGroup as pod
+// (spec.schedulingGroup.podGroupName). That field is not label-selectable, so we
+// list the namespace and filter in code. A pod with no scheduling group is its
+// own group of one.
 func (f *Fluence) groupPods(pod *corev1.Pod) ([]corev1.Pod, error) {
-	group := pod.Labels[placement.PodGroupLabel]
+	group := placement.PodGroupName(pod)
 	if group == "" {
-		// Singleton pod: treat it as its own group of one.
 		return []corev1.Pod{*pod}, nil
 	}
-	sel := labels.SelectorFromSet(labels.Set{placement.PodGroupLabel: group})
 	list, err := f.handle.SharedInformerFactory().Core().V1().Pods().Lister().
-		Pods(pod.Namespace).List(sel)
+		Pods(pod.Namespace).List(labels.Everything())
 	if err != nil {
 		return nil, err
 	}
 	out := make([]corev1.Pod, 0, len(list))
 	for _, p := range list {
-		out = append(out, *p)
+		if placement.PodGroupName(p) == group {
+			out = append(out, *p)
+		}
 	}
 	return out, nil
 }
 
 // groupKey is the cache key for a pod's group (namespace-scoped).
 func groupKey(pod *corev1.Pod) string {
-	if g := pod.Labels[placement.PodGroupLabel]; g != "" {
+	if g := placement.PodGroupName(pod); g != "" {
 		return pod.Namespace + "/" + g
 	}
 	return pod.Namespace + "/" + pod.Name

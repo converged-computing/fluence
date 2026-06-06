@@ -6,8 +6,10 @@ package cluster
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/converged-computing/fluence/pkg/jgf"
+	"github.com/converged-computing/fluence/pkg/placement"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/yaml"
 )
@@ -94,6 +96,31 @@ func BuildGraph(nodes []corev1.Node, opts Options) ([]byte, error) {
 	return b.JSON()
 }
 
+// FluxionResourceNames returns the distinct extended-resource names a device
+// plugin should advertise for a set of quantum backends. It uses the SAME
+// type-derivation rule as AddQuantum — each backend is a `qpu`, and a backend
+// with num_qubits > 0 contributes `qubit` — so the device plugin's advertised
+// resources and the graph's resource types are derived from one config and
+// cannot drift. Names are prefixed with placement.FluxionResourcePrefix so they
+// match what the scheduler strips off a pod request.
+func FluxionResourceNames(backends []QuantumBackend) []string {
+	types := map[string]bool{}
+	if len(backends) > 0 {
+		types["qpu"] = true
+	}
+	for _, b := range backends {
+		if b.NumQubits > 0 {
+			types["qubit"] = true
+		}
+	}
+	names := make([]string, 0, len(types))
+	for t := range types {
+		names = append(names, placement.FluxionResourcePrefix+t)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // AddQuantum injects a qgateway under the cluster with one qpu vertex per
 // backend. Exposed so a graph built elsewhere can be augmented the same way.
 func AddQuantum(b *jgf.Builder, cluster *jgf.Vertex, backends []QuantumBackend) {
@@ -108,11 +135,18 @@ func AddQuantum(b *jgf.Builder, cluster *jgf.Vertex, backends []QuantumBackend) 
 		if be.Vendor != "" {
 			props["vendor"] = be.Vendor
 		}
-		b.AddChild(gw, "qpu", "qpu", jgf.Options{
+		qpu := b.AddChild(gw, "qpu", "qpu", jgf.Options{
 			Name:       be.Name,
 			Exclusive:  true,
 			Properties: props,
 		})
+		// Model qubits as a counted child so a request for N qubits matches a
+		// backend with at least that many (Fluxion count matching is >=). This
+		// is how the numeric "at least N qubits" ask is expressed without a
+		// numeric constraint (RFC 31 properties are boolean tags, not >=).
+		if be.NumQubits > 0 {
+			b.AddChild(qpu, "qubit", "qubit", jgf.Options{Size: int64(be.NumQubits)})
+		}
 	}
 }
 
