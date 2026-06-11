@@ -109,6 +109,14 @@ func (f *FluxionGraph) MatchAllocateSpec(spec string) (quantum.MatchAllocateRequ
 	return request, nil
 }
 
+// Cancel frees a previously match-allocated jobid in the resource graph. It is
+// idempotent: cancelling an unknown jobid is not treated as an error (noent_ok),
+// so a double-cancel (e.g. a redelivered informer event) is harmless.
+func (f *FluxionGraph) Cancel(jobid uint64) error {
+	fmt.Printf("   🌀 Cancel jobid: %d\n", jobid)
+	return f.cli.Cancel(int64(jobid), true)
+}
+
 // Satisfy determines if we can satisfy
 func (f *FluxionGraph) Satisfy(specFile string) (bool, error) {
 	fmt.Printf("   🌀 Request: %s\n", specFile)

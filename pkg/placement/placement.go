@@ -21,6 +21,12 @@ const (
 	// backend for a pod. The mutating webhook wires a downward-API env
 	// (QRMI_BACKEND) that reads this annotation.
 	BackendAnnotation = "fluence.flux-framework.org/backend"
+
+	// JobIDAnnotation records the Fluxion allocation (jobid) for a scheduled
+	// group. It is written onto the owning object — the PodGroup for a gang, or
+	// the pod itself for an ungrouped pod — so the allocation can be cancelled
+	// when that object is deleted, and replayed on scheduler restart.
+	JobIDAnnotation = "fluence.flux-framework.org/jobid"
 )
 
 // PodGroupName returns the native (Kubernetes 1.36) scheduling-group name a pod
