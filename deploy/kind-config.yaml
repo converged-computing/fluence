@@ -14,6 +14,7 @@ nodes:
         kind: ClusterConfiguration
         apiServer:
           extraArgs:
+            # Turn on the alpha API group + the API itself.
             - name: runtime-config
               value: "scheduling.k8s.io/v1alpha2=true"
             - name: feature-gates
@@ -22,5 +23,13 @@ nodes:
           extraArgs:
             - name: feature-gates
               value: "GenericWorkload=true,GangScheduling=true"
+        controllerManager:
+          extraArgs:
+            # The podgroup-protection-controller (which removes the
+            # scheduling.k8s.io/podgroup-protection finalizer once a PodGroup's
+            # pods are gone) is gated on GenericWorkload. Without this, PodGroup
+            # deletion hangs on the finalizer forever.
+            - name: feature-gates
+              value: "GenericWorkload=true"
   - role: worker
   - role: worker
