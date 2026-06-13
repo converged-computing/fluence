@@ -125,7 +125,8 @@ spec:
       containers:
         - name: fluence
           image: ghcr.io/converged-computing/fluence:latest
-          imagePullPolicy: Never
+          # Uncomment for development or if loaded into kind
+          # imagePullPolicy: Never
           command:
             - /bin/fluence
             - --config=/etc/fluence/scheduler-config.yaml
