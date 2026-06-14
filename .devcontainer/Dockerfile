@@ -75,7 +75,9 @@ RUN groupadd -g ${USER_GID} ${USERNAME} && \
 
 # This branch of flux-sched has the bindings we need!
 RUN ln -s /usr/local/go/bin/go /usr/bin/go && \
-    git clone https://github.com/flux-framework/flux-sched /opt/flux-sched && \
+    export FLUX_SCHED_VERSION=0.53.0 && \
+    git clone -b implement-reapi-cli-update-allocate https://github.com/vsoch/flux-sched /opt/flux-sched && \    
+    # git clone -b https://github.com/flux-framework/flux-sched /opt/flux-sched && \
     cd /opt/flux-sched && \
     export WITH_GO=yes && \
     ./configure --prefix=/usr && \

@@ -34,6 +34,11 @@ test-graph: ## Matcher tests (needs flux-sched)
 	CGO_ENABLED=1 CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" \
 	  go test ./pkg/graph/...
 
+.PHONY: test-restore
+test-restore:
+	CGO_ENABLED=1 CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" \
+	  go run ./cmd/recovery-probe -graph ./examples/test/cluster.jgf -spec ./examples/test/jobspec-cpu.yaml
+
 .PHONY: image
 image: ## Build the scheduler container image
 	docker build -t $(IMG) .
