@@ -1,0 +1,19 @@
+# Classical spec (2 cores). Cores aren't exclusive and there are 2 of them, so
+# this exercises the round-trip but step 4 may re-match against spare capacity;
+# use qpu-jobspec.yaml for the unambiguous exclusive PASS signal.
+version: 9999
+resources:
+  - type: slot
+    count: 1
+    label: default
+    with:
+      - type: core
+        count: 2
+attributes:
+  system:
+    duration: 3600
+tasks:
+  - command: [""]
+    slot: default
+    count:
+      per_slot: 1

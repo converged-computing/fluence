@@ -117,6 +117,25 @@ func (f *FluxionGraph) Cancel(jobid uint64) error {
 	return f.cli.Cancel(int64(jobid), true)
 }
 
+// UpdateAllocate replays a previously returned allocation R into the freshly
+// built graph under the given jobid, marking exactly the vertices named in R as
+// allocated — no re-matching, no guessing. This is how a scheduler restart
+// restores prior state: persist (jobid, R) when the allocation is made, rebuild
+// the graph (empty of allocations) on startup, then UpdateAllocate each
+// surviving allocation. R must be the rv1 form (with the scheduling key); the
+// jobid is preserved, so a later Cancel(jobid) still frees it.
+func (f *FluxionGraph) UpdateAllocate(jobid uint64, R string) error {
+	fmt.Printf("   🌀 UpdateAllocate (replay) jobid: %d\n", jobid)
+	at, overhead, rOut, err := f.cli.UpdateAllocate(int(jobid), R)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("  Time at  : %d\n", at)
+	fmt.Printf("  Overhead : %.6f seconds\n", overhead)
+	_ = rOut
+	return nil
+}
+
 // Satisfy determines if we can satisfy
 func (f *FluxionGraph) Satisfy(specFile string) (bool, error) {
 	fmt.Printf("   🌀 Request: %s\n", specFile)
