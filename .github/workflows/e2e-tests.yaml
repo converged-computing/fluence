@@ -1,0 +1,89 @@
+name: e2e
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KIND_VERSION: v0.32.0
+  NODE_IMAGE: kindest/node:v1.36.1
+  IMAGE: ghcr.io/converged-computing/fluence:latest
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build fluence image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Install kind directly so the version is authoritative (the action wrapper
+      # may bundle an older kind that emits a v1beta3 kubeadm config, which cannot
+      # parse the v1beta4 list-form extraArgs in deploy/kind-config.yaml).
+      - name: Install kind ${{ env.KIND_VERSION }}
+        run: |
+          curl -fsSLo ./kind "https://kind.sigs.k8s.io/dl/${KIND_VERSION}/kind-linux-amd64"
+          chmod +x ./kind && sudo mv ./kind /usr/local/bin/kind
+          kind version
+          which kind
+
+      - name: Create kind cluster
+        run: |
+          kind create cluster --name fluence \
+            --image "${NODE_IMAGE}" \
+            --config deploy/kind-config.yaml \
+            --wait 120s
+          kubectl cluster-info --context kind-fluence
+
+      - name: Load image into kind
+        run: kind load docker-image "${IMAGE}" --name fluence
+
+      - name: Deploy fluence (base)
+        run: |
+          kubectl apply -f deploy/fluence.yaml
+          kubectl rollout status -n kube-system deployment/fluence --timeout=180s
+
+      - name: E2E - classical gang
+        run: bash test/e2e/01-classical-gang.sh
+
+      - name: Deploy quantum add-on
+        run: |
+          kubectl apply -f deploy/fluence-resources.yaml
+          kubectl apply -f deploy/device-plugin.yaml
+          kubectl rollout restart -n kube-system deployment/fluence
+          kubectl rollout status  -n kube-system deployment/fluence --timeout=180s
+          for i in $(seq 1 60); do
+            kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable}{"\n"}{end}' \
+              | grep -q 'fluxion.flux-framework.org/qpu' && break
+            sleep 2
+          done
+
+      - name: E2E - quantum placement
+        run: bash test/e2e/02-quantum-placement.sh
+
+      - name: E2E - restart recovery (no double-book)
+        run: bash test/e2e/03-restart-recovery.sh
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl get events -A --sort-by=.lastTimestamp | tail -60 || true
+          kubectl logs -n kube-system deployment/fluence --tail=200 || true
