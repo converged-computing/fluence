@@ -20,9 +20,7 @@ RUN wget -q https://go.dev/dl/go1.26.0.linux-amd64.tar.gz \
 ENV PATH=$PATH:/usr/local/go/bin
 
 # flux-sched (Fluxion) with the Go reapi bindings -> /usr; build tree at /opt/flux-sched
-#RUN git clone https://github.com/flux-framework/flux-sched /opt/flux-sched \
-RUN git clone -b implement-reapi-cli-update-allocate https://github.com/vsoch/flux-sched /opt/flux-sched \
- && export FLUX_SCHED_VERSION=0.53.0 \
+RUN git clone https://github.com/flux-framework/flux-sched /opt/flux-sched \
  && cd /opt/flux-sched && export WITH_GO=yes && ./configure --prefix=/usr \
  && mkdir build && cd build && cmake ../ && cd ../ && make -j"$(nproc)" && make install
 ENV FLUX_SCHED_ROOT=/opt/flux-sched

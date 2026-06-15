@@ -117,11 +117,7 @@ func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error
 	}
 	_ = tmp.Close()
 
-	// rv1 (full writer, with the scheduling key) is a superset of jgf: its
-	// scheduling key is the same JGF vertex subgraph we parse for placement, and
-	// it carries the execution view flux uses to replay an allocation on restart.
-	// This is the format we persist and feed back to UpdateAllocate for recovery.
-	matcher := &graph.FluxionGraph{MatchFormat: "rv1"}
+	matcher := &graph.FluxionGraph{MatchFormat: "jgf"}
 	matcher.Init(tmp.Name(), os.Getenv("FLUENCE_MATCH_POLICY"), "")
 
 	f := &Fluence{
