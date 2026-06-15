@@ -139,6 +139,7 @@ device plugin that advertises them:
 
 ```bash
 kubectl apply -f deploy/fluence-resources.yaml
+kubectl apply -f deploy/device-plugin.yaml
 # The scheduler reads its resources config at startup, so restart it to pick up
 # the quantum vertices:
 kubectl rollout restart deployment/fluence -n kube-system

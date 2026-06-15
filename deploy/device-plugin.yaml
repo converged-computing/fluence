@@ -1,0 +1,44 @@
+---
+# Device plugin: advertises the exotic Fluxion resource types (derived from the
+# resources config above) on every node, so pods can request them via resources
+# and NodeResourcesFit is satisfied.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluence-deviceplugin
+  namespace: kube-system
+  labels: {app: fluence-deviceplugin}
+spec:
+  selector:
+    matchLabels: {app: fluence-deviceplugin}
+  template:
+    metadata:
+      labels: {app: fluence-deviceplugin}
+    spec:
+      priorityClassName: system-node-critical
+      tolerations:
+        - operator: Exists   # run on every node, including tainted/control-plane
+      containers:
+        - name: deviceplugin
+          image: ghcr.io/converged-computing/fluence:latest
+          imagePullPolicy: Never
+          command: ["/bin/fluence-deviceplugin"]
+          env:
+            - name: FLUENCE_RESOURCES
+              value: /etc/fluence/resources.yaml
+            - name: FLUENCE_RESOURCE_CAPACITY
+              value: "1000"
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+            - name: resources
+              mountPath: /etc/fluence
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+        - name: resources
+          configMap:
+            name: fluence-resources
