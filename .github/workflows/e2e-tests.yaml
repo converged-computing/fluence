@@ -1,0 +1,109 @@
+name: e2e
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  KIND_VERSION: v0.32.0
+  IMAGE: ghcr.io/converged-computing/fluence:latest
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      #- name: Set up Docker Buildx
+      #  uses: docker/setup-buildx-action@v3
+
+     # - name: Build fluence image
+     #   uses: docker/build-push-action@v6
+     #   with:
+     #     context: .
+     #     file: ./Dockerfile
+     #     push: false
+     #     load: true
+     #     tags: ${{ env.IMAGE }}
+     #     cache-from: type=gha
+     #     cache-to: type=gha,mode=max
+      - name: Create k8s Kind Cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          version: v0.32.0              # Define your custom KinD CLI version here
+          node_image: kindest/node:v1.36.1
+          config: ./deploy/kind-config.yaml
+          
+      - name: Free Disk Space (Ubuntu)
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h
+          
+          # Remove large software runtimes and tools
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          
+          # Clean package caches
+          sudo apt-get clean          
+          echo "=== Disk space after cleanup ==="
+          df -h
+
+      - name: Deploy fluence (base)
+        run: |
+          kubectl apply -f deploy/fluence-test.yaml
+          kubectl rollout status -n kube-system deployment/fluence --timeout=180s
+          POD=$(kubectl -n kube-system get pods -l app=fluence -o name | head -1)
+          kubectl -n kube-system exec "${POD#pod/}" -- ls /tmp/
+          kubectl -n kube-system logs "${POD#pod/}"
+          kubectl -n kube-system exec "${POD#pod/}" -- /bin/bash -c "cat /tmp/fluence-graph-*.json"
+          kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{": cpu="}{.status.allocatable.cpu}{" mem="}{.status.allocatable.memory}{"\n"}{end}'
+         
+      - name: E2E - classical gang
+        run: bash test/e2e/01-classical-gang.sh
+
+      - name: Deploy quantum add-on
+        run: |
+          # Includes the device plugin and oriented to testing container
+          kubectl apply -f deploy/fluence-resources-test.yaml
+          kubectl rollout restart -n kube-system deployment/fluence
+          kubectl rollout status  -n kube-system deployment/fluence --timeout=60s
+          for i in $(seq 1 60); do
+            kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable}{"\n"}{end}'
+            kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable}{"\n"}{end}' | grep -q 'fluxion.flux-framework.org/qpu' && break
+            sleep 1
+          done
+          POD=$(kubectl -n kube-system get pods -l app=fluence -o name | head -1)
+          kubectl -n kube-system exec "${POD#pod/}" -- /bin/bash -c "cat /tmp/fluence-graph-*.json"
+
+      - name: Wait for webhook
+        run: |
+
+          # wait for the deployment AND for the caBundle to be populated on the webhook config
+          kubectl -n kube-system rollout status deployment/fluence-webhook --timeout=120s
+          for i in $(seq 1 30); do
+            cab=$(kubectl get mutatingwebhookconfiguration fluence-webhook \
+                  -o jsonpath='{.webhooks[0].clientConfig.caBundle}' 2>/dev/null)
+            [ -n "$cab" ] && break
+            sleep 2
+          done
+          # let TLS serving settle after caBundle patch
+          sleep 3 
+
+      - name: E2E - quantum placement
+        run: bash test/e2e/02-quantum-placement.sh
+
+      #- name: E2E - restart recovery (no double-book)
+      #  run: bash test/e2e/03-restart-recovery.sh
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide
+          kubectl logs -n kube-system deployment/fluence

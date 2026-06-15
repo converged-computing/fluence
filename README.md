@@ -2,6 +2,8 @@
 
 ![img/fluence.png](img/fluence.png)
 
+🚧 **UNDER DEVELOPMENT** 🚧 not ready for production use! I rolled back features since the recorded demo, and am going to add them back with proper testing. I have not finished this yet, but anticipate later in the week of 6/16/2026. Thank you for your patience! -@vsoch
+
 A Kubernetes scheduler plugin that places **pod groups** (and individual pods)
 by matching them against a [Fluxion](https://github.com/flux-framework/flux-sched)
 (flux-sched) resource graph built from the live cluster.

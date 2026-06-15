@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 const containment = "containment"
@@ -188,6 +189,10 @@ type Doc struct {
 func (b *Builder) Doc() Doc {
 	d := Doc{}
 	for _, v := range b.vertices {
+		// Skip the control plane
+		if strings.Contains(v.name, "control-plane") {
+			continue
+		}
 		d.Graph.Nodes = append(d.Graph.Nodes, node{ID: v.key, Metadata: metadata{v: v}})
 	}
 	for _, e := range b.edges {
