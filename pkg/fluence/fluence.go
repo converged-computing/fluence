@@ -106,6 +106,7 @@ func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error
 	if err != nil {
 		return nil, fmt.Errorf("build resource graph: %w", err)
 	}
+	fmt.Printf("Fluence resource graph:\n%s", jgfBytes)
 
 	// FluxionGraph.Init reads from a file path, so stage the generated graph.
 	tmp, err := os.CreateTemp("", "fluence-graph-*.json")
@@ -168,17 +169,21 @@ func (f *Fluence) PreFilter(
 		return nil, fwk.AsStatus(err)
 	}
 
+	fmt.Printf("Attempting to match:\n%s\n", specYAML)
 	f.matcherMu.Lock()
 	req, err := f.matcher.MatchAllocateSpec(specYAML)
 	f.matcherMu.Unlock()
 	if err != nil {
+		fmt.Printf("FAIL Match failed: %s\n", err)
 		return nil, fwk.NewStatus(fwk.Unschedulable, fmt.Sprintf("fluxion match failed: %v", err))
 	}
 	place, err := placement.PlacementFromAllocation(req.Allocation)
 	if err != nil {
+		fmt.Printf("FAIL Placement failed: %s\n", err)
 		return nil, fwk.AsStatus(err)
 	}
 	if len(place.Nodes) == 0 && place.Backend == "" {
+		fmt.Println("FAIL No nodes")
 		return nil, fwk.NewStatus(fwk.Unschedulable, "fluxion returned no allocation")
 	}
 	// A quantum-only allocation has a Backend but no Nodes (a qpu vertex lives

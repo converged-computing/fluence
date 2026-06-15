@@ -65,25 +65,15 @@ func podResources(p *corev1.Pod) map[string]int {
 			}
 		}
 	}
-	// A pod that requested no exotic (non-classical) resource still needs at
-	// least one core to land on.
-	if !hasExotic(counts) && counts["core"] == 0 {
+
+	// Every pod runs on a node, so always request at least one core, even when the
+	// pod also asks for an exotic resource (qpu/qubit). Without this a qpu-only pod
+	// produces a slot with no compute and Fluxion allocates a bare backend with no
+	// node to land the pod on.
+	if counts["core"] == 0 {
 		counts["core"] = 1
 	}
 	return counts
-}
-
-// hasExotic reports whether counts contains any non-classical type (i.e. one
-// that came through the Fluxion prefix, like qpu/qubit).
-func hasExotic(counts map[string]int) bool {
-	for t := range counts {
-		switch t {
-		case "core", "memory", "gpu":
-		default:
-			return true
-		}
-	}
-	return false
 }
 
 // JobspecForGroup builds a Fluxion jobspec for a whole pod group: a slot per pod

@@ -43,6 +43,20 @@ test-restore:
 image: ## Build the scheduler container image
 	docker build -t $(IMG) .
 
+.PHONY: test-image
+test-image: ## Build the scheduler container image
+	docker build -t $(IMG)-test .
+	docker push $(IMG)-test
+
+.PHONY: test-image-deploy
+test-image-deploy: test-image
+	kubectl patch podgroup training -n default --type=merge -p '{"metadata":{"finalizers":null}}' || true
+	kubectl delete deployments --all
+	kubectl delete pods --all
+	kubectl delete -f deploy/fluence-test.yaml
+	kubectl delete pods --all
+
+
 .PHONY: deploy
 deploy: ## Install RBAC + scheduler into kube-system
 	kubectl apply -f deploy/fluence.yaml

@@ -124,7 +124,9 @@ spec:
       serviceAccountName: fluence
       containers:
         - name: fluence
-          image: ghcr.io/converged-computing/fluence:latest
+          image: ghcr.io/converged-computing/fluence:test
+          # Allows for kind load
+          # imagePullPolicy: Never
           command:
             - /bin/fluence
             - --config=/etc/fluence/scheduler-config.yaml
@@ -171,7 +173,9 @@ spec:
       serviceAccountName: fluence
       containers:
         - name: webhook
-          image: ghcr.io/converged-computing/fluence:latest
+          image: ghcr.io/converged-computing/fluence:test
+          # Allows for kind load
+          # imagePullPolicy: Never
           command: ["/bin/fluence-webhook"]
           ports:
             - containerPort: 8443
