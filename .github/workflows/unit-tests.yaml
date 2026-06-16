@@ -1,0 +1,34 @@
+name: unit-tests
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # fluence-base carries flux-sched 0.52.0 (installed to /usr) + Go, so the
+    # cgo matcher (pkg/graph) links and `make test` can build every package.
+    container:
+      image: ghcr.io/converged-computing/fluence-base:latest
+    env:
+      FLUX_SCHED_ROOT: /opt/flux-sched
+      LD_LIBRARY_PATH: /usr/lib:/opt/flux-sched/resource:/opt/flux-sched/resource/reapi/bindings:/opt/flux-sched/resource/libjobspec
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Versions
+        run: |
+          export PATH=$PATH:/usr/local/go/bin
+          go version
+          ls /opt/flux-sched >/dev/null && echo "flux-sched present"
+
+      - name: Go test
+        run: |
+          export PATH=$PATH:/usr/local/go/bin
+          make test

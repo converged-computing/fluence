@@ -31,6 +31,14 @@ import (
 // KubeSchedulerConfiguration.
 const Name = "Fluence"
 
+// matcher is the subset of *graph.FluxionGraph the plugin depends on. Declaring
+// it as an interface lets tests inject a fake (the real matcher is cgo/flux and
+// cannot run in a unit test). *graph.FluxionGraph satisfies this.
+type matcher interface {
+	MatchAllocateSpec(spec string) (graph.MatchAllocateRequest, error)
+	Cancel(jobid uint64) error
+}
+
 // groupAlloc is the in-memory record of a group's Fluxion allocation. It is a
 // rebuildable, within-lifetime memo: its job is race-free "match once per group"
 // dedup on the scheduling path (the durable record is the jobid annotation on
@@ -47,7 +55,7 @@ type groupAlloc struct {
 // delegated to the native PodGroup API; Fluence only decides placement.
 type Fluence struct {
 	handle  fwk.Handle
-	matcher *graph.FluxionGraph
+	matcher matcher
 
 	// matcherMu serializes all access to the cgo Fluxion client, which is not
 	// thread-safe. Match runs on the (sequential) scheduling path; Cancel runs in
@@ -122,12 +130,12 @@ func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error
 	// scheduling key is the same JGF vertex subgraph we parse for placement, and
 	// it carries the execution view flux uses to replay an allocation on restart.
 	// This is the format we persist and feed back to UpdateAllocate for recovery.
-	matcher := &graph.FluxionGraph{MatchFormat: "rv1"}
-	matcher.Init(tmp.Name(), os.Getenv("FLUENCE_MATCH_POLICY"), "")
+	fluxion := &graph.FluxionGraph{MatchFormat: "rv1"}
+	fluxion.Init(tmp.Name(), os.Getenv("FLUENCE_MATCH_POLICY"), "")
 
 	f := &Fluence{
 		handle:    h,
-		matcher:   matcher,
+		matcher:   fluxion,
 		placement: map[string]groupAlloc{},
 	}
 	f.registerCancelHandlers()
@@ -299,48 +307,52 @@ func (f *Fluence) patchPodAnnotation(ctx context.Context, ns, name, key, val str
 }
 
 // registerCancelHandlers watches PodGroup and Pod deletions and frees the
-// corresponding Fluxion allocation. Grouped pods are ignored by the pod handler
-// (their allocation lives on the PodGroup); ungrouped pods are handled there.
-// The framework has no deletion extension point, so this is informer-driven.
+// corresponding Fluxion allocation. The framework has no deletion extension
+// point, so this is informer-driven.
 func (f *Fluence) registerCancelHandlers() {
 	sif := f.handle.SharedInformerFactory()
-
 	_, _ = sif.Scheduling().V1alpha2().PodGroups().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		DeleteFunc: func(obj interface{}) {
-			pg, ok := obj.(*schedv1a2.PodGroup)
-			if !ok {
-				tomb, ok := obj.(cache.DeletedFinalStateUnknown)
-				if !ok {
-					return
-				}
-				if pg, ok = tomb.Obj.(*schedv1a2.PodGroup); !ok {
-					return
-				}
-			}
-			f.cancelGroup(pg.Namespace+"/"+pg.Name, pg.Annotations)
-		},
+		DeleteFunc: f.onPodGroupDeleted,
 	})
-
 	_, _ = sif.Core().V1().Pods().Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		DeleteFunc: func(obj interface{}) {
-			pod, ok := obj.(*corev1.Pod)
-			if !ok {
-				tomb, ok := obj.(cache.DeletedFinalStateUnknown)
-				if !ok {
-					return
-				}
-				if pod, ok = tomb.Obj.(*corev1.Pod); !ok {
-					return
-				}
-			}
-			// Grouped pods' allocation is owned by the PodGroup; only the
-			// PodGroup's deletion frees it. Act on ungrouped pods only.
-			if placement.PodGroupName(pod) != "" {
-				return
-			}
-			f.cancelGroup(pod.Namespace+"/"+pod.Name, pod.Annotations)
-		},
+		DeleteFunc: f.onPodDeleted,
 	})
+}
+
+// onPodGroupDeleted frees the gang's allocation when its PodGroup is deleted.
+func (f *Fluence) onPodGroupDeleted(obj interface{}) {
+	pg, ok := obj.(*schedv1a2.PodGroup)
+	if !ok {
+		tomb, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			return
+		}
+		if pg, ok = tomb.Obj.(*schedv1a2.PodGroup); !ok {
+			return
+		}
+	}
+	f.cancelGroup(pg.Namespace+"/"+pg.Name, pg.Annotations)
+}
+
+// onPodDeleted frees an ungrouped pod's allocation when the pod is deleted.
+// Grouped pods are ignored: their allocation is owned by the PodGroup and is
+// freed only when the PodGroup is deleted (freeing it on a single pod's delete
+// would release the whole gang's resources while its other pods still run).
+func (f *Fluence) onPodDeleted(obj interface{}) {
+	pod, ok := obj.(*corev1.Pod)
+	if !ok {
+		tomb, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			return
+		}
+		if pod, ok = tomb.Obj.(*corev1.Pod); !ok {
+			return
+		}
+	}
+	if placement.PodGroupName(pod) != "" {
+		return
+	}
+	f.cancelGroup(pod.Namespace+"/"+pod.Name, pod.Annotations)
 }
 
 // cancelGroup frees the allocation for a deleted owning object. The jobid comes

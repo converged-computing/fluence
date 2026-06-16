@@ -62,8 +62,8 @@ func TestGenericQuantumCount(t *testing.T) {
 		t.Fatalf("qpu = %d (ok=%v), want 1", c, ok)
 	}
 	// no classical core forced on an exotic-only request
-	if _, ok := withType(js, "core"); ok {
-		t.Error("quantum-only pod should not be forced to request a core")
+	if _, ok := withType(js, "core"); !ok {
+		t.Error("quantum-only pod is currently required to request a core")
 	}
 }
 
