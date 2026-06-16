@@ -7,9 +7,9 @@ COPY . .
 RUN CGO_ENABLED=1 \
     CGO_CFLAGS="-I/opt/flux-sched" \
     CGO_LDFLAGS="-L/opt/flux-sched/resource -L/opt/flux-sched/resource/libjobspec -L/opt/flux-sched/resource/reapi/bindings -lresource -ljobspec_conv -lreapi_cli -lflux-idset -lstdc++ -lczmq -ljansson -lhwloc -lboost_system -lflux-hostlist -lboost_graph -lyaml-cpp" \
-    go build -ldflags '-w' -o /bin/fluence ./cmd/fluence && \
-    CGO_ENABLED=0 go build -ldflags '-w' -o /bin/fluence-deviceplugin ./cmd/deviceplugin && \
-    CGO_ENABLED=0 go build -ldflags '-w' -o /bin/fluence-webhook ./cmd/webhook
+    go build -ldflags '-w' -o /bin/fluence ./cmd/fluence 
+RUN CGO_ENABLED=0 go build -ldflags '-w' -o /bin/fluence-deviceplugin ./cmd/deviceplugin
+RUN CGO_ENABLED=0 go build -ldflags '-w' -o /bin/fluence-webhook ./cmd/webhook
 
 FROM fluxrm/flux-core:noble AS runtime
 

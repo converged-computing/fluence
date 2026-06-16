@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/converged-computing/fluence/pkg/graph"
 	"github.com/converged-computing/fluence/pkg/jobspec"
-	"github.com/converged-computing/fluence/pkg/quantum"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -126,11 +126,11 @@ type Placement struct {
 
 // PlacementFromAllocation parses a JGF allocation into node and backend names.
 func PlacementFromAllocation(alloc string) (Placement, error) {
-	nodes, err := quantum.NamesFromAllocation(alloc, "node")
+	nodes, err := graph.NamesFromAllocation(alloc, "node")
 	if err != nil {
 		return Placement{}, err
 	}
-	backends, _ := quantum.NamesFromAllocation(alloc, "qpu")
+	backends, _ := graph.NamesFromAllocation(alloc, "qpu")
 	p := Placement{Nodes: nodes}
 	if len(backends) > 0 {
 		p.Backend = backends[0]

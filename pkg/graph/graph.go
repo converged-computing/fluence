@@ -1,10 +1,11 @@
+//go:build cgo
+
 package graph
 
 import (
 	"errors"
 	"os"
 
-	"github.com/converged-computing/fluence/pkg/quantum"
 	"github.com/flux-framework/flux-sched/resource/reapi/bindings/go/src/fluxcli"
 
 	"fmt"
@@ -28,7 +29,7 @@ type FluxionGraph struct {
 	// MatchFormat selects the Fluxion allocation output format ("simple",
 	// "jgf", "rv1", ...). Empty defaults to "simple" (human-readable tree).
 	// Set it to "jgf" when you need to parse the allocation programmatically
-	// (e.g. quantum.BackendFromAllocation).
+	// (e.g. BackendFromAllocation).
 	MatchFormat string
 }
 
@@ -79,10 +80,10 @@ func (f *FluxionGraph) Init(confFile string, matchPolicy string, label string) {
 }
 
 // MatchAllocate reads a jobspec file (YAML or JSON) and match-allocates it.
-func (f *FluxionGraph) MatchAllocate(specFile string) (quantum.MatchAllocateRequest, error) {
+func (f *FluxionGraph) MatchAllocate(specFile string) (MatchAllocateRequest, error) {
 	spec, err := os.ReadFile(specFile)
 	if err != nil {
-		return quantum.MatchAllocateRequest{}, errors.New("Error reading jobspec")
+		return MatchAllocateRequest{}, errors.New("Error reading jobspec")
 	}
 	fmt.Printf("   🌀 Request (file): %s\n", specFile)
 	return f.MatchAllocateSpec(string(spec))
@@ -91,8 +92,8 @@ func (f *FluxionGraph) MatchAllocate(specFile string) (quantum.MatchAllocateRequ
 // MatchAllocateSpec match-allocates against a jobspec provided as a string.
 // Fluxion accepts YAML or JSON; use the jobspec package to convert/normalize if
 // needed before calling this.
-func (f *FluxionGraph) MatchAllocateSpec(spec string) (quantum.MatchAllocateRequest, error) {
-	request := quantum.MatchAllocateRequest{}
+func (f *FluxionGraph) MatchAllocateSpec(spec string) (MatchAllocateRequest, error) {
+	request := MatchAllocateRequest{}
 
 	reserved, allocated, time_at, overhead, jobid, err := f.cli.MatchAllocate(false, spec)
 	if err != nil {

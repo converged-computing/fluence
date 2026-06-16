@@ -7,6 +7,7 @@
 
 FLUX_SCHED_ROOT ?= /opt/flux-sched
 IMG             ?= ghcr.io/converged-computing/fluence:latest
+TEST_IMG	?= ghcr.io/converged-computing/fluence:test
 
 # cgo flags for the scheduler binary: flux-sched only.
 CGO_CFLAGS  = -I$(FLUX_SCHED_ROOT)
@@ -25,14 +26,9 @@ build: ## Build all binaries (scheduler needs flux-sched; helpers are pure Go)
 	CGO_ENABLED=0 go build -o bin/fluence-webhook ./cmd/webhook
 
 .PHONY: test
-test: ## Pure-Go unit tests (no flux, no k8s scheduler libs, no cluster)
-	go test ./pkg/jgf/... ./pkg/cluster/... ./pkg/jobspec/... ./pkg/placement/... \
-	  ./pkg/quantum/... ./pkg/webhook/... ./pkg/deviceplugin/...
-
-.PHONY: test-graph
-test-graph: ## Matcher tests (needs flux-sched)
+test:
 	CGO_ENABLED=1 CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" \
-	  go test ./pkg/graph/...
+	go test ./...
 
 .PHONY: test-restore
 test-restore:
@@ -45,8 +41,8 @@ image: ## Build the scheduler container image
 
 .PHONY: test-image
 test-image: ## Build the scheduler container image
-	docker build -t $(IMG)-test .
-	docker push $(IMG)-test
+	docker build -t $(TEST_IMG)-test .
+	docker push $(TEST_IMG)
 
 .PHONY: test-image-deploy
 test-image-deploy: test-image
