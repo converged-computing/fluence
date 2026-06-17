@@ -17,6 +17,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/converged-computing/fluence/pkg/cluster"
 	"github.com/converged-computing/fluence/pkg/webhook"
 
 	"k8s.io/client-go/kubernetes"
@@ -66,8 +67,27 @@ func main() {
 	cancel()
 	log.Printf("patched caBundle on MutatingWebhookConfiguration %q", cfgName)
 
+	// The env contract is the union of attribute keys across the configured
+	// backends (plus FLUXION_BACKEND), so the set of injected env vars tracks the
+	// config automatically. Loaded from the same FLUENCE_RESOURCES the scheduler
+	// and device plugin use; absent/unset means just FLUXION_BACKEND.
+	var attrKeys []string
+	if path := os.Getenv("FLUENCE_RESOURCES"); path != "" {
+		if data, rerr := os.ReadFile(path); rerr == nil {
+			rc, perr := cluster.LoadResourcesConfig(data)
+			if perr != nil {
+				log.Fatalf("parse resources config %s: %v", path, perr)
+			}
+			attrKeys = cluster.AttributeKeys(rc.Resources)
+		} else {
+			log.Printf("no resources config at %s (%v); injecting FLUXION_BACKEND only", path, rerr)
+		}
+	}
+	mutator := &webhook.Mutator{AttributeKeys: attrKeys}
+	log.Printf("[fluence-webhook] env contract injected into fluxion pods: %v", mutator.EnvVarNames())
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/mutate", webhook.Handler)
+	mux.HandleFunc("/mutate", mutator.Handler)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 
 	srv := &http.Server{

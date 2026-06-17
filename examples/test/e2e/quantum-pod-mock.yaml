@@ -13,7 +13,7 @@ spec:
     - name: sampler
       image: busybox
       # Print the injected backend, then idle so we can assert on it.
-      command: ["sh", "-c", "echo BACKEND=$QRMI_BACKEND; sleep 3600"]
+      command: ["sh", "-c", "echo BACKEND=$FLUXION_BACKEND; sleep 3600"]
       resources:
         requests:
           fluxion.flux-framework.org/qpu: "1"

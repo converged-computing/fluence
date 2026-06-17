@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/converged-computing/fluence/pkg/cluster"
 	"github.com/converged-computing/fluence/pkg/graph"
+	"github.com/converged-computing/fluence/pkg/jobspec"
 	"github.com/converged-computing/fluence/pkg/placement"
 
 	corev1 "k8s.io/api/core/v1"
@@ -46,16 +49,24 @@ type matcher interface {
 // the graph itself is rebuilt fresh on restart.
 type groupAlloc struct {
 	place placement.Placement
-	jobid uint64
+	// jobids are the Fluxion allocations backing this group — one per match
+	// (compute, plus one per requested virtual device). All are held (duration 0)
+	// and cancelled together; the group is all-or-nothing across them.
+	jobids []uint64
 }
 
 // Fluence is a scheduler-framework plugin that places whole pod groups by
 // matching them against a flux-sched resource graph built from the live cluster
-// (plus any configured quantum resources). Gang/all-or-nothing semantics are
+// (plus any configured virtual resources). Gang/all-or-nothing semantics are
 // delegated to the native PodGroup API; Fluence only decides placement.
 type Fluence struct {
 	handle  fwk.Handle
 	matcher matcher
+
+	// knownDevices is the set of virtual resource types the graph models (suffix
+	// only, e.g. "qpu"), used to reject a pod requesting a device that does not
+	// exist before issuing a match. Empty when no resources are configured.
+	knownDevices map[string]bool
 
 	// matcherMu serializes all access to the cgo Fluxion client, which is not
 	// thread-safe. Match runs on the (sequential) scheduling path; Cancel runs in
@@ -63,7 +74,7 @@ type Fluence struct {
 	matcherMu sync.Mutex
 
 	mu sync.Mutex
-	// placement maps a group key to its allocation (nodes, backend, jobid).
+	// placement maps a group key to its allocation (nodes, backend, jobids).
 	placement map[string]groupAlloc
 }
 
@@ -94,15 +105,22 @@ func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error
 	// the resources add-on is applied, so a missing file is classical-only, not
 	// fatal.
 	opts := cluster.Options{}
+	knownDevices := map[string]bool{}
 	if path := os.Getenv("FLUENCE_RESOURCES"); path != "" {
 		raw, err := os.ReadFile(path)
 		switch {
 		case err == nil:
-			qc, err := cluster.LoadQuantumConfig(raw)
+			rc, err := cluster.LoadResourcesConfig(raw)
 			if err != nil {
 				return nil, err
 			}
-			opts.Quantum = qc.Backends
+			opts.Resources = rc.Resources
+			// The requestable device types are the FluxionResourceNames, minus
+			// the prefix — the suffixes a pod requests as
+			// fluxion.flux-framework.org/<type>.
+			for _, name := range cluster.FluxionResourceNames(rc.Resources) {
+				knownDevices[strings.TrimPrefix(name, placement.FluxionResourcePrefix)] = true
+			}
 		case os.IsNotExist(err):
 			// No resources config mounted -> classical-only graph.
 		default:
@@ -114,7 +132,9 @@ func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error
 	if err != nil {
 		return nil, fmt.Errorf("build resource graph: %w", err)
 	}
-	fmt.Printf("Fluence resource graph:\n%s", jgfBytes)
+	fmt.Println("[fluence] === RESOURCE GRAPH (knownDevices=" +
+		fmt.Sprintf("%v", keysOf(knownDevices)) + ") ===")
+	fmt.Println(string(jgfBytes))
 
 	// FluxionGraph.Init reads from a file path, so stage the generated graph.
 	tmp, err := os.CreateTemp("", "fluence-graph-*.json")
@@ -130,13 +150,20 @@ func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error
 	// scheduling key is the same JGF vertex subgraph we parse for placement, and
 	// it carries the execution view flux uses to replay an allocation on restart.
 	// This is the format we persist and feed back to UpdateAllocate for recovery.
-	fluxion := &graph.FluxionGraph{MatchFormat: "rv1"}
+	// jgf match format: emits every allocated vertex (with properties) as a graph,
+	// regardless of type. rv1 cannot represent our allocations — its R_lite is
+	// built from core/gpu "reducer" children under a node, so a virtual allocation
+	// that bottoms out in nodes (no cores) serializes to an empty R. jgf has no
+	// such assumption and is exactly what PlacementFromAllocation parses (node
+	// vertices + their composed marker/attribute properties).
+	fluxion := &graph.FluxionGraph{MatchFormat: "jgf"}
 	fluxion.Init(tmp.Name(), os.Getenv("FLUENCE_MATCH_POLICY"), "")
 
 	f := &Fluence{
-		handle:    h,
-		matcher:   fluxion,
-		placement: map[string]groupAlloc{},
+		handle:       h,
+		matcher:      fluxion,
+		knownDevices: knownDevices,
+		placement:    map[string]groupAlloc{},
 	}
 	f.registerCancelHandlers()
 	return f, nil
@@ -168,43 +195,112 @@ func (f *Fluence) PreFilter(
 		return nil, fwk.AsStatus(err)
 	}
 
-	js, err := placement.JobspecForGroup(group, pods)
-	if err != nil {
-		return nil, fwk.AsStatus(err)
-	}
-	specYAML, err := js.YAML()
+	specs, err := placement.JobspecsForGroup(group, pods, f.knownDevices)
 	if err != nil {
 		return nil, fwk.AsStatus(err)
 	}
 
-	fmt.Printf("Attempting to match:\n%s\n", specYAML)
-	f.matcherMu.Lock()
-	req, err := f.matcher.MatchAllocateSpec(specYAML)
-	f.matcherMu.Unlock()
-	if err != nil {
-		fmt.Printf("FAIL Match failed: %s\n", err)
-		return nil, fwk.NewStatus(fwk.Unschedulable, fmt.Sprintf("fluxion match failed: %v", err))
+	// Run every jobspec as an independent held allocation (duration 0). The group
+	// is all-or-nothing: if any match fails, cancel the ones that already
+	// succeeded so we never hold a partial allocation (e.g. compute without its
+	// device, or vice versa).
+	place, jobids, status := f.matchGroup(specs)
+	if !status.IsSuccess() {
+		return nil, status
 	}
-	place, err := placement.PlacementFromAllocation(req.Allocation)
-	if err != nil {
-		fmt.Printf("FAIL Placement failed: %s\n", err)
-		return nil, fwk.AsStatus(err)
-	}
-	if len(place.Nodes) == 0 && place.Backend == "" {
-		fmt.Println("FAIL No nodes")
-		return nil, fwk.NewStatus(fwk.Unschedulable, "fluxion returned no allocation")
-	}
-	// A quantum-only allocation has a Backend but no Nodes (a qpu vertex lives
-	// under the qgateway, not under a compute node). That is valid — the backend
-	// is reachable from any node — so Filter imposes no node constraint then.
 
 	f.mu.Lock()
-	f.placement[group] = groupAlloc{place: place, jobid: req.Number}
+	f.placement[group] = groupAlloc{place: place, jobids: jobids}
 	f.mu.Unlock()
 
 	// The jobid (for cancel) and any backend (for the webhook env) are written
 	// onto the owning object in PreBind, the commit phase.
 	return nil, fwk.NewStatus(fwk.Success)
+}
+
+// matchGroup runs each jobspec as an independent held Fluxion allocation and
+// combines them into one placement. It is all-or-nothing: on the first failure
+// it cancels every allocation already made and returns an Unschedulable status,
+// so the group never holds a partial set (compute without its device, etc.).
+//
+// The combined placement unions the per-match results: the compute match
+// supplies the bind nodes, a device match supplies the backend identity. (The
+// per-match split of nodes vs backend is PlacementFromAllocation's job; here we
+// merge.)
+func (f *Fluence) matchGroup(specs []*jobspec.Jobspec) (placement.Placement, []uint64, *fwk.Status) {
+	var combined placement.Placement
+	var jobids []uint64
+
+	for i, js := range specs {
+		// Render the jobspec as JSON, not YAML. flux-sched's RFC 31 constraint
+		// parser requires each property to be a QUOTED scalar (it checks the YAML
+		// tag == "!"); sigs.k8s.io/yaml emits property strings unquoted
+		// (e.g. "- virtual=false"), which the parser rejects with "non-string
+		// property specified" -> the whole match fails with -1. JSON always quotes
+		// strings, and JSON is valid YAML input to the matcher, so this is the
+		// reliable encoding for jobspecs that carry constraints.
+		spec, err := js.JSON()
+		if err != nil {
+			f.cancelJobids(jobids)
+			return placement.Placement{}, nil, fwk.AsStatus(err)
+		}
+
+		fmt.Println(fmt.Sprintf("[fluence] === MATCH %d/%d: submitting jobspec to fluxion ===", i+1, len(specs)))
+		fmt.Println(spec)
+
+		f.matcherMu.Lock()
+		req, err := f.matcher.MatchAllocateSpec(spec)
+		f.matcherMu.Unlock()
+		if err != nil {
+			log.Printf("[fluence] MATCH %d/%d FAILED: %v — rolling back jobids %v",
+				i+1, len(specs), err, jobids)
+			f.cancelJobids(jobids)
+			return placement.Placement{}, nil, fwk.NewStatus(
+				fwk.Unschedulable, fmt.Sprintf("fluxion match failed: %v", err))
+		}
+
+		fmt.Println(fmt.Sprintf("[fluence] MATCH %d/%d allocated jobid %d; fluxion R:", i+1, len(specs), req.Number))
+		fmt.Println(req.Allocation)
+
+		place, err := placement.PlacementFromAllocation(req.Allocation)
+		if err != nil {
+			log.Printf("[fluence] MATCH %d/%d placement-parse FAILED: %v", i+1, len(specs), err)
+			f.cancelJobids(append(jobids, req.Number))
+			return placement.Placement{}, nil, fwk.AsStatus(err)
+		}
+		fmt.Println(fmt.Sprintf("[fluence] MATCH %d/%d parsed: nodes=%v backend=%q attrs=%v",
+			i+1, len(specs), place.Nodes, place.Backend, place.BackendAttributes))
+
+		jobids = append(jobids, req.Number)
+		combined.Nodes = append(combined.Nodes, place.Nodes...)
+		if place.Backend != "" {
+			combined.Backend = place.Backend
+			combined.BackendAttributes = place.BackendAttributes
+		}
+	}
+
+	if len(combined.Nodes) == 0 && combined.Backend == "" {
+		log.Printf("[fluence] match produced no nodes and no backend — unschedulable")
+		f.cancelJobids(jobids)
+		return placement.Placement{}, nil, fwk.NewStatus(
+			fwk.Unschedulable, "fluxion returned no allocation")
+	}
+	fmt.Println(fmt.Sprintf("[fluence] GROUP MATCHED: nodes=%v backend=%q attrs=%v jobids=%v",
+		combined.Nodes, combined.Backend, combined.BackendAttributes, jobids))
+	return combined, jobids, fwk.NewStatus(fwk.Success)
+}
+
+// cancelJobids frees a set of held allocations, used to unwind a partial group
+// match. Cancel is idempotent and best-effort; errors are logged, not returned.
+func (f *Fluence) cancelJobids(jobids []uint64) {
+	for _, id := range jobids {
+		f.matcherMu.Lock()
+		err := f.matcher.Cancel(id)
+		f.matcherMu.Unlock()
+		if err != nil {
+			log.Printf("fluence: rollback cancel of jobid %d failed: %v", id, err)
+		}
+	}
 }
 
 // PreFilterExtensions: no add/remove pod handling for now.
@@ -275,21 +371,32 @@ func (f *Fluence) PreBind(
 		return fwk.NewStatus(fwk.Success) // not ours; nothing to record
 	}
 
-	if err := f.recordJobID(ctx, pod, alloc.jobid); err != nil {
-		return fwk.AsStatus(fmt.Errorf("record jobid: %w", err))
+	if err := f.recordJobIDs(ctx, pod, alloc.jobids); err != nil {
+		return fwk.AsStatus(fmt.Errorf("record jobids: %w", err))
 	}
 	if alloc.place.Backend != "" {
-		if err := f.patchPodAnnotation(ctx, pod.Namespace, pod.Name, placement.BackendAnnotation, alloc.place.Backend); err != nil {
-			return fwk.AsStatus(fmt.Errorf("stamp backend annotation: %w", err))
+		// Stamp the backend name and all matched attributes in one patch. The
+		// webhook injects a normalized env per annotation so the workload reads
+		// exactly what it matched (backend + region/qubits/...).
+		ann := map[string]string{placement.BackendAnnotation: alloc.place.Backend}
+		for k, v := range alloc.place.BackendAttributes {
+			ann[placement.AttributeAnnotationPrefix+k] = v
+		}
+		log.Printf("[fluence] group %s -> backend %q attrs %v (nodes %v, jobids %v)",
+			groupKey(pod), alloc.place.Backend, alloc.place.BackendAttributes,
+			alloc.place.Nodes, alloc.jobids)
+		if err := f.patchPodAnnotations(ctx, pod.Namespace, pod.Name, ann); err != nil {
+			return fwk.AsStatus(fmt.Errorf("stamp backend annotations: %w", err))
 		}
 	}
 	return fwk.NewStatus(fwk.Success)
 }
 
-// recordJobID writes the jobid annotation onto the allocation's owning object: a
-// grouped pod's allocation belongs to the PodGroup; an ungrouped pod owns its own.
-func (f *Fluence) recordJobID(ctx context.Context, pod *corev1.Pod, jobid uint64) error {
-	val := strconv.FormatUint(jobid, 10)
+// recordJobIDs writes the jobid annotation (a comma-separated list of all the
+// group's held allocations) onto the allocation's owning object: a grouped pod's
+// allocation belongs to the PodGroup; an ungrouped pod owns its own.
+func (f *Fluence) recordJobIDs(ctx context.Context, pod *corev1.Pod, jobids []uint64) error {
+	val := formatJobIDs(jobids)
 	if group := placement.PodGroupName(pod); group != "" {
 		patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, placement.JobIDAnnotation, val)
 		_, err := f.handle.ClientSet().SchedulingV1alpha2().PodGroups(pod.Namespace).Patch(
@@ -299,8 +406,36 @@ func (f *Fluence) recordJobID(ctx context.Context, pod *corev1.Pod, jobid uint64
 	return f.patchPodAnnotation(ctx, pod.Namespace, pod.Name, placement.JobIDAnnotation, val)
 }
 
+// keysOf returns the keys of a set, for logging.
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// formatJobIDs renders jobids as a comma-separated string for the annotation.
+func formatJobIDs(jobids []uint64) string {
+	parts := make([]string, len(jobids))
+	for i, id := range jobids {
+		parts[i] = strconv.FormatUint(id, 10)
+	}
+	return strings.Join(parts, ",")
+}
+
 func (f *Fluence) patchPodAnnotation(ctx context.Context, ns, name, key, val string) error {
-	patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, key, val)
+	return f.patchPodAnnotations(ctx, ns, name, map[string]string{key: val})
+}
+
+// patchPodAnnotations merges a set of annotations onto a pod in one patch.
+func (f *Fluence) patchPodAnnotations(ctx context.Context, ns, name string, ann map[string]string) error {
+	parts := make([]string, 0, len(ann))
+	for k, v := range ann {
+		parts = append(parts, fmt.Sprintf("%q:%q", k, v))
+	}
+	patch := fmt.Sprintf(`{"metadata":{"annotations":{%s}}}`, strings.Join(parts, ","))
 	_, err := f.handle.ClientSet().CoreV1().Pods(ns).Patch(
 		ctx, name, types.MergePatchType, []byte(patch), metav1.PatchOptions{})
 	return err
@@ -355,12 +490,12 @@ func (f *Fluence) onPodDeleted(obj interface{}) {
 	f.cancelGroup(pod.Namespace+"/"+pod.Name, pod.Annotations)
 }
 
-// cancelGroup frees the allocation for a deleted owning object. The jobid comes
+// cancelGroup frees all allocations for a deleted owning object. The jobids come
 // from the object's annotation (the durable source of truth); if it is missing
 // (e.g. deleted between PreFilter and PreBind, before the annotation was
 // written) it falls back to the in-memory memo by key. Cancel is idempotent.
 func (f *Fluence) cancelGroup(key string, ann map[string]string) {
-	jobid, ok := parseJobID(ann)
+	jobids, ok := parseJobIDs(ann)
 	if !ok {
 		f.mu.Lock()
 		alloc, found := f.placement[key]
@@ -368,14 +503,16 @@ func (f *Fluence) cancelGroup(key string, ann map[string]string) {
 		if !found {
 			return // never scheduled by us, or already cancelled
 		}
-		jobid = alloc.jobid
+		jobids = alloc.jobids
 	}
 
-	f.matcherMu.Lock()
-	err := f.matcher.Cancel(jobid)
-	f.matcherMu.Unlock()
-	if err != nil {
-		log.Printf("fluence: cancel jobid %d for %s failed: %v", jobid, key, err)
+	for _, jobid := range jobids {
+		f.matcherMu.Lock()
+		err := f.matcher.Cancel(jobid)
+		f.matcherMu.Unlock()
+		if err != nil {
+			log.Printf("fluence: cancel jobid %d for %s failed: %v", jobid, key, err)
+		}
 	}
 
 	f.mu.Lock()
@@ -383,16 +520,29 @@ func (f *Fluence) cancelGroup(key string, ann map[string]string) {
 	f.mu.Unlock()
 }
 
-func parseJobID(ann map[string]string) (uint64, bool) {
+// parseJobIDs reads the comma-separated jobid annotation into a slice. Returns
+// false when the annotation is absent or empty.
+func parseJobIDs(ann map[string]string) ([]uint64, bool) {
 	raw := ann[placement.JobIDAnnotation]
 	if raw == "" {
-		return 0, false
+		return nil, false
 	}
-	jobid, err := strconv.ParseUint(raw, 10, 64)
-	if err != nil {
-		return 0, false
+	var jobids []uint64
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		id, err := strconv.ParseUint(part, 10, 64)
+		if err != nil {
+			return nil, false
+		}
+		jobids = append(jobids, id)
 	}
-	return jobid, true
+	if len(jobids) == 0 {
+		return nil, false
+	}
+	return jobids, true
 }
 
 // groupPods returns the pods belonging to the same native PodGroup as pod

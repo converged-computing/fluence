@@ -40,11 +40,11 @@ func main() {
 
 	var names []string
 	if data, err := os.ReadFile(cfgPath); err == nil {
-		qc, perr := cluster.LoadQuantumConfig(data)
+		rc, perr := cluster.LoadResourcesConfig(data)
 		if perr != nil {
 			log.Fatalf("parse resources config %s: %v", cfgPath, perr)
 		}
-		names = cluster.FluxionResourceNames(qc.Backends)
+		names = cluster.FluxionResourceNames(rc.Resources)
 		log.Printf("derived %d resource(s) from %s: %v", len(names), cfgPath, names)
 	} else {
 		log.Printf("no resources config at %s (%v); advertising nothing", cfgPath, err)

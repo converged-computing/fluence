@@ -2,123 +2,270 @@
 
 ![img/fluence.png](img/fluence.png)
 
-🚧 **UNDER DEVELOPMENT** 🚧 not ready for production use! I rolled back features since the recorded demo, and am going to add them back with proper testing. I have not finished this yet, but anticipate later in the week of 6/16/2026. Thank you for your patience! -@vsoch
+🚧 **UNDER DEVELOPMENT** 🚧 Thank you for your patience! -@vsoch
 
-A Kubernetes scheduler plugin that places **pod groups** (and individual pods)
-by matching them against a [Fluxion](https://github.com/flux-framework/flux-sched)
-(flux-sched) resource graph built from the live cluster.
+A Kubernetes scheduler plugin that places **pod groups** (and individual pods) by
+matching them against a [Fluxion](https://github.com/flux-framework/flux-sched)
+resource graph built from the live cluster. Beyond ordinary compute, it can model
+**arbitrary virtual resources** — quantum backends today, anything with a count
+and some attributes tomorrow — as first-class graph vertices that can be filtered
+on and whose attributes are injected into the workload's environment. Nothing in
+the design is quantum-specific: a resource `type` is an opaque string throughout.
 
-This is an update from [flux-k8s](https://github.com/flux-framework/flux-k8s)
-that uses the native PodGroup and optionally allows for scheduling
-against arbitrary resources such as **quantum resources** modeled in the same graph. 
-I am also improving the design by not requiring a sidecar for fluence, and not
-requiring the `kubernetes-sigs/scheduler-plugins` dependency. We use native Gang
-scheduling provided by Kubernetes. 
-
-For quantum resource modeling, we start from the prototype proven out in
+This updates [flux-k8s](https://github.com/flux-framework/flux-k8s) to use the
+native Kubernetes PodGroup (Gang) API — no sidecar, and no
+`kubernetes-sigs/scheduler-plugins` dependency. The quantum resource model is
+proven out first in
 [fluxion-quantum](https://github.com/converged-computing/fluxion-quantum).
 
-## How it works
-
-### Gang Scheduling
-
-Gang semantics (all-or-nothing) come from the native `PodGroup` API. Fluence is
-responsible only for **placement**:
-
-1. **Discover** — on startup fluence lists cluster nodes and turns their
-   cpu/memory/gpu capacity into a Fluxion JGF resource graph
-   (`pkg/cluster` + `pkg/jgf`). If a resources config is provided (via
-   `FLUENCE_RESOURCES`), its entries (e.g. quantum backends) are injected as
-   `qpu`/`qubit` vertices. With no config the graph is classical-only.
-2. **Match** — when the first pod of a group hits `PreFilter`, fluence builds a
-   Fluxion jobspec for the whole gang (`pkg/placement.JobspecForGroup`), asks the
-   matcher to allocate (`pkg/graph.FluxionGraph.MatchAllocateSpec`), and parses
-   the allocation into node and backend names (`PlacementFromAllocation`).
-3. **Place** — `Filter` permits each pod only on its allocated node. (A
-   quantum-only pod allocates a `qpu` but no node — the backend is a remote API
-   any node can reach — so fluence imposes no node constraint in that case.)
-4. **Hand off** — for a quantum pod, `PreBind` records the allocated backend on
-   the pod as the `fluence.flux-framework.org/backend` annotation. The mutating
-   webhook (installed with the base) injects a downward-API env so the container
-   reads it as `QRMI_BACKEND` with no boilerplate in the manifest.
-
-### Design Choices
-
-While Quantum resources are this first target, notably we should be able to support
-any arbitrary resource in the graph. I decided that a pod can request a graph resource generically
-e.g., `fluxion.flux-framework.org/<type>` (like `.../qpu: "1"`) and that becomes a jobspec count
-of `<type>`. To support this, we deploy a **device plugin** that can advertise these virtual 
-types on every node. We need to do this because of the in-tree `NodeResourcesFit` endpoint. 
-If we do not have the device plugin, this call will not be satisfied. Note that
-this device plugin will return True for any resources it sees added to the Fluxion resource graph,
-but is not actually involved with scheduling. Fluxion does the real matching.
+## How the pieces fit together
 
 ```console
-nodes (kubectl get nodes) ──┐
-                            ├─► JGF resource graph ─► Fluxion match ─► node + backend placement
-fluence-resources ConfigMap ┘
+ resources.yaml --+ 
+   +--------------+-------------------------------+
+   v              v                               v
+scheduler     device plugin                    webhook
+(pkg/fluence)  (advertises types)           (injects env)
+   |
+   |  build graph                (pkg/cluster -> pkg/jgf)
+   |  generate jobspecs          (pkg/placement -> pkg/jobspec)
+   |  match + cancel via Fluxion (pkg/graph, cgo)
+   |  parse allocation           (pkg/graph, pkg/placement)
+   v
+ pod bound to a node + backend/attrs stamped as annotations
+                          |
+                          v
+           webhook-injected env reads those annotations
 ```
 
-I am also choosing to keep credentials and qrmi interactions on the level of the application.
-I am not comfortable with the design of an operator holding any kind of credential or being
-responsible for managing calls with qrmi in a multi-tenant environment. Finally, since
-there are (and will continue to be) a lot of environment variables that I do not want 
-to place on the user to define, we have a webhook to handle this. We can combine an annotation
-added with the webhook with a PreBind call to define the annotation to orchestrate that.
+A single `resources.yaml` is the source of truth, read by three independent
+processes: the **scheduler** builds the graph and validates requests, the **device
+plugin** advertises the requestable types as Kubernetes extended resources (so
+pods requesting them pass admission), and the **webhook** computes the
+environment-variable contract it injects into workloads. Note that the device
+plugin can be removed from the design, assuming we do not need a `NodeResourcesFit` check.
+I have kept it for now anticipating future cases where we have node-specific resources.
+For now, the counts can be viewed as API quotas.
+
+For one pod group the scheduler generates one or more jobspecs, match-allocates
+each against the graph (all-or-nothing), combines them into a placement, binds the
+pod, and stamps the matched backend + attributes as annotations. The webhook has
+already injected downward-API env vars that read those annotations, so the
+workload sees which backend and attributes it got.
+
+## The resource model
+
+**Every allocatable thing in the graph is a `node`-typed vertex** -- physical
+compute nodes and every level of every virtual resource alike. This is deliberate:
+Fluxion's RFC 31 property constraints (the only attribute-based pruning the matcher
+offers) apply **only** to `node` and `storage_node` vertices, so modeling a virtual
+resource as a node is what makes it filterable.
+
+- **Physical nodes** carry `virtual=false`.
+- **Virtual resources** carry `virtual=true`, a `class=<type>` for the resource's
+  own type *and each descendant type in its subtree*, and their attributes.
+
+Property values are encoded into the property **key** (`virtual=true`,
+`class=qpu`, `region=us-east-1`) because RFC 31 matching is key-presence only -- it
+never compares the value half. A resource is selected by a `class=<type>`
+constraint, so any level is independently requestable (`class=qdevice`,
+`class=qpu`, `class=qubit`). Descendant classes are propagated **up** so a global
+constraint selecting a nested type isn't pruned at an ancestor node on the way
+down; attributes are inherited **down** (a child gets its parent's attributes
+unless it overrides or clears a key) so an attribute filter combined with a nested
+class still reaches the target.
+
+Because a jobspec carries one global constraint, compute (`virtual=false`) and a
+virtual resource (`virtual=true`) cannot be co-selected in one match -- one would
+prune the other. A pod needing both produces **two** match-allocate calls, held
+together all-or-nothing.
+
+---
+
+## Components
+
+### `pkg/jgf` — JGF graph builder
+
+Builds the JSON Graph Format document Fluxion consumes. `AddRoot`/`AddChild`
+create vertices with `Options` (size, unit, exclusivity, rank, properties).
+`Options.NodeProperties` are RFC 31 resource properties (a nested `properties`
+object the matcher prunes against); `Options.Properties` are descriptive metadata
+only. `Options.Rank` sets a real execution rank — every `node` vertex needs one.
+
+### `pkg/cluster` — config schema and graph construction
+
+Parses the resource config and turns it (plus the live cluster nodes) into a graph.
+
+```yaml
+resources:
+  - type: qdevice            # opaque type; the resource's class
+    name: rigetti_cepheus    # vertex name / backend identity
+    parent: cluster          # where it attaches (default "cluster")
+    attributes: aws-east     # inline map OR a reference into the registry below
+    with:                    # recursive children, same schema
+      - type: qpu
+        count: 1
+        with:
+          - type: qubit
+            count: 80
+
+attributes:                  # named attribute-set registry (reuse across backends)
+  aws-east:
+    region: us-east-1
+    connectivity: all-to-all
+```
+
+`LoadResourcesConfig` parses YAML/JSON, resolves attributes (inline or by
+reference) with downward inheritance, and errors on a missing `type`, an unknown
+reference, or a non-empty config that defines no `resources:` (a schema mismatch,
+so it fails loudly instead of building an empty graph). `BuildGraph` emits each
+cluster node as a `virtual=false` node, then appends the resource trees: every
+resource at every depth becomes a `virtual=true` node carrying its class set and
+inherited attributes, on a real rank from a counter shared with the physical
+nodes. `FluxionResourceNames` returns every requestable type (what the device
+plugin advertises); `AttributeKeys` returns the union of attribute keys (the
+webhook's env contract).
+
+### `pkg/jobspec` — jobspec types
+
+The Fluxion jobspec representation (`Jobspec`, `Resource`, `Task`) with YAML/JSON
+round-tripping: a `resources` tree (a `slot` holding the request), an `attributes`
+block (constraint + duration), and `tasks`.
+
+### `pkg/placement` — jobspec generation and allocation parsing
+
+`JobspecsForGroup` turns a pod group into the jobspecs to match:
+
+- Always one **compute** jobspec — a slot per pod holding core/memory/gpu,
+  constrained to `virtual=false`. A classical group produces only this (one match).
+- One **device** jobspec per requested virtual type, requesting a `node`
+  constrained to `virtual=true` + `class=<type>`. The class selects which virtual
+  node; the count comes from the request.
+- Every pod gets at least one core (a device-only pod still needs a host).
+- Every jobspec sets `duration: 0` — held until explicitly cancelled.
+- A request for an unmodeled type is a hard error.
+
+Jobspecs are submitted as **JSON** (not YAML): the constraint parser requires
+quoted property scalars, and JSON always quotes.
+
+`PlacementFromAllocation` classifies an allocation's node vertices by the
+`virtual` marker — `virtual=false`/unmarked are compute bind targets, a
+`virtual=true` node is the backend identity, and its `fluxion.flux-framework.org/`
+properties are decomposed into attributes for env injection. This package also
+owns the shared names: the `fluxion.flux-framework.org/` request prefix, the
+`fluence.flux-framework.org/{backend,jobid,attr-*}` annotations, and the
+`FLUXION_` env prefix.
+
+### `pkg/graph` — Fluxion binding (cgo)
+
+Wraps the cgo matcher (`FluxionGraph`: `Init`, `MatchAllocateSpec`, `Cancel`,
+`Satisfy`) and parses allocations. Fluence uses the **jgf** match format: it emits
+every allocated vertex with its properties regardless of type, so a virtual
+allocation that bottoms out in nodes (no cores) still serializes — which rv1
+cannot. `NodesFromAllocation` returns node vertices with their properties for the
+marker-based classification. This is the only cgo-dependent package, so it gates
+local builds of everything importing it.
+
+### `pkg/fluence` — the scheduler plugin
+
+`New` lists the cluster, loads the config, builds and logs the graph, and inits the
+matcher.
+
+- **PreFilter** runs per group: generate jobspecs, then `matchGroup` runs each as
+  an independently held allocation, **all-or-nothing** — any failure cancels the
+  successes, so the group never holds a partial set.
+- **Filter** permits only the nodes Fluxion assigned.
+- **PreBind** records durable state: the jobids on the owning object (PodGroup for
+  a gang, else the pod) for cancellation, and the matched backend + attributes as
+  annotations the webhook reads.
+- **Cancellation** is informer-driven (no framework delete hook): deleting a
+  PodGroup or ungrouped pod frees its held allocations. The jobid annotation is the
+  durable source of truth; the graph (and allocations) are rebuilt on restart from
+  the same annotations.
+
+Gang semantics are delegated to the native PodGroup API; fluence only places.
+
+### `pkg/deviceplugin` — extended-resource advertisement
+
+Advertises each requestable type (`fluxion.flux-framework.org/<type>`) as a
+counted extended resource, so a pod requesting one passes `NodeResourcesFit`
+admission. The real gating is Fluxion (and the backend's own limits); since a
+virtual backend is reachable from any node, each type is advertised at a large
+ceiling. Types come from the same config as the graph, so they can't drift.
+
+### `pkg/webhook` — environment injection
+
+A mutating webhook that surfaces scheduler-chosen values to a workload. Container
+env is fixed at creation but the match happens after admission, so it injects
+**downward-API** env vars whose values populate later from the annotations PreBind
+writes. The injected set is a **config-derived contract**: `FLUXION_BACKEND` plus
+one `FLUXION_<KEY>` per attribute key across all backends — add an attribute and
+its env var appears, no code change. The webhook self-manages TLS (generates a CA
+and patches its own `caBundle`), so no cert-manager is needed. A vendor-agnostic
+workload reads these normalized names regardless of which backend it matched.
+
+## Commands
+
+- `cmd/fluence` — the scheduler binary (stock kube-scheduler + the plugin).
+- `cmd/deviceplugin` — the extended-resource DaemonSet.
+- `cmd/webhook` — the env-injection webhook.
+- `cmd/recovery-probe` — verifies allocation replay survives a graph rebuild
+  (what a restart does); see `make test-restore`. Note this was implemented but removed because the code in fluxion is only part of a PR branch, and I feel nervous about depending on it.
+
+## Configuration
+
+These are environment variables for fluence.
+
+| Env var | Read by | Meaning |
+|---|---|---|
+| `FLUENCE_RESOURCES` | scheduler, device plugin, webhook | path to `resources.yaml`; absent = classical-only |
+| `FLUENCE_MATCH_POLICY` | scheduler | Fluxion match policy (default `first`) |
+| `FLUENCE_RESOURCE_CAPACITY` | device plugin | per-node ceiling per type (default 1000) |
+
+## Observability
+
+The scheduler logs (prefix `[fluence]`) the full graph and known devices at
+startup and, per match, the submitted jobspec, the raw Fluxion allocation, and the
+parsed placement. The webhook logs (`[fluence-webhook]`) the env contract at
+startup. Because live behavior (cgo matcher, real Kubernetes) can't be fully
+unit-tested, these logs are the primary debugging surface.
 
 ## Build
 
-The scheduler binary links flux-sched (the matcher). It does **not** link QRMI —
-quantum job submission lives in a separate workload container
+The scheduler links flux-sched (the matcher). It does **not** link QRMI or any
+quantum backend — quantum job submission lives in a separate workload container
 ([qrmi-sampler](https://github.com/converged-computing/qrmi-sampler)), not here.
 
 ```bash
 # Inside the .devcontainer (flux-sched at /opt/flux-sched):
-# builds bin/fluence (cgo+flux) + bin/fluence-deviceplugin + bin/fluence-webhook
-make build      
+make build      # bin/fluence (cgo+flux) + bin/fluence-deviceplugin + bin/fluence-webhook
 make test
-
-# Or build the container image (all three binaries):
-make image
+make image      # or build the container image with all three binaries
 ```
 
 ## Deploy
 
-Create a development cluster on a Kubernetes release that supports native gang
-scheduling, with the feature gates enabled:
+Create a cluster on a Kubernetes release with native gang scheduling and the
+feature gates the kind config enables (`GangScheduling`, `GenericWorkload`, the
+`scheduling.k8s.io/v1alpha2` API group):
 
 ```bash
 kind create cluster --image kindest/node:v1.36.1 --config deploy/kind-config.yaml
-```
-
-(See [installing kind](https://kind.sigs.k8s.io/docs/user/quick-start#installing-from-release-binaries).)
-The kind config turns on the `GangScheduling` and `GenericWorkload` feature gates
-and the `scheduling.k8s.io/v1alpha2` API group on the apiserver and scheduler. In
-the future these will likely be enabled by default. 
-
-Load the image (built above) into the cluster:
-
-```bash
 kind load docker-image ghcr.io/converged-computing/fluence:latest
 ```
 
-### 1. Gang Scheduling
-
-Install the **base** scheduler (this is all you need for classical scheduling —
-no device plugin, no quantum):
+### 1. Gang scheduling (classical — all you need for non-quantum)
 
 ```bash
-kubectl apply -f deploy/fluence.yaml
+kubectl apply -f deploy/fluence.yaml   # scheduler, RBAC, and the webhook
 ```
 
-This installs the scheduler, its RBAC, and the mutating webhook. Pods opt in with
-`schedulerName: fluence`; a multi-pod gang adds a `scheduling.k8s.io/pod-group`
-label (a single pod is treated as a group of one and needs no label). Test with a pod group:
+Pods opt in with `schedulerName: fluence`; a multi-pod gang adds a
+`scheduling.k8s.io/pod-group` label (a single pod is a group of one, no label
+needed).
 
 ```bash
 kubectl apply -f examples/podgroup.yaml
-kubectl get pods -o wide
-kubectl get events --field-selector reason=Scheduled
 kubectl get podgroups.scheduling.k8s.io
 ```
 ```console
@@ -126,118 +273,80 @@ NAME       POLICY   WORKLOAD   STATUS      AGE
 training   Gang     <none>     Scheduled   15s
 ```
 
-And a quick cleanup.
+Cleanup:
 
 ```bash
 kubectl patch podgroup training -n default --type=merge -p '{"metadata":{"finalizers":null}}'
 kubectl delete -f examples/podgroup.yaml
 ```
 
-### 2. Quantum
+### 2. Quantum (the resources add-on)
 
-Quantum needs the resources add-on, which supplies the `fluence-resources`
-ConfigMap (the single source of truth for which backends exist) **and** the
-device plugin that advertises them:
+This supplies the `fluence-resources` ConfigMap (the source of truth for which
+backends exist) and the device plugin that advertises them:
 
 ```bash
 kubectl apply -f deploy/fluence-resources.yaml
 kubectl apply -f deploy/device-plugin.yaml
-# The scheduler reads its resources config at startup, so restart it to pick up
-# the quantum vertices:
+# The scheduler and webhook read the config at startup — restart to pick it up:
 kubectl rollout restart deployment/fluence -n kube-system
+kubectl rollout restart deployment/fluence-webhook -n kube-system
 ```
 
-Confirm the device plugin advertised the resources on the nodes:
+Confirm the resources are advertised:
 
 ```bash
 kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.allocatable}{"\n"}{end}' \
   | grep fluxion.flux-framework.org
 ```
-```console
-kind-control-plane	{"cpu":"16","ephemeral-storage":"982292956Ki","fluxion.flux-framework.org/qpu":"1k","fluxion.flux-framework.org/qubit":"1k","hugepages-1Gi":"0","hugepages-2Mi":"0","memory":"61400748Ki","pods":"110"}
-kind-worker	{"cpu":"16","ephemeral-storage":"982292956Ki","fluxion.flux-framework.org/qpu":"1k","fluxion.flux-framework.org/qubit":"1k","hugepages-1Gi":"0","hugepages-2Mi":"0","memory":"61400748Ki","pods":"110"}
-kind-worker2	{"cpu":"16","ephemeral-storage":"982292956Ki","fluxion.flux-framework.org/qpu":"1k","fluxion.flux-framework.org/qubit":"1k","hugepages-1Gi":"0","hugepages-2Mi":"0","memory":"61400748Ki","pods":"110"}
-```
 
-Create the IBM credentials the **workload** uses to submit (in the namespace
-where the workload runs — the scheduler itself never needs them):
+Create the IBM credentials the **workload** uses to submit (the scheduler never
+needs them):
 
 ```bash
-# If you don't have this yet
-curl -fsSL https://clis.cloud.ibm.com/install/linux | sudo sh
 ibmcloud login --apikey <key>
-# 12 for us-east
-```
-```bash
 export IBM_CLOUD_TOKEN=<key>
-export IBM_CLOUD_CRN=$(ibmcloud resource service-instances --service-name quantum-computing --output json | jq -r '.[] | {name: .name, crn: .crn}' | jq -r .crn)
+export IBM_CLOUD_CRN=$(ibmcloud resource service-instances --service-name quantum-computing --output json | jq -r '.[0].crn')
+kubectl create secret generic ibm-quantum -n default \
+  --from-literal=token="$IBM_CLOUD_TOKEN" --from-literal=crn="$IBM_CLOUD_CRN"
 ```
 
-```bash
-kubectl create secret generic ibm-quantum -n default --from-literal=token="$IBM_CLOUD_TOKEN" --from-literal=crn="$IBM_CLOUD_CRN"
-```
-
-Run a single quantum pod. It just requests `fluxion.flux-framework.org/qpu` — no
-group, and no hard-coded backend (the webhook + PreBind supply `QRMI_BACKEND`):
+Run a single quantum pod — it just requests `fluxion.flux-framework.org/qpu`, with
+no hard-coded backend (the webhook + PreBind supply `FLUXION_BACKEND`):
 
 ```bash
 kubectl apply -f examples/quantum-pod.yaml
-kubectl get pod sampler -o wide
 
-# fluence's chosen backend, injected as an environment variable:
+# fluence's chosen backend, also injected as $FLUXION_BACKEND in the container:
 kubectl get pod sampler -o jsonpath='{.metadata.annotations.fluence\.flux-framework\.org/backend}{"\n"}'
 kubectl logs sampler
 ```
 ```console
-kubectl logs sampler -f
 2026/06/06 19:04:38 submitting sampler job to ibm_marrakesh
-{"results": [{"data": {"c": {"samples": ["0x0", "0x1", "0x0", "0x0", "0x1", "0x1", "0x1", "0x1", "0x1", "0x0", "0x0", "0x0", "0x0", "0x1", "0x1", "0x1", "0x1", "0x1", "0x1", "0x1", "0x0", "0x1", "0x0", "0x0", "0x0", "0x1", "0x0", "0x1", "0x0", "0x1", "0x1", "0x0", "0x0", "0x0", "0x0", "0x1", "0x1", "0x1", "0x1", "0x1", "0x1", "0x1", "0x0", "0x0", "0x0", "0x1", "0x0", "0x1", "0x0", "0x0", "0x1", "0x1", "0x1", "0x0", "0x0", "0x0", "0x1", "0x1", "0x1", "0x0", "0x1", "0x1", "0x0", "0x1", "0x0", "0x1", "0x1", "0x1", "0x1", "0x0", "0x0", "0x1", "0x1", "0x1", "0x1", "0x1", "0x1", "0x1", "0x0", "0x0", "0x1", "0x0", "0x1", "0x1", "0x0", "0x1", "0x0", "0x1", "0x1", "0x1", "0x0", "0x0", "0x0", "0x1", "0x1", "0x1", "0x1", "0x0", "0x0", "0x1", "0x0", "0x0", "0x0", "0x0", "0x0", "0x0", "0x1", "0x1", "0x0", "0x1", "0x0", "0x0", "0x1", "0x1", "0x1", "0x1", "0x1", "0x0", "0x1", "0x0", "0x0", "0x0", "0x1", "0x1", "0x1", "0x0", "0x1", "0x1", "0x0", "0x0", "0x1", "0x0", "0x1", "0x0", "0x0", "0x1", "0x0", "0x0", "0x1", "0x1", "0x1", "0x0", "0x1", "0x1", "0x0", "0x0", "0x0", "0x1", "0x1", "0x1", "0x0", "0x1", "0x1", "0x0", "0x0", "0x1", "0x0", "0x1", "0x0", "0x0", "0x0", "0x0", "0x1", "0x1", "0x1", "0x1", "0x1", "0x1", "0x1", "0x0", "0x1", "0x1", "0x1", "0x0", "0x1", "0x1", "0x0", "0x0", "0x0", "0x0", "0x1", "0x0", "0x0", "0x0", "0x0", "0x1", "0x0", "0x0", "0x1", "0x1", "0x1", "0x0", "0x1", "0x0", "0x1", "0x0", "0x1", "0x1", "0x1", "0x1", "0x0", "0x0", "0x1", "0x1", "0x0", "0x1", "0x0", "0x0", "0x0", "0x1", "0x1", "0x1", "0x0", "0x0", "0x0", "0x1", "0x0", "0x0", "0x0", "0x1", "0x0", "0x1", "0x0", "0x0", "0x0", "0x1", "0x1", "0x0", "0x1", "0x0", "0x0", "0x0", "0x1", "0x0", "0x0", "0x1", "0x1", "0x0", "0x0", "0x0", "0x0", "0x0", "0x1", "0x1", "0x1", "0x0", "0x1", "0x1", "0x1", "0x1", "0x1", "0x1", "0x0", "0x0", "0x0", "0x0"], "num_bits": 1}}, "metadata": {"circuit_metadata": {}}}], "metadata": {"execution": {"execution_spans": [[{"date": "2026-06-06T19:04:43.221657"}, {"date": "2026-06-06T19:04:44.372421"}, {"0": [[256], [0, 1], [0, 256]]}]]}, "version": 2}}
+{"results": [ ... samples ... ]}
 2026/06/06 19:04:50 done: 2070 bytes from ibm_marrakesh
 ```
 
-Boum! You will see in the fluence logs that when the pod completes, the fluxion job is cancelled, freeing the resources.
+When the pod completes, fluence cancels the Fluxion allocation, freeing the
+resources (visible in the scheduler logs as `Cancel jobid: N`). Note that I lost access to
+my IBM account so this has not been tested live since mid June.
 
-```bash
-kubectl logs -n kube-system fluence-75d6848778-g4lh6 
-...
-I0610 18:33:05.843325       1 eventhandlers.go:443] "Delete event for scheduled pod" pod="default/sampler"
-   🌀 Cancel jobid: 1
-(env) (base) vanessa@vanessa-ThinkPad-P14s-Gen-4:~/Desktop/Code/fluence$ kubectl get pods
-NAME      READY   STATUS      RESTARTS   AGE
-sampler   0/1     Completed   0          24s
-```
+Submission is **not** done by the scheduler — the workload container holds the
+user's credentials and submits via qrmi-go. Fluence only schedules and hands off
+the backend. (When we control local quantum devices this will change.)
 
-### A note on deletion
+### Notes
 
-When developing/debugging, a PodGroup (or its pods) can hang on delete because of
-finalizers (the workload controller may not be running). Our plugin is designed to handle this,
-and normally it just takes a little time to finish. If you are impatient, you can do:
-
-```bash
-kubectl patch podgroup training -n default --type=merge -p '{"metadata":{"finalizers":null}}'
-```
-
-### Restoring State
-
-The plugin is designed to be able to come up and restore state, meaning we can read in existing groups
-and repopulate the graph. We do that by way of annotating each group with the resources "R" that fluxion returns on a match,
-and then in the case of a restart, we re-populate the graph using this metadata. Here is how to test that.
-
-```bash
-make test-restore
-```
-
-Importantly, submission is **not** done by the scheduler — the workload container holds the
-user's credentials and submits via qrmi-go (job mode on the IBM open plan; see
-fluxion-quantum for that story). Fluence only schedules and hands off the backend.
-When we actually have control of local quantum devices this will be different.
+- **Deletion hangs.** A PodGroup can hang on delete via finalizers if the workload
+  controller isn't running; clear them with the `kubectl patch` above.
+- **State restore.** On restart the plugin repopulates the graph from each group's
+  jobid annotations and re-holds the allocations: `make test-restore`.
 
 ## License
 
-HPCIC DevTools is distributed under the terms of the MIT license.
-All new contributions must be made under this license.
+Distributed under the MIT license; all contributions must be made under it. 
 
-See [LICENSE](LICENSE), [COPYRIGHT](COPYRIGHT), and [NOTICE](NOTICE) for details.
+See [LICENSE](LICENSE), [COPYRIGHT](COPYRIGHT), and [NOTICE](NOTICE).
 
 SPDX-License-Identifier: MIT
 
