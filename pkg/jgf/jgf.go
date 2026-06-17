@@ -29,6 +29,7 @@ type Vertex struct {
 	unit      string
 	exclusive bool
 	props     map[string]any
+	nodeProps map[string]string
 }
 
 // Name is the vertex name (basename + per-type index, or an explicit name).
@@ -61,6 +62,13 @@ type Options struct {
 	// Properties are extra metadata fields merged into the vertex (e.g.
 	// num_qubits, vendor). They are emitted alongside the standard fields.
 	Properties map[string]any
+	// NodeProperties are RFC 31 resource properties, emitted as a nested
+	// "properties" object in the vertex metadata. Unlike Properties (which
+	// flattens descriptive fields into the top level), these populate
+	// resource_t.properties in Fluxion and are what the matcher's constraint
+	// pruning (by_constraint) and queries match against. Keys/values are
+	// strings; a bare tag is value "" (matching is by key presence).
+	NodeProperties map[string]string
 }
 
 // AddRoot creates a top-level vertex (typically the cluster).
@@ -98,6 +106,7 @@ func (b *Builder) add(parent *Vertex, typ, basename string, opts Options) *Verte
 		unit:      opts.Unit,
 		exclusive: opts.Exclusive,
 		props:     opts.Properties,
+		nodeProps: opts.NodeProperties,
 	}
 	if parent == nil {
 		v.path = "/" + name
@@ -139,6 +148,16 @@ func (m metadata) MarshalJSON() ([]byte, error) {
 		if _, reserved := out[k]; !reserved {
 			out[k] = val
 		}
+	}
+	// RFC 31 resource properties: a nested object Fluxion loads into
+	// resource_t.properties (what constraint pruning and queries match on).
+	// Emitted only when present so vertices without properties are unchanged.
+	if len(m.v.nodeProps) > 0 {
+		props := make(map[string]string, len(m.v.nodeProps))
+		for k, val := range m.v.nodeProps {
+			props[k] = val
+		}
+		out["properties"] = props
 	}
 	// Stable key order for deterministic output.
 	keys := make([]string, 0, len(out))
