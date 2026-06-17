@@ -37,3 +37,39 @@ func TestNamesFromAllocationRV1(t *testing.T) {
 		t.Fatalf("rv1 qpu parse: %q %v", be, err)
 	}
 }
+
+// markedAlloc has node vertices carrying composed virtual markers plus a qpu
+// child — the shape PlacementFromAllocation classifies.
+const markedAlloc = `{"graph":{"nodes":[
+  {"metadata":{"type":"node","name":"kind-worker","properties":{"virtual=false":""}}},
+  {"metadata":{"type":"node","name":"rigetti","properties":{"virtual=true":"","class=qdevice":""}}},
+  {"metadata":{"type":"qpu","name":"qpu0"}}]}}`
+
+// NodesFromAllocation returns only node-typed vertices, each with its composed
+// property keys, so callers classify by the virtual marker rather than the type.
+func TestNodesFromAllocation(t *testing.T) {
+	nodes, err := NodesFromAllocation(markedAlloc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 2 {
+		t.Fatalf("got %d node vertices, want 2 (qpu is not a node)", len(nodes))
+	}
+
+	byName := map[string]AllocatedNode{}
+	for _, n := range nodes {
+		byName[n.Name] = n
+	}
+	if !byName["kind-worker"].HasProperty("virtual=false") {
+		t.Errorf("kind-worker missing virtual=false: %v", byName["kind-worker"].Properties)
+	}
+	if !byName["rigetti"].HasProperty("virtual=true") {
+		t.Errorf("rigetti missing virtual=true: %v", byName["rigetti"].Properties)
+	}
+	if !byName["rigetti"].HasProperty("class=qdevice") {
+		t.Errorf("rigetti missing class=qdevice: %v", byName["rigetti"].Properties)
+	}
+	if byName["kind-worker"].HasProperty("virtual=true") {
+		t.Error("kind-worker should not carry virtual=true")
+	}
+}

@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strings"
 )
 
 const containment = "containment"
@@ -30,6 +29,7 @@ type Vertex struct {
 	exclusive bool
 	props     map[string]any
 	nodeProps map[string]string
+	rank      int64
 }
 
 // Name is the vertex name (basename + per-type index, or an explicit name).
@@ -69,6 +69,13 @@ type Options struct {
 	// pruning (by_constraint) and queries match against. Keys/values are
 	// strings; a bare tag is value "" (matching is by key presence).
 	NodeProperties map[string]string
+	// Rank is the flux execution rank for a node-typed vertex. The rv1 match
+	// writer builds its R_lite/nodelist from node vertices keyed by rank, and
+	// cannot emit a vertex whose rank is -1, so every node (physical or virtual)
+	// needs a real, distinct, non-negative rank. Nil leaves the default (-1),
+	// which is correct for non-node vertices (cluster, core, memory, ...) that
+	// never appear in the nodelist.
+	Rank *int64
 }
 
 // AddRoot creates a top-level vertex (typically the cluster).
@@ -107,6 +114,10 @@ func (b *Builder) add(parent *Vertex, typ, basename string, opts Options) *Verte
 		exclusive: opts.Exclusive,
 		props:     opts.Properties,
 		nodeProps: opts.NodeProperties,
+		rank:      -1,
+	}
+	if opts.Rank != nil {
+		v.rank = *opts.Rank
 	}
 	if parent == nil {
 		v.path = "/" + name
@@ -137,7 +148,7 @@ func (m metadata) MarshalJSON() ([]byte, error) {
 		"name":      m.v.name,
 		"id":        m.v.id,
 		"uniq_id":   m.v.uniqID,
-		"rank":      -1,
+		"rank":      m.v.rank,
 		"exclusive": m.v.exclusive,
 		"unit":      m.v.unit,
 		"size":      m.v.size,
@@ -199,19 +210,15 @@ type graph struct {
 	Edges []edge `json:"edges"`
 }
 
-// Doc is a complete JGF document.
-type Doc struct {
+// Document is a complete JGF document.
+type Document struct {
 	Graph graph `json:"graph"`
 }
 
-// Doc assembles the accumulated vertices and edges into a JGF document.
-func (b *Builder) Doc() Doc {
-	d := Doc{}
+// Document assembles the accumulated vertices and edges into a JGF document.
+func (b *Builder) Document() Document {
+	d := Document{}
 	for _, v := range b.vertices {
-		// Skip the control plane
-		if strings.Contains(v.name, "control-plane") {
-			continue
-		}
 		d.Graph.Nodes = append(d.Graph.Nodes, node{ID: v.key, Metadata: metadata{v: v}})
 	}
 	for _, e := range b.edges {
@@ -226,5 +233,5 @@ func (b *Builder) Doc() Doc {
 
 // JSON renders the document as indented JGF.
 func (b *Builder) JSON() ([]byte, error) {
-	return json.MarshalIndent(b.Doc(), "", "  ")
+	return json.MarshalIndent(b.Document(), "", "  ")
 }

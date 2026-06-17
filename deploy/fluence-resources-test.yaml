@@ -22,13 +22,30 @@ metadata:
   namespace: kube-system
 data:
   resources.yaml: |
-    backends:
-      - name: ibm_fez
-        num_qubits: 156
-        vendor: ibm
-        qrmi_type: qiskit-runtime-service
-      - name: ibm_marrakesh
-        num_qubits: 156
+    # New generic schema: each backend is a resource tree attached under the
+    # cluster. Modeled as a qdevice carrying a requestable qpu child; attributes
+    # become filterable graph properties AND injected env (FLUXION_<KEY>).
+    resources:
+      - type: qdevice
+        name: ibm_fez
+        attributes: ibm
+        with:
+          - type: qpu
+            count: 1
+            with:
+              - type: qubit
+                count: 156
+      - type: qdevice
+        name: ibm_marrakesh
+        attributes: ibm
+        with:
+          - type: qpu
+            count: 1
+            with:
+              - type: qubit
+                count: 156
+    attributes:
+      ibm:
         vendor: ibm
         qrmi_type: qiskit-runtime-service
 ---
@@ -53,7 +70,7 @@ spec:
         - operator: Exists   # run on every node, including tainted/control-plane
       containers:
         - name: deviceplugin
-          image: ghcr.io/converged-computing/fluence:test
+          image: vanessa/fluence:test
           command: ["/bin/fluence-deviceplugin"]
           env:
             - name: FLUENCE_RESOURCES

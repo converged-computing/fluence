@@ -7,7 +7,7 @@
 
 FLUX_SCHED_ROOT ?= /opt/flux-sched
 IMG             ?= ghcr.io/converged-computing/fluence:latest
-TEST_IMG	?= ghcr.io/converged-computing/fluence:test
+TEST_IMG	?= vanessa/fluence:test
 
 # cgo flags for the scheduler binary: flux-sched only.
 CGO_CFLAGS  = -I$(FLUX_SCHED_ROOT)
@@ -41,7 +41,7 @@ image: ## Build the scheduler container image
 
 .PHONY: test-image
 test-image: ## Build the scheduler container image
-	docker build -t $(TEST_IMG)-test .
+	docker build -t $(TEST_IMG) .
 	docker push $(TEST_IMG)
 
 .PHONY: test-image-deploy

@@ -10,7 +10,7 @@ concurrency:
 
 env:
   KIND_VERSION: v0.32.0
-  IMAGE: ghcr.io/converged-computing/fluence:latest
+  IMAGE: vanessa/fluence:test
 
 jobs:
   e2e:
@@ -19,19 +19,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      #- name: Set up Docker Buildx
-      #  uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-     # - name: Build fluence image
-     #   uses: docker/build-push-action@v6
-     #   with:
-     #     context: .
-     #     file: ./Dockerfile
-     #     push: false
-     #     load: true
-     #     tags: ${{ env.IMAGE }}
-     #     cache-from: type=gha
-     #     cache-to: type=gha,mode=max
+      - name: Build fluence image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          
       - name: Create k8s Kind Cluster
         uses: helm/kind-action@v1.10.0
         with:
@@ -55,6 +56,12 @@ jobs:
           echo "=== Disk space after cleanup ==="
           df -h
 
+      - name: Load docker images
+        run: |
+          kind get clusters
+          cluster=$(kind get clusters)
+          kind load --name $cluster docker-image vanessa/fluence:test
+
       - name: Deploy fluence (base)
         run: |
           kubectl apply -f deploy/fluence-test.yaml
@@ -62,6 +69,7 @@ jobs:
           POD=$(kubectl -n kube-system get pods -l app=fluence -o name | head -1)
           kubectl -n kube-system exec "${POD#pod/}" -- ls /tmp/
           kubectl -n kube-system logs "${POD#pod/}"
+          sleep 2
           kubectl -n kube-system exec "${POD#pod/}" -- /bin/bash -c "cat /tmp/fluence-graph-*.json"
           kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{": cpu="}{.status.allocatable.cpu}{" mem="}{.status.allocatable.memory}{"\n"}{end}'
          
@@ -80,6 +88,7 @@ jobs:
             sleep 1
           done
           POD=$(kubectl -n kube-system get pods -l app=fluence -o name | head -1)
+          sleep 2
           kubectl -n kube-system exec "${POD#pod/}" -- /bin/bash -c "cat /tmp/fluence-graph-*.json"
 
       - name: Wait for webhook

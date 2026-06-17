@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/converged-computing/fluence/pkg/graph"
+	"github.com/converged-computing/fluence/pkg/jobspec"
 	"github.com/converged-computing/fluence/pkg/placement"
 
 	corev1 "k8s.io/api/core/v1"
@@ -15,13 +16,28 @@ import (
 
 // fakeMatcher records Cancel calls so cancel behavior can be asserted without
 // the real cgo/flux matcher. It satisfies the package-internal matcher interface.
+// matchResults/matchErrs are consumed in order, one per MatchAllocateSpec call,
+// to script multi-match (compute + device) scenarios.
 type fakeMatcher struct {
-	cancelled []uint64
-	cancelErr error
+	cancelled    []uint64
+	cancelErr    error
+	matchN       int
+	matchResults []graph.MatchAllocateRequest
+	matchErrs    []error
 }
 
 func (m *fakeMatcher) MatchAllocateSpec(string) (graph.MatchAllocateRequest, error) {
-	return graph.MatchAllocateRequest{}, nil
+	i := m.matchN
+	m.matchN++
+	var res graph.MatchAllocateRequest
+	if i < len(m.matchResults) {
+		res = m.matchResults[i]
+	}
+	var err error
+	if i < len(m.matchErrs) {
+		err = m.matchErrs[i]
+	}
+	return res, err
 }
 
 func (m *fakeMatcher) Cancel(jobid uint64) error {
@@ -56,25 +72,37 @@ func ungroupedPod(ns, name string, annotations map[string]string) *corev1.Pod {
 	}
 }
 
-func TestParseJobID(t *testing.T) {
+func TestParseJobIDs(t *testing.T) {
 	cases := []struct {
 		name   string
 		ann    map[string]string
-		want   uint64
+		want   []uint64
 		wantOK bool
 	}{
-		{"present", ann("42"), 42, true},
-		{"absent", map[string]string{}, 0, false},
-		{"nil map", nil, 0, false},
-		{"empty value", ann(""), 0, false},
-		{"garbage", ann("not-a-number"), 0, false},
-		{"zero", ann("0"), 0, true},
+		{"single", ann("42"), []uint64{42}, true},
+		{"multiple", ann("42,7"), []uint64{42, 7}, true},
+		{"spaces", ann("42, 7 ,9"), []uint64{42, 7, 9}, true},
+		{"absent", map[string]string{}, nil, false},
+		{"nil map", nil, nil, false},
+		{"empty value", ann(""), nil, false},
+		{"garbage", ann("not-a-number"), nil, false},
+		{"zero", ann("0"), []uint64{0}, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, ok := parseJobID(c.ann)
-			if got != c.want || ok != c.wantOK {
-				t.Fatalf("parseJobID(%v) = (%d,%t), want (%d,%t)", c.ann, got, ok, c.want, c.wantOK)
+			got, ok := parseJobIDs(c.ann)
+			if ok != c.wantOK {
+				t.Fatalf("parseJobIDs(%v) ok = %t, want %t", c.ann, ok, c.wantOK)
+			}
+			if ok {
+				if len(got) != len(c.want) {
+					t.Fatalf("parseJobIDs(%v) = %v, want %v", c.ann, got, c.want)
+				}
+				for i := range got {
+					if got[i] != c.want[i] {
+						t.Fatalf("parseJobIDs(%v) = %v, want %v", c.ann, got, c.want)
+					}
+				}
 			}
 		})
 	}
@@ -94,7 +122,7 @@ func TestGroupKey(t *testing.T) {
 func TestCancelGroupPrefersAnnotation(t *testing.T) {
 	m := &fakeMatcher{}
 	f := newTestFluence(m)
-	f.placement["default/training"] = groupAlloc{jobid: 42}
+	f.placement["default/training"] = groupAlloc{jobids: []uint64{42}}
 
 	f.cancelGroup("default/training", ann("99"))
 
@@ -111,7 +139,7 @@ func TestCancelGroupPrefersAnnotation(t *testing.T) {
 func TestCancelGroupMemoFallback(t *testing.T) {
 	m := &fakeMatcher{}
 	f := newTestFluence(m)
-	f.placement["default/solo"] = groupAlloc{jobid: 7}
+	f.placement["default/solo"] = groupAlloc{jobids: []uint64{7}}
 
 	f.cancelGroup("default/solo", nil)
 
@@ -137,7 +165,7 @@ func TestCancelGroupUnknownNoop(t *testing.T) {
 func TestCancelGroupIdempotent(t *testing.T) {
 	m := &fakeMatcher{}
 	f := newTestFluence(m)
-	f.placement["default/solo"] = groupAlloc{jobid: 7}
+	f.placement["default/solo"] = groupAlloc{jobids: []uint64{7}}
 
 	f.cancelGroup("default/solo", nil) // frees, deletes memo
 	f.cancelGroup("default/solo", nil) // memo gone, no annotation -> no-op
@@ -151,7 +179,7 @@ func TestCancelGroupIdempotent(t *testing.T) {
 func TestCancelGroupMatcherErrorStillDeletes(t *testing.T) {
 	m := &fakeMatcher{cancelErr: errors.New("flux boom")}
 	f := newTestFluence(m)
-	f.placement["default/solo"] = groupAlloc{jobid: 7}
+	f.placement["default/solo"] = groupAlloc{jobids: []uint64{7}}
 
 	f.cancelGroup("default/solo", ann("7"))
 
@@ -242,5 +270,72 @@ func TestOnPodGroupDeletedTombstone(t *testing.T) {
 
 	if len(m.cancelled) != 1 || m.cancelled[0] != 4 {
 		t.Fatalf("cancelled = %v, want [4] from PodGroup tombstone", m.cancelled)
+	}
+}
+
+// matchGroup combines a compute allocation (nodes) and a device allocation
+// (backend) into one placement and records both jobids.
+func TestMatchGroupCombinesAllocations(t *testing.T) {
+	m := &fakeMatcher{
+		matchResults: []graph.MatchAllocateRequest{
+			{Number: 10, Allocation: `{"graph":{"nodes":[{"metadata":{"type":"node","name":"node-a","properties":{"virtual=false":""}}}]}}`},
+			{Number: 11, Allocation: `{"graph":{"nodes":[{"metadata":{"type":"node","name":"rigetti","properties":{"virtual=true":""}}}]}}`},
+		},
+	}
+	f := newTestFluence(m)
+
+	place, jobids, status := f.matchGroup(twoSpecs())
+	if !status.IsSuccess() {
+		t.Fatalf("status = %v, want success", status)
+	}
+	if len(jobids) != 2 || jobids[0] != 10 || jobids[1] != 11 {
+		t.Fatalf("jobids = %v, want [10 11]", jobids)
+	}
+	// Both allocations contributed (exact node/backend split is
+	// PlacementFromAllocation's job, refined in the placement rewrite).
+	if len(place.Nodes) == 0 {
+		t.Errorf("expected at least one bind node, got %v", place.Nodes)
+	}
+}
+
+// If a later match fails, every already-successful allocation in the group is
+// cancelled (all-or-nothing) and the group is Unschedulable.
+func TestMatchGroupAllOrNothing(t *testing.T) {
+	m := &fakeMatcher{
+		matchResults: []graph.MatchAllocateRequest{
+			{Number: 20, Allocation: `{"graph":{"nodes":[{"metadata":{"type":"node","name":"node-a","properties":{"virtual=false":""}}}]}}`},
+			{},
+		},
+		matchErrs: []error{nil, errors.New("no qpu available")},
+	}
+	f := newTestFluence(m)
+
+	_, _, status := f.matchGroup(twoSpecs())
+	if status.IsSuccess() {
+		t.Fatal("expected Unschedulable when the device match fails")
+	}
+	if len(m.cancelled) != 1 || m.cancelled[0] != 20 {
+		t.Fatalf("cancelled = %v, want [20] (roll back the successful compute match)", m.cancelled)
+	}
+}
+
+// A multi-jobid group records a comma-separated annotation and cancels every id.
+func TestCancelGroupMultipleJobids(t *testing.T) {
+	m := &fakeMatcher{}
+	f := newTestFluence(m)
+
+	f.cancelGroup("default/training", ann("10,11"))
+
+	if len(m.cancelled) != 2 || m.cancelled[0] != 10 || m.cancelled[1] != 11 {
+		t.Fatalf("cancelled = %v, want [10 11]", m.cancelled)
+	}
+}
+
+// twoSpecs returns two minimal jobspecs (compute + device) to drive matchGroup
+// tests; their content doesn't matter since the fake matcher scripts results.
+func twoSpecs() []*jobspec.Jobspec {
+	return []*jobspec.Jobspec{
+		{Version: 9999},
+		{Version: 9999},
 	}
 }

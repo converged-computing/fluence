@@ -25,6 +25,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net/http"
 	"strings"
@@ -49,42 +50,88 @@ type jsonPatchOp struct {
 	Value any    `json:"value,omitempty"`
 }
 
-// backendEnv is the downward-API env injected into quantum containers. To the
-// app it is an ordinary env var; its value comes from the fluence backend
-// annotation, which the scheduler sets in PreBind.
-func backendEnv() corev1.EnvVar {
+// Mutator injects fluence's scheduler-chosen values into a pod's containers. It
+// carries the env contract — the union of attribute keys across the configured
+// backends — so it injects a stable, predictable set of environment variables
+// regardless of which backend a given pod ends up matching. Values flow via the
+// downward API from annotations the scheduler writes in PreBind, so the env var
+// NAMES are fixed at pod-creation time (here) while their VALUES populate later.
+type Mutator struct {
+	// AttributeKeys is the union of user attribute keys across all backends. Each
+	// becomes a FLUXION_<KEY> env var sourced from its attr-<key> annotation.
+	AttributeKeys []string
+}
+
+// injectedEnv returns the full normalized env set this mutator injects into a
+// fluxion-requesting container: FLUXION_BACKEND plus one FLUXION_<KEY> per
+// configured attribute key. Each reads its annotation via the downward API; an
+// annotation the scheduler did not set resolves to empty, which is harmless.
+func (m *Mutator) injectedEnv() []corev1.EnvVar {
+	envs := []corev1.EnvVar{annotationEnv(
+		placement.EnvVarPrefix+"BACKEND", placement.BackendAnnotation)}
+	for _, key := range m.AttributeKeys {
+		envs = append(envs, annotationEnv(
+			placement.EnvVarName(key), placement.AttributeAnnotationPrefix+key))
+	}
+	return envs
+}
+
+// EnvVarNames returns the names of every env var this mutator injects, for
+// startup logging so the developer sees the exact contract their container can
+// rely on.
+func (m *Mutator) EnvVarNames() []string {
+	names := make([]string, 0, len(m.AttributeKeys)+1)
+	for _, e := range m.injectedEnv() {
+		names = append(names, e.Name)
+	}
+	return names
+}
+
+// annotationEnv builds a downward-API env var that reads a pod annotation.
+func annotationEnv(envName, annotationKey string) corev1.EnvVar {
 	return corev1.EnvVar{
-		Name: "QRMI_BACKEND",
+		Name: envName,
 		ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{
-				FieldPath: fmt.Sprintf("metadata.annotations['%s']", placement.BackendAnnotation),
+				FieldPath: fmt.Sprintf("metadata.annotations['%s']", annotationKey),
 			},
 		},
 	}
 }
 
 // Mutate returns the JSON Patch operations for a pod, or nil if nothing applies.
-func Mutate(pod *corev1.Pod) []jsonPatchOp {
+// For each container that requests a fluxion.flux-framework.org/* resource, it
+// appends every contract env var the container does not already define.
+func (m *Mutator) Mutate(pod *corev1.Pod) []jsonPatchOp {
 	if pod.Spec.SchedulerName != SchedulerName {
 		return nil
 	}
+	contract := m.injectedEnv()
 	var ops []jsonPatchOp
 	for i, c := range pod.Spec.Containers {
-		if !requestsFluxionResource(c) || hasEnv(c, "QRMI_BACKEND") {
+		if !requestsFluxionResource(c) {
 			continue
 		}
-		if len(c.Env) == 0 {
-			ops = append(ops, jsonPatchOp{
-				Op:    "add",
-				Path:  fmt.Sprintf("/spec/containers/%d/env", i),
-				Value: []corev1.EnvVar{backendEnv()},
-			})
-		} else {
+		for _, e := range contract {
+			if hasEnv(c, e.Name) {
+				continue
+			}
+			if len(c.Env) == 0 {
+				ops = append(ops, jsonPatchOp{
+					Op:    "add",
+					Path:  fmt.Sprintf("/spec/containers/%d/env", i),
+					Value: []corev1.EnvVar{e},
+				})
+				// Subsequent vars append to the now-existing slice.
+				c.Env = []corev1.EnvVar{e}
+				continue
+			}
 			ops = append(ops, jsonPatchOp{
 				Op:    "add",
 				Path:  fmt.Sprintf("/spec/containers/%d/env/-", i),
-				Value: backendEnv(),
+				Value: e,
 			})
+			c.Env = append(c.Env, e)
 		}
 	}
 	return ops
@@ -110,7 +157,7 @@ func hasEnv(c corev1.Container, name string) bool {
 
 // Handler is the /mutate endpoint. It always admits the pod (failure to mutate
 // must not block creation); it only adds a patch when Mutate returns one.
-func Handler(w http.ResponseWriter, r *http.Request) {
+func (m *Mutator) Handler(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -125,11 +172,13 @@ func Handler(w http.ResponseWriter, r *http.Request) {
 	resp := &admissionv1.AdmissionResponse{UID: review.Request.UID, Allowed: true}
 	var pod corev1.Pod
 	if err := json.Unmarshal(review.Request.Object.Raw, &pod); err == nil {
-		if ops := Mutate(&pod); len(ops) > 0 {
+		if ops := m.Mutate(&pod); len(ops) > 0 {
 			if patch, err := json.Marshal(ops); err == nil {
 				pt := admissionv1.PatchTypeJSONPatch
 				resp.Patch = patch
 				resp.PatchType = &pt
+				log.Printf("[fluence-webhook] injected %d env op(s) into pod %s/%s",
+					len(ops), pod.Namespace, pod.Name)
 			}
 		}
 	}
