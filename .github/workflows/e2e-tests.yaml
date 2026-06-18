@@ -66,11 +66,21 @@ jobs:
         run: |
           kubectl apply -f deploy/fluence-test.yaml
           kubectl rollout status -n kube-system deployment/fluence --timeout=180s
-          POD=$(kubectl -n kube-system get pods -l app=fluence -o name | head -1)
-          kubectl -n kube-system exec "${POD#pod/}" -- ls /tmp/
-          kubectl -n kube-system logs "${POD#pod/}"
-          sleep 2
-          kubectl -n kube-system exec "${POD#pod/}" -- /bin/bash -c "cat /tmp/fluence-graph-*.json"
+          # Wait for a Running pod — rollout status can return before the old
+          # pod is fully gone and the new one is ready to exec into.
+          POD=""
+          for i in $(seq 1 60); do
+            POD=$(kubectl -n kube-system get pods -l app=fluence \
+              --field-selector=status.phase=Running \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+            [ -n "$POD" ] && break
+            sleep 2
+          done
+          [ -n "$POD" ] || { echo "ERROR: no Running fluence pod found"; exit 1; }
+          echo "Using pod: $POD"
+          kubectl -n kube-system exec "$POD" -- ls /tmp/
+          kubectl -n kube-system logs "$POD"
+          kubectl -n kube-system exec "$POD" -- /bin/bash -c "cat /tmp/fluence-graph-*.json"
           kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{": cpu="}{.status.allocatable.cpu}{" mem="}{.status.allocatable.memory}{"\n"}{end}'
          
       - name: E2E - classical gang
@@ -87,9 +97,17 @@ jobs:
             kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable}{"\n"}{end}' | grep -q 'fluxion.flux-framework.org/qpu' && break
             sleep 1
           done
-          POD=$(kubectl -n kube-system get pods -l app=fluence -o name | head -1)
-          sleep 2
-          kubectl -n kube-system exec "${POD#pod/}" -- /bin/bash -c "cat /tmp/fluence-graph-*.json"
+          POD=""
+          for i in $(seq 1 60); do
+            POD=$(kubectl -n kube-system get pods -l app=fluence \
+              --field-selector=status.phase=Running \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+            [ -n "$POD" ] && break
+            sleep 2
+          done
+          [ -n "$POD" ] || { echo "ERROR: no Running fluence pod found after restart"; exit 1; }
+          echo "Using pod: $POD"
+          kubectl -n kube-system exec "$POD" -- /bin/bash -c "cat /tmp/fluence-graph-*.json"
 
       - name: Wait for webhook
         run: |
