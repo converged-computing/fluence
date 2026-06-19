@@ -61,11 +61,20 @@ def ungate_pods(gated_pods, task_arn, namespace):
         else:
             log(f"  WARNING: no task ARN available to patch onto {pod_name}")
 
-        # 2. Remove scheduling gate
-        patch = json.dumps([{
-            "op": "remove",
-            "path": "/spec/schedulingGates/0"
-        }])
+        # 2. Set high priority class and remove scheduling gate atomically
+        # Priority is set here (not in webhook) to avoid admission controller
+        # conflict where priority:0 is already defaulted before our patch.
+        patch = json.dumps([
+            {
+                "op": "add",
+                "path": "/spec/priorityClassName",
+                "value": "fluence-quantum-classical"
+            },
+            {
+                "op": "remove",
+                "path": "/spec/schedulingGates/0"
+            }
+        ])
         try:
             kubectl([
                 "patch", "pod", pod_name,
@@ -73,9 +82,9 @@ def ungate_pods(gated_pods, task_arn, namespace):
                 "--type=json",
                 f"-p={patch}",
             ])
-            log(f"  Removed scheduling gate from {pod_name}")
+            log(f"  Set priority and removed scheduling gate from {pod_name}")
         except RuntimeError as e:
-            log(f"  WARNING: could not remove gate from {pod_name}: {e}")
+            log(f"  WARNING: could not patch {pod_name}: {e}")
 
 
 def gated_pods_from_env():

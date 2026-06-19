@@ -5,9 +5,15 @@
 Hybrid quantum-classical workflows submit work to two independent queues:
 the Kubernetes scheduler (classical compute) and a QPU vendor API (quantum
 execution). Classical pods waste node resources while waiting for QPU queue
-results. We describe a design for Fluence that coordinates classical resource
-allocation with quantum execution order across heterogeneous QPU backends,
-without requiring any user application changes.
+results. Fluence's coordination system thus gates classical worker pods until 
+the QPU task is one position from executing, then releases them with high 
+priority so they preempt lower-priority work and start immediately as the 
+QPU result arrives. Yes, it could be the case the one task in the queue before
+it takes a long time, but I think this is an improved approach than having worker
+pods running (and waiting) for a much longer queue. This only is important
+given that you have gangs, or leader worker designs where some leader is launching
+the quantum work and otherwise the workers would be waiting and doing nothing
+(and wasting resources).
 
 ## 1. The Two-Queue Problem
 
@@ -18,102 +24,131 @@ consumes node resources — CPU, memory, potentially GPU — for the entire
 duration of the QPU queue wait, which may be minutes to hours on real
 hardware.
 
-This waste scales with concurrency. With N concurrent hybrid jobs and a
-QPU queue depth of D, each classical pod may idle for D × t_avg seconds
-where t_avg is the average QPU task execution time. On a shared cluster
-with expensive GPU nodes this is a significant and unfair resource waste.
+This waste scales with concurrency. With N concurrent hybrid jobs, each pod
+idles for the full QPU queue wait. On real QPU backends (IQM Garnet, IQM
+Emerald) we measure 15–30% classical idle fraction at N=10, rising to over
+70% for individual pods at N=20. Wall time scales linearly with concurrency
+on real QPUs — submitting 20 jobs takes 5–8× longer than 1 job due to
+self-imposed queue depth.
 
-The problem has two components:
-
-**Component 1 — Resource waste.** Classical pods consume node resources
-while doing nothing useful.
-
-**Component 2 — Ordering mismatch.** Classical resource allocation follows
-job submission order, not QPU execution order. A job submitted to a busy
-backend wastes resources longer than a job submitted to a quiet one.
-
-## 2. Why Existing Mechanisms Don't Help
+## 2. Why Existing Mechanisms Are Insufficient
 
 ### 2.1 Fluxion reservations
 
 Fluxion's backfill reservation policies (EASY, Conservative, Hybrid) compute
-a future `time_at` from the internal resource graph timeline — when currently
-running classical jobs will finish. They have no mechanism to accept an
-externally-supplied time derived from a vendor queue. Without a reliable
-`time_at`, a reservation degenerates to a pending job. Furthermore, all
-reservations are cancelled and recomputed from scratch at the start of every
-scheduling loop, so they provide no persistent resource hold.
+a future `time_at` from the internal resource graph — when currently running
+classical jobs will finish. They cannot accept an externally-supplied time
+derived from a vendor queue. Without a reliable `time_at`, a reservation
+degenerates to a pending job. All reservations are cancelled and recomputed
+from scratch at the start of every scheduling loop.
 
-### 2.2 Kubernetes scheduling gates alone
+QPU queue time is unknowable in advance. It depends on other
+users' submissions, hardware calibration windows, and network latency.
+Average task time per QPU cannot be estimated reliably. Therefore Fluxion
+reservations cannot help with the two-queue problem. I learned that we are
+working on "advanced reservations" that are more like a hold, but it is
+not clear if that can be merged soon.
+
+### 2.2 Scheduling gates alone
 
 A scheduling gate holds a pod out of the scheduling queue entirely, consuming
 no node resources. But ungating N pods simultaneously on a busy cluster
-creates a race — resources may not be available, and the graph allocation
-happens after ungating, not before. There is no atomicity guarantee between
-ungating and placement.
+creates a race — resources may not be available when ungating occurs, and
+the Fluxion graph allocation happens after ungating, not before. Without
+priority, ungated pods compete equally with all pending work.
 
 ### 2.3 Preemption alone
 
-Submitting classical pods with a high `PriorityClass` causes Kubernetes to
-evict lower-priority pods to make room. But without a gate, preemption
-happens immediately at submit time — the classical pods displace other work
-during the entire QPU queue wait, which is worse than the original problem.
+Submitting classical pods with a high PriorityClass causes Kubernetes to
+evict lower-priority pods immediately at submit time — during the entire QPU
+queue wait — which is worse than the original problem.
 
 ## 3. Design
 
-The design combines three mechanisms: a **transparent SDK interceptor**
-injected by the Fluence webhook, a **sidecar controller** that observes
-QPU queue state, and **gated high-priority classical pods** that are
-allocated and dispatched only when the QPU is one position from executing.
+The design combines four mechanisms:
 
-### 3.1 Components
+1. **SDK interceptor** — tags every QPU task with the pod UID
+2. **Fluence webhook** — gates worker pods, injects sidecar into leader
+3. **Sidecar controller** — discovers the QPU task, polls queue position,
+   ungates workers when position==1
+4. **High-priority ungating** — workers preempt lower-priority work at the
+   last responsible moment
 
-```
-┌─────────────────────────────────────────────────────────┐
-│ Quantum gateway pod                                      │
-│                                                          │
-│  ┌─────────────────────┐  ┌──────────────────────────┐  │
-│  │  user application   │  │   fluence-sidecar        │  │
-│  │                     │  │                          │  │
-│  │  device.run(...)    │  │  1. find task by tag     │  │
-│  │  ↓ (intercepted)    │  │  2. poll queue_position  │  │
-│  │  tags injected      │  │  3. at position==1:      │  │
-│  │  automatically      │  │     patch ARN → pods     │  │
-│  │                     │  │     remove gates         │  │
-│  └─────────────────────┘  └──────────────────────────┘  │
-└─────────────────────────────────────────────────────────┘
+### 3.1 User interface
 
-┌─────────────────────────────────────────────────────────┐
-│ Classical pods (SchedulingGated until position==1)       │
-│                                                          │
-│  annotations:                                            │
-│    braket.quantum/task-arn: <patched by sidecar>         │
-│  schedulingGates:                                        │
-│    - name: quantum.braket/ready  ← removed by sidecar   │
-│  priorityClassName: quantum-classical-high               │
-└─────────────────────────────────────────────────────────┘
+The user labels all pods in a workflow group with:
+
+```yaml
+metadata:
+  labels:
+    fluence.flux-framework.org/group: my-workflow
+spec:
+  schedulerName: fluence
 ```
 
-### 3.2 Transparent SDK interceptor
+I initially started with having the user create a PodGroup object, and I found
+that annoying. I do not want to require a PodGroup object when an annotation is easier,
+and then I have fine-grained control of what the groups looks like. Fluence can handle
+everything else automatically.
 
-The Fluence mutating webhook injects two things into every pod that requests
-a QPU resource (`fluxion.flux-framework.org/qpu`):
+The namespace distinction:
+- `fluence.flux-framework.org/*` — Fluence scheduler-plugin concerns
+  (group label, leader annotation, gate name)
+- `fluxion.flux-framework.org/*` — Fluxion resource-graph concerns
+  (extended resource types, backend attribute env vars)
 
-**Environment variable:**
-```
-FLUENCE_POD_UID=<pod.metadata.uid>
-```
+### 3.2 Webhook behavior
 
-**Python sitecustomize hook** (injected as a ConfigMap mounted at the
-Python site-packages path):
+When the Fluence mutating webhook sees a pod with `schedulerName: fluence`
+and `fluence.flux-framework.org/group=<name>`:
+
+**First pod admitted (leader):**
+1. Creates a PodGroup with `minCount: 1` — Fluence owns this PodGroup,
+   the user never creates it. `minCount: 1` means the leader schedules
+   immediately without waiting for gated workers. The assumption here is
+   that this leader is going to submit the quantum work.
+2. Records the leader pod name on the PodGroup via `QuantumLeaderAnnotation`.
+3. Creates per-namespace RBAC: `fluence-sidecar` ServiceAccount, Role
+   (patch pods, list PodGroups), RoleBinding.
+4. Copies `fluence-braket-interceptor` ConfigMap from `kube-system` into
+   the pod's namespace (ConfigMap volumes require same-namespace source).
+5. Injects `fluence-sidecar` container into the leader pod.
+6. Injects `FLUENCE_POD_UID` env var (downward API from `metadata.uid`).
+7. Mounts the interceptor ConfigMap and sets `PYTHONSTARTUP` env var so
+   the interceptor runs automatically before user code.
+8. Sets `serviceAccountName: fluence-sidecar`.
+
+**Subsequent pods (workers):**
+1. Reads the PodGroup leader annotation — retries up to 3× with 100ms
+   delay to handle concurrent admission race.
+2. Adds `quantum.braket/ready` scheduling gate — pod enters
+   `SchedulingGated` state, invisible to Fluxion, consuming no resources.
+
+### 3.3 Braket SDK interceptor
+
+I created a consistent sidecar that is going to monitor the queue, and be able
+to ungate the worker pods when the task submit by our pod is at position 1
+(implicating it will run soon, and we assume the user wants the classical
+gang to run at the same time or slightly sooner). Note that it is up to the
+user application to orchestrate the leader and workers, and coordination
+of the quantum results. A few examples: 
+
+- The worker pods are guaranteed to get an ARN for where the Braket results are in S3, 
+  and this is ensured by the sidecar. So a reasonable approach is for workers query 
+  that bucket looking for a finished marker.  This would not require coordination from
+  the leader.
+- Given communication from the leader to workers, the leader can tell them exactly
+  when the work is finished, and coordinate what they do with results.
+
+I ran into the issue of needing to GET the task id from the primary pod from
+the sidecar. What I decided on is a very simply injection - the call of the
+script to submit the job can take arbitrary tags, and so I wrap that with a configmap
+that is in the pythonpath, and ensure the task is tagged with a pod specific UID
+that the sidecar also knows. More specifically, `fluence_braket_intercept.py` script is 
+mounted via `PYTHONSTARTUP` into every container in the leader pod. It monkey-patches 
+`AwsDevice.run()` to automatically tag every quantum task submission with `FLUENCE_POD_UID`:
 
 ```python
-# fluence_braket_intercept.py — injected by Fluence webhook
-import os
-from braket.aws import AwsDevice
-
-_original_run = AwsDevice.run
-
 def _patched_run(self, task_specification, *args, **kwargs):
     pod_uid = os.environ.get("FLUENCE_POD_UID", "")
     if pod_uid:
@@ -121,201 +156,140 @@ def _patched_run(self, task_specification, *args, **kwargs):
         tags["fluence-pod-uid"] = pod_uid
         kwargs["tags"] = tags
     return _original_run(self, task_specification, *args, **kwargs)
-
-AwsDevice.run = _patched_run
 ```
 
-This is completely transparent to the user application. Every `device.run()`
-call — regardless of which QPU backend, regardless of circuit type — is
-automatically tagged with the pod UID. No user code changes are required.
+This is completely transparent to the user application. No code changes
+are required.
 
-### 3.3 Sidecar controller
+### 3.4 Sidecar controller
 
-The `fluence-sidecar` container is injected automatically by the Fluence
-webhook into any pod requesting a QPU resource. It runs alongside the user
-application in the same pod, sharing the pod's AWS credentials via env vars.
+The `fluence-sidecar` container runs alongside the user application in the
+leader pod, sharing its AWS credentials and network namespace.
 
-**Algorithm:**
-
-```
+```console
 1. READ  FLUXION_ARN, FLUENCE_POD_UID from env
-2. READ  gated sibling pod names from FLUENCE_GATED_PODS annotation
 
-3. WAIT  for task tagged fluence-pod-uid=<pod-uid> on device <FLUXION_ARN>
-         poll search_quantum_tasks every 10s
-         timeout after FLUENCE_TASK_DISCOVERY_TIMEOUT (default: 300s)
-         on timeout: fall back to time-window heuristic
+2. DISCOVER task by tag:
+   search_quantum_tasks(filters=[
+     deviceArn == FLUXION_ARN,
+     tags:fluence-pod-uid == FLUENCE_POD_UID
+   ])
+   Poll every 10s, timeout after 300s.
+   On timeout: fall back to time-window heuristic (tasks submitted
+   after pod start time on the same device).
 
-4. POLL  task.queue_position() every 30s
-         log position to stdout for experiment instrumentation
+3. DISCOVER worker pods:
+   List pods in namespace with fluence.flux-framework.org/group label
+   matching this pod's group, having quantum.braket/ready gate present.
+
+4. POLL  task.queue_position() every 30s.
+   Log position for experiment instrumentation.
 
 5. WHEN  position == "1" OR state == RUNNING:
-         for each pod in FLUENCE_GATED_PODS:
-             kubectl annotate pod <name> braket.quantum/task-arn=<arn>
-             kubectl patch pod <name> remove schedulingGates
+   For each worker pod:
+     kubectl annotate pod <name> braket.quantum/task-arn=<arn>
+     kubectl patch pod <name> --type=json \
+       -p='[{"op":"add","path":"/spec/priorityClassName",
+             "value":"fluence-quantum-classical"},
+            {"op":"remove","path":"/spec/schedulingGates/0"}]'
 
-6. EXIT  (sidecar is done — pod continues running user application)
+6. EXIT
 ```
 
-**Fallback heuristic (step 3 timeout):**
+The priority class and gate removal are applied atomically in one patch.
+This ensures workers enter the scheduling queue with high priority
+immediately, without a window where they are ungated but low-priority.
 
-If no tagged task is found within the discovery timeout — e.g. because the
-user application uses a non-standard SDK path — the sidecar searches for
-tasks submitted to `FLUXION_ARN` with `createdAt >= pod_start_time` and
-picks the most recently created one. This is less reliable but handles
-edge cases gracefully.
+### 3.5 Priority and preemption
 
-### 3.4 Gated classical pods
+The `fluence-quantum-classical` PriorityClass (value: 1,000,000) is applied
+by the sidecar at ungate time, not by the webhook at pod creation. Setting
+it at creation time causes an admission controller conflict (priority integer
+already defaulted to 0).
 
-Classical pods that depend on a quantum result are submitted with:
+When workers are ungated with high priority, Kubernetes preemption evicts
+lower-priority pods to make room. Fluence's pod deletion informer catches
+these evictions, calls `Cancel(jobid)` in Fluxion, and frees the graph
+vertices so Fluxion can allocate them to the incoming high-priority workers.
 
-```yaml
-spec:
-  schedulingGates:
-    - name: quantum.braket/ready
-  priorityClassName: quantum-classical-high
-  # No graph allocation yet — MatchAllocateSpec deferred until ungating
-```
-
-The high `PriorityClass` means nothing while the gate is present — the pod
-is invisible to the scheduling queue. When the sidecar removes the gate at
-position==1, the pod enters the queue with high priority and Kubernetes
-preemption displaces lower-priority work to make room.
-
-### 3.5 Fluence PostFilter for topology-aware preemption
-
-The default Kubernetes preemption controller evicts pods based purely on
-`PriorityClass`, with no awareness of Fluxion's resource graph. It may
-evict pods whose removal does not actually free the graph vertices needed
-for the incoming classical pod.
-
-Fluence implements a custom `PostFilter` extension point that:
-
-1. Receives the high-priority classical pod that failed `MatchAllocateSpec`
-2. Asks Fluxion which graph vertices are blocking the match
-3. Maps those vertices to currently running pods via Fluence's allocation
-   tracking
-4. Passes only those specific pods to the preemption logic
-5. Returns the `nominatedNodeName` that Fluxion identified
-
-This ensures preemption targets topologically correct pods — pods whose
-eviction will actually let Fluxion satisfy the match — rather than
-arbitrarily choosing the lowest-priority pods on the cluster.
-
-## 4. Properties of the Design
-
-### 4.1 Zero user cooperation required
-
-The SDK interceptor is injected transparently by the webhook. The user
-application requires no changes. The sidecar is injected automatically.
-The only user-visible artifact is the `FLUXION_ARN` env var, which the
-user already needs to know which backend to target.
-
-### 4.2 Classical resources allocated at the last responsible moment
-
-Graph allocation (`MatchAllocateSpec`) happens only when the QPU task
-reaches position==1 — seconds to minutes before the result arrives. During
-the entire QPU queue wait, no classical node resources are consumed and no
-graph capacity is held.
-
-### 4.3 Classical allocation follows quantum execution order
+### 3.6 Classical allocation follows quantum execution order
 
 Because each workflow's gate is removed independently when its QPU task
 reaches position==1, workflows whose QPU tasks execute earlier get classical
 resources earlier — regardless of submission order. A workflow submitted to
-a quiet backend gets its classical resources before a workflow submitted
-earlier to a busy one. This aligns classical scheduling with actual quantum
+a quiet backend gets its classical resources before one submitted earlier to
+a busy backend. This aligns classical resource allocation with actual quantum
 execution order across heterogeneous backends.
 
-### 4.4 No estimation of QPU queue time required
+## 4. Properties
 
-The design makes no attempt to predict when the QPU task will execute.
-`position==1` is an observable state transition, not an estimate. The
-design is robust to variable queue depths, hardware maintenance windows,
-and concurrent submissions by other users.
-
-### 4.5 Task ARN propagated to classical pods
-
-When the sidecar removes the gate, it patches `braket.quantum/task-arn`
-onto each classical pod as an annotation. Classical pods read this via
-the downward API and can use it to retrieve results from S3, submit
-follow-on circuits, perform error mitigation, or do anything else the
-Braket SDK supports. The sidecar does not prescribe what classical pods
-do with the result.
+| Property | Value |
+|---|---|
+| User code changes required | None |
+| User manifest changes required | Add group label + schedulerName |
+| Classical resources during QPU wait | Zero (SchedulingGated) |
+| QPU queue time estimation needed | No — position==1 is observable |
+| Works across heterogeneous backends | Yes — any backend in Fluxion graph |
+| Vendor API cooperation needed | No — SDK interceptor handles tagging |
 
 ## 5. Limitations
 
-### 5.1 Non-Braket SDKs
+### 5.1 Preemption disrupts lower-priority work
 
-The SDK interceptor currently patches `AwsDevice.run()`. Support for
-IBM Qiskit Runtime (`backend.run()`), IQM, and other vendors requires
-additional interceptors. The pattern is identical; only the entry point
-differs.
+At position==1, workers preempt running lower-priority pods. This work is
+re-queued and eventually runs, but there is a disruption cost. A future
+design using a `MatchReserveAt(time_at, spec)` Fluxion primitive — where
+`time_at` is supplied by the QPU vendor via an ETA or task-start event —
+would allow graceful node draining instead of preemption. No current QPU
+vendor exposes such an API.
 
-### 5.2 Preemption disrupts lower-priority work
+### 5.2 Non-Braket SDKs
 
-At position==1, classical pods may preempt running lower-priority work.
-This work is re-queued and eventually runs, but there is a disruption cost.
-A future design using Fluxion's `MatchReserveAt` primitive with a
-vendor-supplied ETA would allow graceful draining instead of preemption.
-This requires QPU vendors to expose task ETA or start-event webhooks,
-which no current vendor provides.
+The interceptor patches `AwsDevice.run()`. IBM Qiskit Runtime, IQM native
+SDK, and other vendors require separate interceptors in `sidecars/<vendor>/`.
+The pattern is identical; only the SDK entry point differs. We will make
+sidecars for different vendor interfaces.
 
-### 5.3 Multi-task workflows
+### 5.3 Single task per workflow
 
-The sidecar currently tracks one task per pod. Workflows that submit
-multiple QPU tasks (e.g. parameter-shift gradient estimation with 2P
-circuits) require the sidecar to track a set of task ARNs and ungate
-classical pods when all tasks reach position==1 or a subset completes.
-This is a straightforward extension.
+The sidecar tracks one QPU task ARN per leader pod. Parameter-shift gradient
+estimation and other multi-circuit workflows require tracking a set of ARNs.
+See the scatter design issue for the proposed extension.
 
-### 5.4 Sidecar resource consumption
+### 5.4 Namespace-scoped RBAC
 
-The sidecar consumes minimal CPU and memory (polling every 30s), but
-it does hold an open AWS API connection for the duration of the QPU
-queue wait. On clusters with many concurrent hybrid workflows this
-may become a concern.
+The webhook creates `fluence-sidecar` RBAC in each namespace on first use.
+This is correct behavior — the sidecar only needs permissions in its own
+namespace. A Helm chart or operator would manage this more cleanly.
 
-## 6. Required Vendor API Primitive
+## 6. Future Work
 
-The remaining limitation that cannot be solved without vendor cooperation
-is task provenance — associating a Braket task with the Kubernetes pod
-that submitted it without SDK interception. If Braket were to expose a
-`clientToken` or `podIdentity` field that the SDK set automatically from
-the execution environment (analogous to how IAM roles work for EC2
-instances), the interceptor would not be needed.
+### 6.1 MatchReserveAt Fluxion primitive
 
-More significantly, if QPU vendors exposed a task-start event (webhook,
-SNS notification, or EventBridge rule) when a task transitions from
-QUEUED to RUNNING, the sidecar could react to that event rather than
-polling. This would enable graceful draining rather than preemption, and
-would allow Fluxion's reservation system to be used with an externally-
-supplied `time_at` rather than requiring the position==1 heuristic.
+A new `MatchReserveAt(time_at, spec)` function in the Fluxion Go bindings
+would allow an externally-supplied reservation time. The sidecar would feed
+live QPU queue position into this estimate, enabling graceful node draining
+rather than preemption. This requires the C++ reapi `match_allocate_multi`
+function to be exposed through the Go bindings with a `starttime` parameter.
 
-## 7. Implementation Plan
+### 6.2 Scatter design
 
-### Phase 1 — Sidecar container (this repo)
-- `docker/fluence-sidecar/` — sidecar image
-- SDK interceptor (`fluence_braket_intercept.py`)
-- Task discovery (tagged search + heuristic fallback)
-- Queue position polling
-- Pod annotation patching and gate removal
+For workflows with N independent QPU tasks each paired with one classical
+pod, an index-based pairing mechanism (`fluence.flux-framework.org/index`)
+would allow the sidecar to ungate specific worker pods when their specific
+task reaches position==1. See the open scatter design issue.
 
-### Phase 2 — Fluence webhook changes
-- Inject `FLUENCE_POD_UID` env var into QPU pods
-- Inject sidecar container into QPU pods
-- Inject SDK interceptor as a mounted ConfigMap
-- Inject `FLUENCE_GATED_PODS` annotation listing sibling gated pods
-- Create `quantum-classical-high` PriorityClass
+### 6.3 Vendor task-start events
 
-### Phase 3 — Fluence PostFilter
-- Custom preemption targeting Fluxion-graph-aware pod selection
-- Integration with existing allocation tracking in placement.go
+If QPU vendors exposed SNS/EventBridge notifications when a task transitions
+from QUEUED to RUNNING, the sidecar could react to events rather than
+polling. This would eliminate the 30s polling latency and enable more
+precise ungating.
 
-### Phase 4 — Experiment
-- Demonstrate two-queue problem empirically (experiment 1, already running)
-- Demonstrate gate + sidecar design reducing classical idle time
-- Compare classical node-seconds consumed: ungated vs gated
-- Show quantum execution order driving classical allocation order
-  across heterogeneous backends (SV1, IQM, Rigetti)
-EOF
+### 6.4 PostFilter topology-aware preemption
+
+A custom Fluence `PostFilter` plugin would ask Fluxion which graph vertices
+are blocking a high-priority worker pod, then target preemption at exactly
+those pods — rather than the default Kubernetes preemption which picks
+lowest-priority pods regardless of graph topology. This ensures preemption
+always produces a valid Fluxion allocation.

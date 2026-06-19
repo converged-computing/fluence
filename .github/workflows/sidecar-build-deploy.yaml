@@ -62,7 +62,7 @@ jobs:
       - name: Build and push ${{ matrix.sidecar }} sidecar
         uses: docker/build-push-action@v6
         with:
-          context: ./sidecars
+          context: .
           file: ./sidecars/${{ matrix.sidecar }}/Dockerfile
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}

@@ -9,7 +9,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
-func qpuPod(scheduler string, presetEnv string) *corev1.Pod {
+func qpuPod(scheduler, presetEnv string) *corev1.Pod {
 	c := corev1.Container{
 		Name: "app",
 		Resources: corev1.ResourceRequirements{
@@ -38,7 +38,6 @@ func cpuPod(scheduler string) *corev1.Pod {
 	}}
 }
 
-// envNames returns the env var names referenced by a list of add-ops.
 func opEnvNames(ops []jsonPatchOp) []string {
 	var names []string
 	for _, op := range ops {
@@ -99,13 +98,10 @@ func hasSidecarOp(ops []jsonPatchOp) bool {
 	return false
 }
 
-// With a config-derived contract (region, qubits), a fluxion pod gets
-// FLUXION_BACKEND plus one FLUXION_<KEY> per attribute key.
 func TestMutateInjectsContract(t *testing.T) {
 	m := &Mutator{AttributeKeys: []string{"region", "qubits"}}
 	ops := m.Mutate(context.Background(), qpuPod("fluence", ""))
 	names := opEnvNames(ops)
-
 	for _, want := range []string{"FLUXION_BACKEND", "FLUXION_REGION", "FLUXION_QUBITS"} {
 		if !contains(names, want) {
 			t.Errorf("missing injected env %q; got %v", want, names)
@@ -113,7 +109,6 @@ func TestMutateInjectsContract(t *testing.T) {
 	}
 }
 
-// With no configured attributes, only FLUXION_BACKEND is injected.
 func TestMutateBackendOnly(t *testing.T) {
 	m := &Mutator{}
 	names := opEnvNames(m.Mutate(context.Background(), qpuPod("fluence", "")))
@@ -122,7 +117,6 @@ func TestMutateBackendOnly(t *testing.T) {
 	}
 }
 
-// Non-fluence pods are never mutated.
 func TestMutateSkipsOtherScheduler(t *testing.T) {
 	m := &Mutator{AttributeKeys: []string{"region"}}
 	if ops := m.Mutate(context.Background(), qpuPod("default-scheduler", "")); ops != nil {
@@ -130,7 +124,6 @@ func TestMutateSkipsOtherScheduler(t *testing.T) {
 	}
 }
 
-// An env var the container already defines is not re-injected.
 func TestMutateRespectsExistingEnv(t *testing.T) {
 	m := &Mutator{AttributeKeys: []string{"region"}}
 	names := opEnvNames(m.Mutate(context.Background(), qpuPod("fluence", "FLUXION_BACKEND")))
@@ -142,7 +135,6 @@ func TestMutateRespectsExistingEnv(t *testing.T) {
 	}
 }
 
-// Classical pods (no fluxion resource request) are not mutated.
 func TestMutateSkipsNonFluxion(t *testing.T) {
 	m := &Mutator{AttributeKeys: []string{"region"}}
 	if ops := m.Mutate(context.Background(), cpuPod("fluence")); ops != nil {
@@ -150,7 +142,6 @@ func TestMutateSkipsNonFluxion(t *testing.T) {
 	}
 }
 
-// EnvVarNames reports the full contract for startup logging.
 func TestEnvVarNames(t *testing.T) {
 	m := &Mutator{AttributeKeys: []string{"region", "connectivity"}}
 	names := m.EnvVarNames()
@@ -159,9 +150,9 @@ func TestEnvVarNames(t *testing.T) {
 	}
 }
 
-// A QPU pod with no PodGroup (group of 1) gets no gate and no sidecar.
+// A QPU pod with no group label gets no gate and no sidecar.
 func TestMutateQPUSinglePodNoSidecar(t *testing.T) {
-	m := &Mutator{} // no Client — group size will be 1
+	m := &Mutator{}
 	ops := m.Mutate(context.Background(), qpuPod("fluence", ""))
 	if hasGateOp(ops) {
 		t.Error("single QPU pod should not get a scheduling gate")
@@ -180,12 +171,24 @@ func TestQuantumWorkerGateOpsEmpty(t *testing.T) {
 	}
 }
 
-// quantumWorkerGateOps is idempotent — does not add gate if already present.
+// quantumWorkerGateOps is idempotent.
 func TestQuantumWorkerGateOpsIdempotent(t *testing.T) {
 	pod := qpuPod("fluence", "")
 	pod.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: QuantumGateName}}
 	ops := quantumWorkerGateOps(pod)
 	if len(ops) != 0 {
 		t.Errorf("expected no ops when gate already present, got %v", ops)
+	}
+}
+
+// groupName returns the quantum group label value.
+func TestGroupName(t *testing.T) {
+	pod := qpuPod("fluence", "")
+	if groupName(pod) != "" {
+		t.Error("pod without group label should return empty")
+	}
+	pod.Labels = map[string]string{QuantumGroupLabel: "my-workflow"}
+	if groupName(pod) != "my-workflow" {
+		t.Errorf("expected my-workflow, got %q", groupName(pod))
 	}
 }

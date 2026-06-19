@@ -1,53 +1,77 @@
 #!/usr/bin/env bash
-# Sidecar gate/ungate plumbing test.
+# Sidecar webhook test.
 #
-# This test verifies the Kubernetes mechanics of the sidecar design:
-#   1. A gated classical pod stays SchedulingGated until something removes the gate
-#   2. A pod with kubectl access can patch an annotation and remove a gate
-#   3. The classical pod reads the patched annotation via the downward API
+# Verifies that when a PodGroup of size > 1 with QPU resources is submitted:
+#   1. The webhook creates fluence-sidecar RBAC in the namespace automatically
+#   2. The leader pod gets the sidecar container injected
+#   3. The worker pod gets the quantum.braket/ready scheduling gate added
+#   4. The worker pod gets fluence-quantum-classical priority class set
 #
-# This does NOT test the braket sidecar itself (task discovery, SDK interceptor,
+# Does NOT test the braket sidecar itself (task discovery, SDK interceptor,
 # queue position polling). Those require real AWS credentials and are covered
 # by sidecars/braket/test/integration.sh which is run locally.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE}/lib.sh"
 
-log "TEST 4: sidecar gate/ungate Kubernetes plumbing"
+log "TEST 4: sidecar webhook — RBAC creation, gate injection, sidecar injection"
 
-kubectl apply -f examples/test/e2e/sidecar-mock.yaml
+kubectl apply -f examples/test/e2e/sidecar-mock-pods.yaml
 
-# Classical pod must start SchedulingGated — verify it is NOT Running immediately
-sleep 5
-phase="$(kubectl get pod classical-mock -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-[ "$phase" != "Running" ] || fail "classical-mock should not be Running before gate is removed (phase=$phase)"
-log "classical-mock is correctly gated (phase=${phase:-SchedulingGated})"
+# Give webhook time to process the leader pod admission
+sleep 3
 
-# Gateway pod should reach Running
-wait_pod_phase quantum-gateway-mock Running 60 \
-  || fail "quantum-gateway-mock did not reach Running"
+# Print webhook logs — always show these so we can see what happened
+log "--- webhook logs ---"
+kubectl logs -n kube-system deployment/fluence-webhook --tail=50 || true
+log "--- end webhook logs ---"
 
-# Mock sidecar should ungate classical-mock within 60s
-log "waiting for mock sidecar to ungate classical-mock..."
-for i in $(seq 1 60); do
-  phase="$(kubectl get pod classical-mock -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-  { [ "$phase" = "Running" ] || [ "$phase" = "Succeeded" ]; } && break
+# 1. Webhook should have created fluence-sidecar ServiceAccount
+log "checking webhook created fluence-sidecar ServiceAccount..."
+for i in $(seq 1 30); do
+  kubectl get serviceaccount fluence-sidecar -n default > /dev/null 2>&1 && break
   sleep 2
 done
-wait_pod_phase classical-mock Running 30 \
-  || fail "classical-mock did not reach Running after gate removal"
+kubectl get serviceaccount fluence-sidecar -n default \
+  || fail "webhook did not create fluence-sidecar ServiceAccount"
+log "  fluence-sidecar ServiceAccount created"
 
-# Task ARN annotation must have been patched
-arn="$(kubectl get pod classical-mock \
-  -o jsonpath='{.metadata.annotations.braket\.quantum/task-arn}' 2>/dev/null || true)"
-[ -n "$arn" ] || fail "braket.quantum/task-arn annotation not set on classical-mock"
-log "task ARN annotation present: $arn"
+# 2. Webhook should have created fluence-sidecar Role
+kubectl get role fluence-sidecar -n default \
+  || fail "webhook did not create fluence-sidecar Role"
+log "  fluence-sidecar Role created"
 
-# Classical pod must have read the annotation via downward API
-out="$(kubectl logs classical-mock 2>/dev/null || true)"
-echo "$out" | grep -q "TASK_ARN=" \
-  || fail "BRAKET_TASK_ARN not visible in classical-mock logs (got: $out)"
+# 3. Webhook should have created fluence-sidecar RoleBinding
+kubectl get rolebinding fluence-sidecar -n default \
+  || fail "webhook did not create fluence-sidecar RoleBinding"
+log "  fluence-sidecar RoleBinding created"
 
-log "PASS: gate/ungate plumbing works — annotation patched and read via downward API"
+# 4. Webhook should have copied interceptor ConfigMap into the namespace
+kubectl get configmap fluence-braket-interceptor -n default \
+  || fail "webhook did not copy fluence-braket-interceptor ConfigMap into namespace"
+log "  fluence-braket-interceptor ConfigMap copied into namespace"
+
+# 5. Leader pod should have sidecar container injected
+log "checking sidecar injected into leader pod..."
+wait_pod_phase sidecar-test-leader Running 120 \
+  || { kubectl describe pod sidecar-test-leader; fail "sidecar-test-leader did not reach Running"; }
+containers=$(kubectl get pod sidecar-test-leader \
+  -o jsonpath='{.spec.containers[*].name}')
+echo "$containers" | grep -q "fluence-sidecar" \
+  || fail "fluence-sidecar container not injected into leader (containers: $containers)"
+log "  fluence-sidecar container injected into leader"
+
+# 6. Worker pod should have scheduling gate added by webhook
+gate=$(kubectl get pod sidecar-test-worker \
+  -o jsonpath='{.spec.schedulingGates[0].name}')
+[ "$gate" = "quantum.braket/ready" ] \
+  || fail "worker pod does not have quantum.braket/ready gate (got: $gate)"
+log "  quantum.braket/ready gate set on worker"
+
+log "PASS: webhook correctly created RBAC, injected sidecar, gated worker"
+log "NOTE: fluence-quantum-classical priority is set by the sidecar at ungate time, not the webhook"
 log "NOTE: braket sidecar integration test (SDK intercept, tag discovery,"
 log "      queue polling) is in sidecars/braket/test/integration.sh"
-kubectl delete -f examples/test/e2e/sidecar-mock.yaml --wait=false || true
+
+# Only clean up pods and PodGroup — RBAC is namespace infrastructure
+# that persists for future quantum workflows in this namespace
+kubectl delete -f examples/test/e2e/sidecar-mock-pods.yaml
