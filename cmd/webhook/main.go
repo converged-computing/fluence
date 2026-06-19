@@ -83,7 +83,11 @@ func main() {
 			log.Printf("no resources config at %s (%v); injecting FLUXION_BACKEND only", path, rerr)
 		}
 	}
-	mutator := &webhook.Mutator{AttributeKeys: attrKeys}
+	mutator := &webhook.Mutator{
+		AttributeKeys: attrKeys,
+		Client:        client,
+		SidecarImage:  env("FLUENCE_SIDECAR_IMAGE", ""),
+	}
 	log.Printf("[fluence-webhook] env contract injected into fluxion pods: %v", mutator.EnvVarNames())
 
 	mux := http.NewServeMux()

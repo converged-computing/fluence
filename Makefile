@@ -25,6 +25,12 @@ build: ## Build all binaries (scheduler needs flux-sched; helpers are pure Go)
 	CGO_ENABLED=0 go build -o bin/fluence-deviceplugin ./cmd/deviceplugin
 	CGO_ENABLED=0 go build -o bin/fluence-webhook ./cmd/webhook
 
+.PHONY: sidecars
+sidecars:
+	docker build -f sidecars/braket/Dockerfile -t ghcr.io/converged-computing/fluence-sidecar-braket:latest .
+	docker push ghcr.io/converged-computing/fluence-sidecar-braket:latest
+	# kind load docker-image ghcr.io/converged-computing/fluence-sidecar-braket:latest
+
 .PHONY: test
 test:
 	CGO_ENABLED=1 CGO_CFLAGS="$(CGO_CFLAGS)" CGO_LDFLAGS="$(CGO_LDFLAGS)" \

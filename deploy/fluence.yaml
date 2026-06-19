@@ -72,6 +72,14 @@ rules:
   - apiGroups: ["admissionregistration.k8s.io"]
     resources: ["mutatingwebhookconfigurations"]
     verbs: ["get", "list", "watch", "patch"]
+  # The webhook creates per-namespace sidecar RBAC on demand when a leader
+  # pod is admitted, so users do not need to apply RBAC manually.
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "create"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -218,3 +226,64 @@ webhooks:
         - key: kubernetes.io/metadata.name
           operator: NotIn
           values: ["kube-system"]
+# fluence-sidecar.yaml
+#
+# RBAC and supporting resources for the Fluence quantum sidecar.
+#
+# The sidecar runs inside a leader pod and needs:
+#   - patch/annotate on pods in its own namespace (to ungate workers and
+#     propagate the task ARN annotation)
+#
+# The sidecar ServiceAccount is namespace-scoped — it only has permissions
+# in the namespace where the workflow runs. The webhook sets
+# spec.serviceAccountName on the leader pod to fluence-sidecar.
+#
+# The SDK interceptor ConfigMap holds fluence_braket_intercept.py which
+# the webhook mounts into user containers as a Python sitecustomize hook,
+# transparently tagging every device.run() call with the pod UID.
+#
+# Apply with:
+#   kubectl apply -f deploy/fluence-sidecar.yaml
+
+
+---
+# SDK interceptor ConfigMap — holds the Python sitecustomize hook that
+# patches AwsDevice.run() to tag every quantum task with the pod UID.
+# The webhook mounts this into user containers at Python's site-packages
+# path so it runs automatically before any user code.
+#
+# Mounted at: /etc/fluence/fluence_braket_intercept.py
+# PYTHONSTARTUP is set to this path by the webhook so any Python version loads it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluence-braket-interceptor
+  namespace: kube-system
+  labels:
+    app: fluence
+data:
+  fluence_braket_intercept.py: |
+    # Injected by the Fluence webhook into every pod requesting a QPU resource.
+    # Patches AwsDevice.run() to automatically tag every quantum task submission
+    # with the pod UID, enabling the fluence-sidecar to find the task without
+    # any user application changes.
+    import os
+
+    def _install_interceptor():
+        try:
+            from braket.aws import AwsDevice
+            _original_run = AwsDevice.run
+
+            def _patched_run(self, task_specification, *args, **kwargs):
+                pod_uid = os.environ.get("FLUENCE_POD_UID", "")
+                if pod_uid:
+                    tags = kwargs.get("tags", {})
+                    tags["fluence-pod-uid"] = pod_uid
+                    kwargs["tags"] = tags
+                return _original_run(self, task_specification, *args, **kwargs)
+
+            AwsDevice.run = _patched_run
+        except ImportError:
+            pass
+
+    _install_interceptor()
