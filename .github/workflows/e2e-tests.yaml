@@ -126,8 +126,13 @@ jobs:
       - name: E2E - quantum placement
         run: bash test/e2e/02-quantum-placement.sh
 
+      # Note: I commented this out until we add back to fluence.
+      # It depends on a PR to flux-sched that is not merged.
       #- name: E2E - restart recovery (no double-book)
       #  run: bash test/e2e/03-restart-recovery.sh
+
+      - name: E2E - restart recovery (no double-book)
+        run: bash test/e2e/04-sidecar-ungate.sh
 
       - name: Dump diagnostics on failure
         if: failure()

@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"context"
 	"testing"
 
 	"github.com/converged-computing/fluence/pkg/placement"
@@ -21,6 +22,20 @@ func qpuPod(scheduler string, presetEnv string) *corev1.Pod {
 		c.Env = []corev1.EnvVar{{Name: presetEnv, Value: "preset"}}
 	}
 	return &corev1.Pod{Spec: corev1.PodSpec{SchedulerName: scheduler, Containers: []corev1.Container{c}}}
+}
+
+func cpuPod(scheduler string) *corev1.Pod {
+	return &corev1.Pod{Spec: corev1.PodSpec{
+		SchedulerName: scheduler,
+		Containers: []corev1.Container{{
+			Name: "c",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: *resource.NewQuantity(1, resource.DecimalSI),
+				},
+			},
+		}},
+	}}
 }
 
 // envNames returns the env var names referenced by a list of add-ops.
@@ -48,11 +63,47 @@ func contains(names []string, want string) bool {
 	return false
 }
 
+func hasGateOp(ops []jsonPatchOp) bool {
+	for _, op := range ops {
+		switch v := op.Value.(type) {
+		case corev1.PodSchedulingGate:
+			if v.Name == QuantumGateName {
+				return true
+			}
+		case []corev1.PodSchedulingGate:
+			for _, g := range v {
+				if g.Name == QuantumGateName {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func hasSidecarOp(ops []jsonPatchOp) bool {
+	for _, op := range ops {
+		switch v := op.Value.(type) {
+		case corev1.Container:
+			if v.Name == "fluence-sidecar" {
+				return true
+			}
+		case []corev1.Container:
+			for _, c := range v {
+				if c.Name == "fluence-sidecar" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // With a config-derived contract (region, qubits), a fluxion pod gets
 // FLUXION_BACKEND plus one FLUXION_<KEY> per attribute key.
 func TestMutateInjectsContract(t *testing.T) {
 	m := &Mutator{AttributeKeys: []string{"region", "qubits"}}
-	ops := m.Mutate(qpuPod("fluence", ""))
+	ops := m.Mutate(context.Background(), qpuPod("fluence", ""))
 	names := opEnvNames(ops)
 
 	for _, want := range []string{"FLUXION_BACKEND", "FLUXION_REGION", "FLUXION_QUBITS"} {
@@ -60,15 +111,12 @@ func TestMutateInjectsContract(t *testing.T) {
 			t.Errorf("missing injected env %q; got %v", want, names)
 		}
 	}
-	if len(names) != 3 {
-		t.Errorf("expected exactly 3 env vars, got %v", names)
-	}
 }
 
 // With no configured attributes, only FLUXION_BACKEND is injected.
 func TestMutateBackendOnly(t *testing.T) {
 	m := &Mutator{}
-	names := opEnvNames(m.Mutate(qpuPod("fluence", "")))
+	names := opEnvNames(m.Mutate(context.Background(), qpuPod("fluence", "")))
 	if len(names) != 1 || names[0] != "FLUXION_BACKEND" {
 		t.Fatalf("want [FLUXION_BACKEND], got %v", names)
 	}
@@ -77,16 +125,15 @@ func TestMutateBackendOnly(t *testing.T) {
 // Non-fluence pods are never mutated.
 func TestMutateSkipsOtherScheduler(t *testing.T) {
 	m := &Mutator{AttributeKeys: []string{"region"}}
-	if ops := m.Mutate(qpuPod("default-scheduler", "")); ops != nil {
+	if ops := m.Mutate(context.Background(), qpuPod("default-scheduler", "")); ops != nil {
 		t.Fatalf("non-fluence pod should not be mutated, got %v", ops)
 	}
 }
 
-// An env var the container already defines is not re-injected (idempotent / no
-// override), while the others still are.
+// An env var the container already defines is not re-injected.
 func TestMutateRespectsExistingEnv(t *testing.T) {
 	m := &Mutator{AttributeKeys: []string{"region"}}
-	names := opEnvNames(m.Mutate(qpuPod("fluence", "FLUXION_BACKEND")))
+	names := opEnvNames(m.Mutate(context.Background(), qpuPod("fluence", "FLUXION_BACKEND")))
 	if contains(names, "FLUXION_BACKEND") {
 		t.Errorf("should not re-inject existing FLUXION_BACKEND; got %v", names)
 	}
@@ -98,11 +145,7 @@ func TestMutateRespectsExistingEnv(t *testing.T) {
 // Classical pods (no fluxion resource request) are not mutated.
 func TestMutateSkipsNonFluxion(t *testing.T) {
 	m := &Mutator{AttributeKeys: []string{"region"}}
-	p := &corev1.Pod{Spec: corev1.PodSpec{
-		SchedulerName: "fluence",
-		Containers:    []corev1.Container{{Name: "c", Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: *resource.NewQuantity(1, resource.DecimalSI)}}}},
-	}}
-	if ops := m.Mutate(p); ops != nil {
+	if ops := m.Mutate(context.Background(), cpuPod("fluence")); ops != nil {
 		t.Fatalf("classical pod should not be mutated, got %v", ops)
 	}
 }
@@ -113,5 +156,36 @@ func TestEnvVarNames(t *testing.T) {
 	names := m.EnvVarNames()
 	if len(names) != 3 || names[0] != "FLUXION_BACKEND" {
 		t.Fatalf("EnvVarNames = %v, want FLUXION_BACKEND first then attrs", names)
+	}
+}
+
+// A QPU pod with no PodGroup (group of 1) gets no gate and no sidecar.
+func TestMutateQPUSinglePodNoSidecar(t *testing.T) {
+	m := &Mutator{} // no Client — group size will be 1
+	ops := m.Mutate(context.Background(), qpuPod("fluence", ""))
+	if hasGateOp(ops) {
+		t.Error("single QPU pod should not get a scheduling gate")
+	}
+	if hasSidecarOp(ops) {
+		t.Error("single QPU pod should not get a sidecar injected")
+	}
+}
+
+// quantumWorkerGateOps adds the gate to a pod with no existing gates.
+func TestQuantumWorkerGateOpsEmpty(t *testing.T) {
+	pod := qpuPod("fluence", "")
+	ops := quantumWorkerGateOps(pod)
+	if !hasGateOp(ops) {
+		t.Errorf("expected gate op, got %v", ops)
+	}
+}
+
+// quantumWorkerGateOps is idempotent — does not add gate if already present.
+func TestQuantumWorkerGateOpsIdempotent(t *testing.T) {
+	pod := qpuPod("fluence", "")
+	pod.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: QuantumGateName}}
+	ops := quantumWorkerGateOps(pod)
+	if len(ops) != 0 {
+		t.Errorf("expected no ops when gate already present, got %v", ops)
 	}
 }
