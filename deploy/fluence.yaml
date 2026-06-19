@@ -58,7 +58,7 @@ metadata:
 rules:
   - apiGroups: ["scheduling.k8s.io"]
     resources: ["podgroups", "workloads", "podgroups/status", "workloads/status"]
-    verbs: ["get", "list", "watch", "update", "patch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["coordination.k8s.io"]
     resources: ["leases"]
     verbs: ["create", "get", "update", "list", "watch"]
@@ -76,6 +76,9 @@ rules:
   # pod is admitted, so users do not need to apply RBAC manually.
   - apiGroups: [""]
     resources: ["serviceaccounts"]
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
     verbs: ["get", "create"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]
@@ -246,6 +249,21 @@ webhooks:
 #   kubectl apply -f deploy/fluence-sidecar.yaml
 
 
+---
+# PriorityClass for classical pods paired with quantum work.
+# Applied to worker pods by the webhook when they are gated.
+# When ungated, high priority triggers preemption of lower-priority work
+# so workers get nodes immediately as the QPU result arrives.
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: fluence-quantum-classical
+  labels:
+    app: fluence
+value: 1000000
+globalDefault: false
+preemptionPolicy: PreemptLowerPriority
+description: "High priority for classical pods paired with quantum work. Set by Fluence webhook."
 ---
 # SDK interceptor ConfigMap — holds the Python sitecustomize hook that
 # patches AwsDevice.run() to tag every quantum task with the pod UID.

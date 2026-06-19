@@ -18,7 +18,7 @@ native Kubernetes PodGroup (Gang) API — no sidecar, and no
 proven out first in
 [fluxion-quantum](https://github.com/converged-computing/fluxion-quantum).
 
-## How the pieces fit together
+## How does it work?
 
 ```console
  resources.yaml --+ 
@@ -79,8 +79,6 @@ Because a jobspec carries one global constraint, compute (`virtual=false`) and a
 virtual resource (`virtual=true`) cannot be co-selected in one match -- one would
 prune the other. A pod needing both produces **two** match-allocate calls, held
 together all-or-nothing.
-
----
 
 ## Components
 
@@ -193,6 +191,39 @@ admission. The real gating is Fluxion (and the backend's own limits); since a
 virtual backend is reachable from any node, each type is advertised at a large
 ceiling. Types come from the same config as the graph, so they can't drift.
 
+### `sidecars/` — quantum coordination sidecars
+
+Vendor-specific sidecar containers injected by the webhook into leader pods
+of quantum workflow groups. Each sidecar discovers the QPU task submitted by
+the leader, polls the vendor queue, and ungates worker pods when the task
+reaches position==1.
+
+```console
+sidecars/
+  lib/ungate.py          shared gate removal + ARN annotation logic
+  braket/
+    sidecar.py           AWS Braket sidecar (tag search, queue polling, ungate)
+    fluence_braket_intercept.py  AwsDevice.run() monkey-patch (PYTHONSTARTUP)
+    Dockerfile           build context is sidecars/ to include lib/
+    design.md            full design document
+    test/integration.sh  local integration test (requires AWS credentials)
+```
+
+The sidecar is injected automatically — users only need the group label:
+
+```yaml
+metadata:
+  labels:
+    fluence.flux-framework.org/group: my-workflow
+spec:
+  schedulerName: fluence
+```
+
+Fluence creates the PodGroup, injects the sidecar, creates per-namespace
+RBAC, and gates all non-leader pods. See `sidecars/braket/design.md` for
+the full design including the SDK interceptor, queue position polling, and
+the two-queue problem motivation.
+
 ### `pkg/webhook` — environment injection
 
 A mutating webhook that surfaces scheduler-chosen values to a workload. Container
@@ -210,7 +241,9 @@ workload reads these normalized names regardless of which backend it matched.
 - `cmd/deviceplugin` — the extended-resource DaemonSet.
 - `cmd/webhook` — the env-injection webhook.
 - `cmd/recovery-probe` — verifies allocation replay survives a graph rebuild
-  (what a restart does); see `make test-restore`. Note this was implemented but removed because the code in fluxion is only part of a PR branch, and I feel nervous about depending on it.
+  (what a restart does); see `make test-restore`. 
+  
+Note that the recovery probe (and graph restore) was implemented but removed because the code in fluxion is only part of a PR branch, and I feel nervous about depending on it.
 
 ## Configuration
 
@@ -334,6 +367,38 @@ my IBM account so this has not been tested live since mid June.
 Submission is **not** done by the scheduler — the workload container holds the
 user's credentials and submits via qrmi-go. Fluence only schedules and hands off
 the backend. (When we control local quantum devices this will change.)
+
+### 3. Quantum workflow groups (leader + workers)
+
+For workflows where a leader pod submits quantum work and worker pods process
+the results, add the group label to all pods. Fluence gates the workers until
+the QPU task reaches position==1 in the vendor queue:
+
+```yaml
+# All pods in the group get the same label
+metadata:
+  labels:
+    fluence.flux-framework.org/group: my-qaoa-workflow
+spec:
+  schedulerName: fluence
+```
+
+The first pod admitted becomes the leader — Fluence injects the sidecar and
+creates a PodGroup with `minCount: 1`. All subsequent pods get a
+`quantum.braket/ready` scheduling gate and consume no node resources during
+the QPU queue wait. When the sidecar observes `queue_position == 1`, it
+patches the task ARN onto each worker pod's annotations and removes their
+gates atomically with setting `fluence-quantum-classical` priority class.
+
+Per-namespace RBAC (`fluence-sidecar` ServiceAccount/Role/RoleBinding) and
+the interceptor ConfigMap are created automatically by the webhook on first
+use — no manual setup required.
+
+```bash
+# Apply per-namespace RBAC is NOT needed — webhook creates it automatically.
+# Just apply your pods with the group label and schedulerName: fluence.
+kubectl apply -f my-quantum-workflow.yaml
+```
 
 ### Notes
 
