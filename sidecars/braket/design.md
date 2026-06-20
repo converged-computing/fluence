@@ -108,20 +108,29 @@ and `fluence.flux-framework.org/group=<name>`:
    immediately without waiting for gated workers. The assumption here is
    that this leader is going to submit the quantum work.
 2. Records the leader pod name on the PodGroup via `QuantumLeaderAnnotation`.
-3. Creates per-namespace RBAC: `fluence-sidecar` ServiceAccount, Role
+3. Stamps `spec.schedulingGroup.podGroupName=<name>` on the pod. This is the
+   native 1.36 field the scheduler reads to gang the group; the user only
+   ever sets the LABEL, and the webhook translates it into the spec field so
+   the user never has to create a PodGroup or know it exists.
+4. Creates per-namespace RBAC: `fluence-sidecar` ServiceAccount, Role
    (patch pods, list PodGroups), RoleBinding.
-4. Copies `fluence-braket-interceptor` ConfigMap from `kube-system` into
+5. Copies `fluence-braket-interceptor` ConfigMap from `kube-system` into
    the pod's namespace (ConfigMap volumes require same-namespace source).
-5. Injects `fluence-sidecar` container into the leader pod.
-6. Injects `FLUENCE_POD_UID` env var (downward API from `metadata.uid`).
-7. Mounts the interceptor ConfigMap and sets `PYTHONSTARTUP` env var so
+6. Injects `fluence-sidecar` container into the leader pod.
+7. Injects `FLUENCE_POD_UID` env var (downward API from `metadata.uid`).
+8. Mounts the interceptor ConfigMap and sets `PYTHONSTARTUP` env var so
    the interceptor runs automatically before user code.
-8. Sets `serviceAccountName: fluence-sidecar`.
+9. Sets `serviceAccountName: fluence-sidecar`.
 
 **Subsequent pods (workers):**
 1. Reads the PodGroup leader annotation — retries up to 3× with 100ms
    delay to handle concurrent admission race.
-2. Adds `quantum.braket/ready` scheduling gate — pod enters
+2. Stamps `spec.schedulingGroup.podGroupName=<name>` on the pod, linking it
+   to the same PodGroup as the leader. The gate (next step) holds the worker
+   at PreEnqueue, so the scheduler does not consider it — and the scheduler's
+   `groupPods` excludes gated pods — until the sidecar ungates it. The
+   linkage only takes effect once the worker is ungated.
+3. Adds `quantum.braket/ready` scheduling gate — pod enters
    `SchedulingGated` state, invisible to Fluxion, consuming no resources.
 
 ### 3.3 Braket SDK interceptor

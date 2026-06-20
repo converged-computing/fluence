@@ -192,3 +192,40 @@ func TestGroupName(t *testing.T) {
 		t.Errorf("expected my-workflow, got %q", groupName(pod))
 	}
 }
+
+// schedulingGroupOps stamps spec.schedulingGroup.podGroupName on a pod with no
+// existing scheduling group — this is the field the scheduler gangs by.
+func TestSchedulingGroupOpsEmpty(t *testing.T) {
+	pod := qpuPod("fluence", "")
+	ops := schedulingGroupOps(pod, "my-workflow")
+	if len(ops) != 1 {
+		t.Fatalf("expected 1 op, got %d: %v", len(ops), ops)
+	}
+	if ops[0].Path != "/spec/schedulingGroup" {
+		t.Errorf("expected path /spec/schedulingGroup, got %q", ops[0].Path)
+	}
+	val, ok := ops[0].Value.(map[string]string)
+	if !ok || val["podGroupName"] != "my-workflow" {
+		t.Errorf("expected podGroupName=my-workflow, got %v", ops[0].Value)
+	}
+}
+
+// schedulingGroupOps is idempotent when the pod is already linked to the group.
+func TestSchedulingGroupOpsAlreadyLinked(t *testing.T) {
+	pod := qpuPod("fluence", "")
+	group := "my-workflow"
+	pod.Spec.SchedulingGroup = &corev1.PodSchedulingGroup{PodGroupName: &group}
+	if ops := schedulingGroupOps(pod, group); len(ops) != 0 {
+		t.Errorf("expected no ops when already linked, got %v", ops)
+	}
+}
+
+// schedulingGroupOps re-stamps when linked to a DIFFERENT group.
+func TestSchedulingGroupOpsDifferentGroup(t *testing.T) {
+	pod := qpuPod("fluence", "")
+	other := "other-group"
+	pod.Spec.SchedulingGroup = &corev1.PodSchedulingGroup{PodGroupName: &other}
+	if ops := schedulingGroupOps(pod, "my-workflow"); len(ops) != 1 {
+		t.Errorf("expected 1 op when linked to a different group, got %v", ops)
+	}
+}

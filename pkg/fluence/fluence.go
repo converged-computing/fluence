@@ -587,6 +587,13 @@ func parseJobIDs(ann map[string]string) ([]uint64, bool) {
 // (spec.schedulingGroup.podGroupName). That field is not label-selectable, so we
 // list the namespace and filter in code. A pod with no scheduling group is its
 // own group of one.
+//
+// Gated pods are excluded: a pod still carrying a scheduling gate is held at
+// PreEnqueue and is not part of the live scheduling cycle. In a quantum gang the
+// workers stay gated until the sidecar ungates them at QPU position==1, so
+// including them here would make the leader's match reserve resources for pods
+// that are not yet ready to run — defeating the whole point of gating. An
+// ungated pod re-enters the queue and is matched then.
 func (f *Fluence) groupPods(pod *corev1.Pod) ([]corev1.Pod, error) {
 	group := placement.PodGroupName(pod)
 	if group == "" {
@@ -599,9 +606,16 @@ func (f *Fluence) groupPods(pod *corev1.Pod) ([]corev1.Pod, error) {
 	}
 	out := make([]corev1.Pod, 0, len(list))
 	for _, p := range list {
-		if placement.PodGroupName(p) == group {
-			out = append(out, *p)
+		if placement.PodGroupName(p) != group {
+			continue
 		}
+		// Skip pods still holding a scheduling gate — they are not in the live
+		// scheduling cycle yet. The pod currently being scheduled (pod) has
+		// already cleared its gates by the time PreFilter runs, so it is included.
+		if len(p.Spec.SchedulingGates) > 0 {
+			continue
+		}
+		out = append(out, *p)
 	}
 	return out, nil
 }
