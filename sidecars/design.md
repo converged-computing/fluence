@@ -68,11 +68,35 @@ queue wait — which is worse than the original problem.
 The design combines four mechanisms:
 
 1. **SDK interceptor** — tags every QPU task with the pod UID
-2. **Fluence webhook** — gates worker pods, injects sidecar into leader
+2. **Fluence webhook** — gates worker pods, injects sidecar into quantum pods
 3. **Sidecar controller** — discovers the QPU task, polls queue position,
    ungates workers when position==1
 4. **High-priority ungating** — workers preempt lower-priority work at the
    last responsible moment
+
+### 3.0 When Fluence acts: the decision matrix
+
+Two orthogonal properties of a pod admitted with `schedulerName: fluence`
+determine what Fluence does:
+
+- **Q (quantum?)** — does any container request a quantum resource
+  (`fluxion.flux-framework.org/qpu`)? If so, Fluence is scheduling the quantum
+  work and there is a vendor backend behind it.
+- **G (gang?)** — does the pod carry `fluence.flux-framework.org/group`?
+
+|              | not quantum            | quantum                                                        |
+|--------------|------------------------|----------------------------------------------------------------|
+| **not gang** | group of 1 (nothing)   | inject provider interceptor + env; **sidecar only in observe-only mode if telemetry requested** (no workers to ungate) |
+| **gang**     | gang-schedule only     | leader: interceptor + env + sidecar (gates + ungates workers); workers: gate only |
+
+The crucial rule: **sidecar/interceptor injection is triggered by the quantum
+resource request, not the group label.** The group label only controls gang
+scheduling and worker gating. A group leader that requests no quantum resource
+(e.g. a classical pod that happens to set `BRAKET_DEVICE` itself) is just
+gang-scheduled — Fluence injects no sidecar, because there is no quantum work
+for it to coordinate. `BRAKET_DEVICE` (or any direct device selection by the
+user) is the signal that Fluence is *not* scheduling the quantum resource;
+`fluxion.flux-framework.org/qpu` is the signal that it is.
 
 ### 3.1 User interface
 
@@ -114,8 +138,9 @@ and `fluence.flux-framework.org/group=<name>`:
    the user never has to create a PodGroup or know it exists.
 4. Creates per-namespace RBAC: `fluence-sidecar` ServiceAccount, Role
    (patch pods, list PodGroups), RoleBinding.
-5. Copies `fluence-braket-interceptor` ConfigMap from `kube-system` into
-   the pod's namespace (ConfigMap volumes require same-namespace source).
+5. Copies the `fluence-quantum-interceptor` ConfigMap from `kube-system` into
+   the pod's namespace (ConfigMap volumes require same-namespace source). This
+   one ConfigMap carries every provider's interceptor block; see §3.7.
 6. Injects `fluence-sidecar` container into the leader pod.
 7. Injects `FLUENCE_POD_UID` env var (downward API from `metadata.uid`).
 8. Mounts the interceptor ConfigMap and sets `PYTHONSTARTUP` env var so
@@ -230,6 +255,69 @@ a quiet backend gets its classical resources before one submitted earlier to
 a busy backend. This aligns classical resource allocation with actual quantum
 execution order across heterogeneous backends.
 
+### 3.7 Provider interface
+
+The webhook is provider-agnostic. It cannot know the vendor at admission time,
+because the scheduler may choose a backend from a mixed set of vendors — the
+vendor is only fixed once the scheduler writes the backend annotation in
+PreBind, after the webhook has run. The design therefore splits by which
+artifact needs the vendor and when:
+
+- **Interceptor** — runs in the user's application container and must be mounted
+  at admission, before the vendor is known. It is a single all-providers file
+  assembled from each provider's `interceptor.py` block (see
+  `sidecars/build-interceptor.sh`). Each block fail-soft skips if its vendor SDK
+  is not importable in that container, so the one mounted file works in any
+  quantum container regardless of which SDK is present. This is *forced* by
+  mixed-vendor scheduling: the webhook cannot pick a single provider's
+  interceptor at mount time. One source ConfigMap in `kube-system`
+  (`fluence-quantum-interceptor`), copied per-namespace by the webhook.
+
+- **Sidecar** — runs in the Fluence sidecar image and resolves the vendor at
+  *runtime* from the backend annotation (`FLUXION_BACKEND`). It loads only the
+  one provider module that matches, so an unrelated provider's SDK failure never
+  affects the run.
+
+Every provider implements a common interface (`sidecars/lib/provider.py`):
+
+```
+Provider:
+    name                          # "braket", "ibm", ...
+    matches(vendor, backend)      # runtime resolution from backend annotation
+    find_my_task(pod_uid, ...)    # search by the fluence-pod-uid tag → opaque Task
+    is_ready_to_ungate(task)      # decision primitive: position==1 OR running
+    queue_position(task)          # optional richer telemetry; None if unavailable
+    job_id(task)                  # cross-vendor id handed to workers (NOT the ARN)
+```
+
+Vendor-specific identifiers (a Braket task ARN, an IBM job id, a GCP operation
+name) are never named in the interface — they live behind the opaque `Task` and
+are surfaced generically through `job_id()`. The interceptor and the provider's
+`find_my_task` are joined only by a shared tag convention (`fluence-pod-uid`),
+not by shared code: the interceptor stamps the tag at submission, `find_my_task`
+searches for it.
+
+`is_ready_to_ungate` is the decision primitive and is always implementable, even
+for vendors that do not expose a numeric queue position (it can key off the
+QUEUED→RUNNING transition). `queue_position` is the optional richer signal used
+for observe-only telemetry and position-series logging.
+
+Adding a vendor is one folder under `sidecars/providers/<name>/`: a
+`sidecar_provider.py` implementing the interface and an `interceptor.py` block.
+The build wires both in — the interceptor block is concatenated into the single
+mounted file, and the provider module is registered for runtime resolution.
+
+#### Observe-only (telemetry) mode
+
+A quantum pod that is *not* a gang (a single quantum pod, no workers to ungate)
+gets the interceptor and env only — no sidecar — by default, so no surprise
+machinery is injected. Telemetry is opt-in via the label
+`fluence.flux-framework.org/observe: "true"`, surfaced to the sidecar as
+`FLUENCE_OBSERVE=true`. In observe-only mode the sidecar discovers the task and
+polls `queue_position`, logging the series for measurement, but ungates nothing.
+Experiments use this to get a uniform queue-position measurement path across
+singleton and gang runs.
+
 ## 4. Properties
 
 | Property | Value |
@@ -239,6 +327,7 @@ execution order across heterogeneous backends.
 | Classical resources during QPU wait | Zero (SchedulingGated) |
 | QPU queue time estimation needed | No — position==1 is observable |
 | Works across heterogeneous backends | Yes — any backend in Fluxion graph |
+| Multi-vendor | Yes — provider interface, vendor resolved at runtime |
 | Vendor API cooperation needed | No — SDK interceptor handles tagging |
 
 ## 5. Limitations
@@ -252,12 +341,15 @@ design using a `MatchReserveAt(time_at, spec)` Fluxion primitive — where
 would allow graceful node draining instead of preemption. No current QPU
 vendor exposes such an API.
 
-### 5.2 Non-Braket SDKs
+### 5.2 Provider coverage
 
-The interceptor patches `AwsDevice.run()`. IBM Qiskit Runtime, IQM native
-SDK, and other vendors require separate interceptors in `sidecars/<vendor>/`.
-The pattern is identical; only the SDK entry point differs. We will make
-sidecars for different vendor interfaces.
+The provider interface (§3.7) makes adding a vendor a matter of implementing
+`find_my_task`/`is_ready_to_ungate`/`job_id` and an interceptor block. Braket is
+implemented. IBM Qiskit Runtime is a natural next provider — it supports
+submit-time `job_tags` and tag-based filtering via `QiskitRuntimeService.jobs`,
+so both halves of the mechanism are expressible. Vendors whose APIs expose
+neither tag-search nor a queue position would need a fallback discovery
+heuristic (e.g. a time window) rather than the tag mechanism.
 
 ### 5.3 Single task per workflow
 
