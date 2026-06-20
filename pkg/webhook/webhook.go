@@ -302,6 +302,28 @@ func (m *Mutator) ensureSidecarRBAC(ctx context.Context, namespace string) {
 
 // ── Patch operation builders ───────────────────────────────────────────────────
 
+// schedulingGroupOps links a pod to its PodGroup via the native 1.36 field
+// spec.schedulingGroup.podGroupName — the field the Fluence scheduler plugin
+// reads (placement.PodGroupName) to gang the group. Without this, the scheduler
+// sees each pod as its own group of one and never gangs them. The user only
+// sets the group LABEL; the webhook translates that into the spec field so the
+// user never has to know the PodGroup exists.
+//
+// Applied to BOTH leader and workers. A gated worker is held at PreEnqueue, so
+// the scheduler does not run PreFilter for it (and groupPods excludes it) until
+// the sidecar removes its gate — at which point this linkage takes effect.
+func schedulingGroupOps(pod *corev1.Pod, group string) []jsonPatchOp {
+	if pod.Spec.SchedulingGroup != nil && pod.Spec.SchedulingGroup.PodGroupName != nil &&
+		*pod.Spec.SchedulingGroup.PodGroupName == group {
+		return nil // already linked
+	}
+	return []jsonPatchOp{{
+		Op:    "add",
+		Path:  "/spec/schedulingGroup",
+		Value: map[string]string{"podGroupName": group},
+	}}
+}
+
 func quantumWorkerGateOps(pod *corev1.Pod) []jsonPatchOp {
 	for _, g := range pod.Spec.SchedulingGates {
 		if g.Name == QuantumGateName {
@@ -441,10 +463,16 @@ func (m *Mutator) Mutate(ctx context.Context, pod *corev1.Pod) []jsonPatchOp {
 		m.ensureQuantumPodGroup(ctx, pod, g)
 		m.ensureSidecarRBAC(ctx, pod.Namespace)
 		m.recordLeader(ctx, pod)
+		// Link the leader to the PodGroup so the scheduler gangs the group.
+		ops = append(ops, schedulingGroupOps(pod, g)...)
 		ops = append(ops, m.sidecarOps(pod)...)
 		ops = append(ops, podUIDOps(pod)...)
 	} else {
 		log.Printf("[fluence-webhook] pod %s/%s is quantum worker (leader=%s)", pod.Namespace, pod.Name, leader)
+		// Link the worker to the same PodGroup, then gate it. The gate holds the
+		// worker at PreEnqueue so the scheduler ignores it until the sidecar
+		// ungates it at QPU position==1.
+		ops = append(ops, schedulingGroupOps(pod, g)...)
 		ops = append(ops, quantumWorkerGateOps(pod)...)
 	}
 
