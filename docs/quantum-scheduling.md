@@ -121,83 +121,92 @@ The namespace distinction:
 - `fluxion.flux-framework.org/*` — Fluxion resource-graph concerns
   (extended resource types, backend attribute env vars)
 
-### 3.2 Webhook behavior
+### 3.2 Webhook behavior (handler architecture)
 
-When the Fluence mutating webhook sees a pod with `schedulerName: fluence`
-and `fluence.flux-framework.org/group=<name>`:
+The webhook core is domain-agnostic: it owns the Mutator, a handler dispatcher,
+per-namespace PodGroup/RBAC provisioning, the Model C package staging, the HTTP
+entrypoint, and TLS. It knows nothing about quantum. Behavior is expressed as a
+set of **handlers** that self-register (`webhook.Register` from each handler
+package's `init()`); the core never names a handler. Each handler declares its
+own trigger via `Applies(ctx, MutatorAPI, pod)` and contributes patch ops via
+`Mutate`. A pod flows through every handler that applies, and their ops are
+concatenated. This keeps quantum entirely encapsulated in one handler — adding
+or removing behavior never touches the core.
 
-**First pod admitted (leader):**
-1. Creates a PodGroup with `minCount: 1` — Fluence owns this PodGroup,
-   the user never creates it. `minCount: 1` means the leader schedules
-   immediately without waiting for gated workers. The assumption here is
-   that this leader is going to submit the quantum work.
-2. Records the leader pod name on the PodGroup via `QuantumLeaderAnnotation`.
-3. Stamps `spec.schedulingGroup.podGroupName=<name>` on the pod. This is the
-   native 1.36 field the scheduler reads to gang the group; the user only
-   ever sets the LABEL, and the webhook translates it into the spec field so
-   the user never has to create a PodGroup or know it exists.
-4. Creates per-namespace RBAC: `fluence-sidecar` ServiceAccount, Role
-   (patch pods, list PodGroups), RoleBinding.
-5. Copies the `fluence-quantum-interceptor` ConfigMap from `kube-system` into
-   the pod's namespace (ConfigMap volumes require same-namespace source). This
-   one ConfigMap carries every provider's interceptor block; see §3.7.
-6. Injects `fluence-sidecar` container into the leader pod.
-7. Injects `FLUENCE_POD_UID` env var (downward API from `metadata.uid`).
-8. Mounts the interceptor ConfigMap and sets `PYTHONSTARTUP` env var so
-   the interceptor runs automatically before user code.
-9. Sets `serviceAccountName: fluence-sidecar`.
+The three handlers (`pkg/webhook/handlers/`):
 
-**Subsequent pods (workers):**
-1. Reads the PodGroup leader annotation — retries up to 3× with 100ms
-   delay to handle concurrent admission race.
-2. Stamps `spec.schedulingGroup.podGroupName=<name>` on the pod, linking it
-   to the same PodGroup as the leader. The gate (next step) holds the worker
-   at PreEnqueue, so the scheduler does not consider it — and the scheduler's
-   `groupPods` excludes gated pods — until the sidecar ungates it. The
-   linkage only takes effect once the worker is ungated.
-3. Adds `quantum.braket/ready` scheduling gate — pod enters
-   `SchedulingGated` state, invisible to Fluxion, consuming no resources.
+**`fluxion` (`fluxion.go`)** — applies when any container requests a
+`fluxion.flux-framework.org/*` resource. Injects the `FLUXION_*` env contract
+(backend + attributes) sourced from the annotations the scheduler writes in
+PreBind. Generic to all Fluxion resources.
 
-### 3.3 Braket SDK interceptor
+**`gang` (`gang.go`)** — applies when the pod carries the group label. Creates a
+Fluence-owned PodGroup (`minCount: 1`) on first admission, records that first
+pod as the admission-order leader, and stamps `spec.schedulingGroup.podGroupName`
+on every pod in the group so the scheduler gangs them. The user only ever sets
+the LABEL; the webhook translates it into the native field, so the user never
+creates a PodGroup or knows it exists. Knows nothing about quantum — a purely
+classical gang is fully handled here, with no sidecar.
 
-I created a consistent sidecar that is going to monitor the queue, and be able
-to ungate the worker pods when the task submit by our pod is at position 1
-(implicating it will run soon, and we assume the user wants the classical
-gang to run at the same time or slightly sooner). Note that it is up to the
-user application to orchestrate the leader and workers, and coordination
-of the quantum results. A few examples: 
+**`quantum` (`quantum.go`)** — the only handler that knows about quantum
+resources, gates, and observe semantics. Applies to a pod in either role:
+- **submitter** (requests `fluxion.flux-framework.org/qpu`): a group leader, or
+  a standalone quantum pod. Always gets the interceptor staged (so its task is
+  tagged). Gets the **sidecar** only when there is coordination to do — it is a
+  group leader (workers to ungate) or observe-only telemetry is requested.
+- **worker** (a non-leader member of a group whose recorded leader is a quantum
+  pod): gets the `quantum.braket/ready` scheduling gate, entering
+  `SchedulingGated` state — invisible to Fluxion, consuming no resources — until
+  the leader's sidecar ungates it.
 
-- The worker pods are guaranteed to get an ARN for where the Braket results are in S3, 
-  and this is ensured by the sidecar. So a reasonable approach is for workers query 
-  that bucket looking for a finished marker.  This would not require coordination from
-  the leader.
-- Given communication from the leader to workers, the leader can tell them exactly
-  when the work is finished, and coordinate what they do with results.
+Role is decided by **admission order**, not resource request. In a pod-template
+gang (Deployment/Job/StatefulSet) every pod is identical — same group label,
+every pod requests the quantum resource — so the leader is simply the first pod
+admitted (recorded on the PodGroup); every other pod is a worker, regardless of
+its own request. The gate holds workers at PreEnqueue, so the scheduler does not
+run PreFilter for them (and `groupPods` excludes gated pods) until ungated.
 
-I ran into the issue of needing to GET the task id from the primary pod from
-the sidecar. What I decided on is a very simply injection - the call of the
-script to submit the job can take arbitrary tags, and so I wrap that with a configmap
-that is in the pythonpath, and ensure the task is tagged with a pod specific UID
-that the sidecar also knows. More specifically, `fluence_braket_intercept.py` script is 
-mounted via `PYTHONSTARTUP` into every container in the leader pod. It monkey-patches 
-`AwsDevice.run()` to automatically tag every quantum task submission with `FLUENCE_POD_UID`:
+### 3.3 Interceptor and Model C delivery
+
+The interceptor tags each submitted quantum task with the pod UID so the sidecar
+can discover it. It must run inside the **user's** application container — which
+does not have the `fluence` package installed. Rather than require a user
+install or mount a hand-assembled text file, Fluence uses **Model C**: the
+`fluence` Python package is built into the sidecar image, and the webhook stages
+it into the user container at admission.
+
+The quantum handler's `InterceptorOps`:
+1. adds a shared `emptyDir` volume;
+2. injects an **init container** (the sidecar image) running
+   `python -m fluence.stage <dir>`, which copies the pure-Python `fluence`
+   package plus a `sitecustomize.py` into that volume;
+3. mounts the volume into the quantum container and prepends `<dir>` to
+   `PYTHONPATH`, and sets `FLUENCE_POD_UID`.
+
+Python imports `sitecustomize` automatically on every interpreter start —
+including non-interactive `python app.py`, unlike `PYTHONSTARTUP`, which fires
+only for interactive sessions. The staged `sitecustomize.py` does a guarded
+`import fluence.interceptor`, which asks every registered provider to install
+its tag hook. Each provider fail-soft skips if its vendor SDK is not importable
+in the user container, so the one staged package works for any vendor and never
+breaks the user app.
+
+For Braket the hook monkey-patches `AwsDevice.run()` to add a
+`fluence-pod-uid` tag to every task submission:
 
 ```python
-def _patched_run(self, task_specification, *args, **kwargs):
+def patched_run(self, task_specification, *args, **kwargs):
     pod_uid = os.environ.get("FLUENCE_POD_UID", "")
     if pod_uid:
         tags = kwargs.get("tags", {})
         tags["fluence-pod-uid"] = pod_uid
         kwargs["tags"] = tags
-    return _original_run(self, task_specification, *args, **kwargs)
+    return original_run(self, task_specification, *args, **kwargs)
 ```
 
-This is completely transparent to the user application. No code changes
-are required.
-
-### 3.4 Sidecar controller
-
-The `fluence-sidecar` container runs alongside the user application in the
+This is completely transparent to the user application — no code changes, no
+package install, no vendor SDK added to the user image (the hook patches
+whatever SDK the user already has).
 leader pod, sharing its AWS credentials and network namespace.
 
 ```console
@@ -219,9 +228,9 @@ leader pod, sharing its AWS credentials and network namespace.
 4. POLL  task.queue_position() every 30s.
    Log position for experiment instrumentation.
 
-5. WHEN  position == "1" OR state == RUNNING:
+5. WHEN  is_ready_to_ungate(task)  (position == 1 OR state == RUNNING):
    For each worker pod:
-     kubectl annotate pod <name> braket.quantum/task-arn=<arn>
+     kubectl annotate pod <name> fluence.flux-framework.org/quantum-job-id=<job_id>
      kubectl patch pod <name> --type=json \
        -p='[{"op":"add","path":"/spec/priorityClassName",
              "value":"fluence-quantum-classical"},
@@ -263,26 +272,28 @@ vendor is only fixed once the scheduler writes the backend annotation in
 PreBind, after the webhook has run. The design therefore splits by which
 artifact needs the vendor and when:
 
-- **Interceptor** — runs in the user's application container and must be mounted
-  at admission, before the vendor is known. It is a single all-providers file
-  assembled from each provider's `interceptor.py` block (see
-  `sidecars/build-interceptor.sh`). Each block fail-soft skips if its vendor SDK
-  is not importable in that container, so the one mounted file works in any
-  quantum container regardless of which SDK is present. This is *forced* by
-  mixed-vendor scheduling: the webhook cannot pick a single provider's
-  interceptor at mount time. One source ConfigMap in `kube-system`
-  (`fluence-quantum-interceptor`), copied per-namespace by the webhook.
+- **Interceptor** — runs in the user's application container and is staged there
+  at admission, before the vendor is known. It is the `fluence` package's
+  `interceptor` module, which on import asks *every* registered provider to
+  install its tag hook; each provider fail-soft skips if its vendor SDK is not
+  importable in that container. So the one staged package works in any quantum
+  container regardless of which SDK is present. This is *forced* by mixed-vendor
+  scheduling: the webhook cannot pick a single provider at stage time. Delivery
+  is Model C (§3.3): an init container stages the package into a shared volume on
+  the user container's PYTHONPATH — no ConfigMap, no user install.
 
 - **Sidecar** — runs in the Fluence sidecar image and resolves the vendor at
   *runtime* from the backend annotation (`FLUXION_BACKEND`). It loads only the
-  one provider module that matches, so an unrelated provider's SDK failure never
-  affects the run.
+  one provider that matches, so an unrelated provider's SDK failure never affects
+  the run.
 
-Every provider implements a common interface (`sidecars/lib/provider.py`):
+Every provider implements a common interface (`python/fluence/providers/base.py`),
+holding both halves of its mechanism:
 
 ```
 Provider:
     name                          # "braket", "ibm", ...
+    install_interceptor(pod_uid)  # interceptor half: patch the SDK submit call
     matches(vendor, backend)      # runtime resolution from backend annotation
     find_my_task(pod_uid, ...)    # search by the fluence-pod-uid tag → opaque Task
     is_ready_to_ungate(task)      # decision primitive: position==1 OR running
@@ -292,20 +303,20 @@ Provider:
 
 Vendor-specific identifiers (a Braket task ARN, an IBM job id, a GCP operation
 name) are never named in the interface — they live behind the opaque `Task` and
-are surfaced generically through `job_id()`. The interceptor and the provider's
-`find_my_task` are joined only by a shared tag convention (`fluence-pod-uid`),
-not by shared code: the interceptor stamps the tag at submission, `find_my_task`
-searches for it.
+are surfaced generically through `job_id()`. The interceptor hook and
+`find_my_task` are joined only by a shared tag convention (`fluence-pod-uid`):
+the hook stamps the tag at submission, `find_my_task` searches for it.
 
 `is_ready_to_ungate` is the decision primitive and is always implementable, even
 for vendors that do not expose a numeric queue position (it can key off the
 QUEUED→RUNNING transition). `queue_position` is the optional richer signal used
 for observe-only telemetry and position-series logging.
 
-Adding a vendor is one folder under `sidecars/providers/<name>/`: a
-`sidecar_provider.py` implementing the interface and an `interceptor.py` block.
-The build wires both in — the interceptor block is concatenated into the single
-mounted file, and the provider module is registered for runtime resolution.
+Adding a vendor is one module under `python/fluence/providers/<name>.py`: a
+`Provider` subclass implementing both halves that calls `register(PROVIDER)` at
+import, plus one import line in `providers/__init__.py`. Registration wires it in
+for both the interceptor (all providers) and runtime sidecar resolution (the
+matching provider). Nothing else changes — no build script, no concatenation.
 
 #### Observe-only (telemetry) mode
 

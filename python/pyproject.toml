@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# PyPI distribution name (the import name `fluence` is taken on PyPI, so we
+# distribute under a scoped name but import as `fluence`).
+name = "fluence-hpc"
+version = "0.0.0"
+description = "Fluence quantum-classical scheduling coordination library (sidecar + interceptor + providers)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Fluence / converged-computing" }]
+
+# No hard runtime dependencies. Vendor SDKs (amazon-braket-sdk, qiskit-ibm-
+# runtime, ...) are optional extras installed in the SIDECAR image only. The
+# interceptor never imports an SDK it isn't already running alongside.
+dependencies = []
+
+[project.optional-dependencies]
+braket = ["amazon-braket-sdk", "boto3"]
+# ibm = ["qiskit-ibm-runtime"]
+all = ["amazon-braket-sdk", "boto3"]
+
+[project.scripts]
+fluence-sidecar = "fluence.sidecar:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["fluence*"]

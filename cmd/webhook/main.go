@@ -19,6 +19,7 @@ import (
 
 	"github.com/converged-computing/fluence/pkg/cluster"
 	"github.com/converged-computing/fluence/pkg/webhook"
+	_ "github.com/converged-computing/fluence/pkg/webhook/handlers" // self-register handlers
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -85,7 +86,7 @@ func main() {
 	}
 	mutator := &webhook.Mutator{
 		AttributeKeys: attrKeys,
-		Client:        client,
+		Clientset:     client,
 		SidecarImage:  env("FLUENCE_SIDECAR_IMAGE", ""),
 	}
 	log.Printf("[fluence-webhook] env contract injected into fluxion pods: %v", mutator.EnvVarNames())

@@ -7,7 +7,7 @@
 #   3. The worker pod gets the quantum.braket/ready scheduling gate added
 #   4. The worker pod gets fluence-quantum-classical priority class set
 #
-# Does NOT test the braket sidecar itself (task discovery, SDK interceptor,
+# Does NOT test the sidecar itself (task discovery, interceptor,
 # queue position polling). Those require real AWS credentials and are covered
 # by sidecars/providers/braket/test/integration.sh which is run locally.
 set -euo pipefail
@@ -45,15 +45,19 @@ kubectl get rolebinding fluence-sidecar -n default \
   || fail "webhook did not create fluence-sidecar RoleBinding"
 log "  fluence-sidecar RoleBinding created"
 
-# 4. Webhook should have copied interceptor ConfigMap into the namespace
-kubectl get configmap fluence-interceptor -n default \
-  || fail "webhook did not copy fluence-interceptor ConfigMap into namespace"
-log "  fluence-interceptor ConfigMap copied into namespace"
-
-# 5. Leader pod should have sidecar container injected
-log "checking sidecar injected into leader pod..."
+# 4. Leader pod should have the fluence-stage init container injected (Model C:
+#    it stages the fluence Python package into a shared volume on PYTHONPATH).
+log "checking webhook injected the fluence-stage init container..."
 wait_pod_phase sidecar-test-leader Running 120 \
   || { kubectl describe pod sidecar-test-leader; fail "sidecar-test-leader did not reach Running"; }
+initc=$(kubectl get pod sidecar-test-leader \
+  -o jsonpath='{.spec.initContainers[*].name}')
+echo "$initc" | grep -q "fluence-stage" \
+  || fail "fluence-stage init container not injected (initContainers: $initc)"
+log "  fluence-stage init container injected"
+
+# 5. Leader pod should have the sidecar container injected
+log "checking sidecar injected into leader pod..."
 containers=$(kubectl get pod sidecar-test-leader \
   -o jsonpath='{.spec.containers[*].name}')
 echo "$containers" | grep -q "fluence-sidecar" \
