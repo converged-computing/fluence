@@ -9,7 +9,7 @@
 #
 # Does NOT test the braket sidecar itself (task discovery, SDK interceptor,
 # queue position polling). Those require real AWS credentials and are covered
-# by sidecars/braket/test/integration.sh which is run locally.
+# by sidecars/providers/braket/test/integration.sh which is run locally.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE}/lib.sh"
 
@@ -46,9 +46,9 @@ kubectl get rolebinding fluence-sidecar -n default \
 log "  fluence-sidecar RoleBinding created"
 
 # 4. Webhook should have copied interceptor ConfigMap into the namespace
-kubectl get configmap fluence-braket-interceptor -n default \
-  || fail "webhook did not copy fluence-braket-interceptor ConfigMap into namespace"
-log "  fluence-braket-interceptor ConfigMap copied into namespace"
+kubectl get configmap fluence-interceptor -n default \
+  || fail "webhook did not copy fluence-interceptor ConfigMap into namespace"
+log "  fluence-interceptor ConfigMap copied into namespace"
 
 # 5. Leader pod should have sidecar container injected
 log "checking sidecar injected into leader pod..."
@@ -70,7 +70,7 @@ log "  quantum.braket/ready gate set on worker"
 log "PASS: webhook correctly created RBAC, injected sidecar, gated worker"
 log "NOTE: fluence-quantum-classical priority is set by the sidecar at ungate time, not the webhook"
 log "NOTE: braket sidecar integration test (SDK intercept, tag discovery,"
-log "      queue polling) is in sidecars/braket/test/integration.sh"
+log "      queue polling) is in sidecars/providers/braket/test/integration.sh"
 
 # Only clean up pods and PodGroup — RBAC is namespace infrastructure
 # that persists for future quantum workflows in this namespace
