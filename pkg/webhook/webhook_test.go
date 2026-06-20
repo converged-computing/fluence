@@ -6,7 +6,10 @@ import (
 
 	"github.com/converged-computing/fluence/pkg/placement"
 	corev1 "k8s.io/api/core/v1"
+	schedulingv1alpha2 "k8s.io/api/scheduling/v1alpha2"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 )
 
 func qpuPod(scheduler, presetEnv string) *corev1.Pod {
@@ -112,8 +115,41 @@ func TestMutateInjectsContract(t *testing.T) {
 func TestMutateBackendOnly(t *testing.T) {
 	m := &Mutator{}
 	names := opEnvNames(m.Mutate(context.Background(), qpuPod("fluence", "")))
-	if len(names) != 1 || names[0] != "FLUXION_BACKEND" {
-		t.Fatalf("want [FLUXION_BACKEND], got %v", names)
+	// A quantum pod gets the FLUXION_BACKEND env contract AND the interceptor
+	// (FLUENCE_POD_UID + PYTHONSTARTUP) so its submitted task is tagged for
+	// discovery. It does NOT get the sidecar (standalone, nothing to coordinate).
+	if !contains(names, "FLUXION_BACKEND") {
+		t.Errorf("want FLUXION_BACKEND injected, got %v", names)
+	}
+	if !contains(names, "FLUENCE_POD_UID") || !contains(names, "PYTHONSTARTUP") {
+		t.Errorf("want interceptor env (FLUENCE_POD_UID, PYTHONSTARTUP), got %v", names)
+	}
+}
+
+// A standalone quantum pod is tagged (interceptor) but gets no sidecar.
+func TestMutateSingleQuantumNoSidecar(t *testing.T) {
+	m := &Mutator{}
+	ops := m.Mutate(context.Background(), qpuPod("fluence", ""))
+	if hasSidecarOp(ops) {
+		t.Error("standalone quantum pod should not get a sidecar (nothing to coordinate)")
+	}
+	if hasGateOp(ops) {
+		t.Error("standalone quantum pod should not get a scheduling gate")
+	}
+}
+
+// A standalone quantum pod WITH the observe label gets the sidecar in
+// observe-only mode.
+func TestMutateObserveLabelInjectsSidecar(t *testing.T) {
+	m := &Mutator{}
+	pod := qpuPod("fluence", "")
+	pod.Labels = map[string]string{ObserveLabel: "true"}
+	ops := m.Mutate(context.Background(), pod)
+	if !hasSidecarOp(ops) {
+		t.Error("observe-labeled quantum pod should get the sidecar")
+	}
+	if hasGateOp(ops) {
+		t.Error("observe-only pod should not be gated")
 	}
 }
 
@@ -227,5 +263,134 @@ func TestSchedulingGroupOpsDifferentGroup(t *testing.T) {
 	pod.Spec.SchedulingGroup = &corev1.PodSchedulingGroup{PodGroupName: &other}
 	if ops := schedulingGroupOps(pod, "my-workflow"); len(ops) != 1 {
 		t.Errorf("expected 1 op when linked to a different group, got %v", ops)
+	}
+}
+
+// ── Handler integration: worker gating in a quantum group ────────────────────
+//
+// A classical worker (no QPU request) that is a non-leader member of a group
+// whose leader IS a quantum pod must be gated. This exercises the multi-handler
+// flow and the cluster-state lookup in quantumHandler.isWorkerOfQuantumGroup.
+
+func quantumGroupFixture(ns, group, leaderName string) *fake.Clientset {
+	// PodGroup with the leader recorded, and the leader pod (which requests QPU).
+	pg := &schedulingv1alpha2.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      group,
+			Namespace: ns,
+			Annotations: map[string]string{
+				QuantumLeaderAnnotation: leaderName,
+			},
+		},
+	}
+	leaderPod := qpuPod("fluence", "")
+	leaderPod.Name = leaderName
+	leaderPod.Namespace = ns
+	leaderPod.Labels = map[string]string{QuantumGroupLabel: group}
+	return fake.NewSimpleClientset(pg, leaderPod)
+}
+
+func TestQuantumWorkerIsGated(t *testing.T) {
+	ns, group, leader := "default", "qaoa", "qaoa-leader"
+	m := &Mutator{Client: quantumGroupFixture(ns, group, leader)}
+
+	// Classical worker: no QPU request, in the group, not the leader.
+	worker := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "qaoa-worker-0",
+			Namespace: ns,
+			Labels:    map[string]string{QuantumGroupLabel: group},
+		},
+		Spec: corev1.PodSpec{
+			SchedulerName: "fluence",
+			Containers: []corev1.Container{{
+				Name: "worker",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU: *resource.NewQuantity(1, resource.DecimalSI),
+					},
+				},
+			}},
+		},
+	}
+
+	ops := m.Mutate(context.Background(), worker)
+	if !hasGateOp(ops) {
+		t.Errorf("classical worker in a quantum group should be gated; ops=%v", ops)
+	}
+	if hasSidecarOp(ops) {
+		t.Error("worker should not get a sidecar")
+	}
+}
+
+// A worker in a CLASSICAL gang (leader does not request QPU) must NOT be gated.
+func TestClassicalGangWorkerNotGated(t *testing.T) {
+	ns, group, leader := "default", "classical", "classical-leader"
+	// Leader pod requests only CPU — not a quantum group.
+	pg := &schedulingv1alpha2.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: group, Namespace: ns,
+			Annotations: map[string]string{QuantumLeaderAnnotation: leader},
+		},
+	}
+	leaderPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: leader, Namespace: ns,
+			Labels: map[string]string{QuantumGroupLabel: group}},
+		Spec: corev1.PodSpec{SchedulerName: "fluence", Containers: []corev1.Container{{
+			Name: "c",
+			Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceCPU: *resource.NewQuantity(1, resource.DecimalSI)}},
+		}}},
+	}
+	m := &Mutator{Client: fake.NewSimpleClientset(pg, leaderPod)}
+
+	worker := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "classical-worker-0", Namespace: ns,
+			Labels: map[string]string{QuantumGroupLabel: group}},
+		Spec: corev1.PodSpec{SchedulerName: "fluence", Containers: []corev1.Container{{
+			Name: "c",
+			Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+				corev1.ResourceCPU: *resource.NewQuantity(1, resource.DecimalSI)}},
+		}}},
+	}
+
+	ops := m.Mutate(context.Background(), worker)
+	if hasGateOp(ops) {
+		t.Error("worker in a classical gang must NOT be gated (would deadlock)")
+	}
+}
+
+// Pod-template gang: every pod has an identical spec — same group label AND
+// every pod requests the quantum resource. Role must be decided by admission
+// order (the recorded leader), NOT by resource request. The recorded leader
+// gets the sidecar; a different pod in the same group is gated as a worker
+// even though it also requests QPU.
+func TestPodTemplateGangSecondPodIsWorker(t *testing.T) {
+	ns, group, leader := "default", "qaoa", "qaoa-abc123"
+
+	// Leader already recorded on the PodGroup; leader pod requests QPU.
+	pg := &schedulingv1alpha2.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: group, Namespace: ns,
+			Annotations: map[string]string{QuantumLeaderAnnotation: leader}},
+	}
+	leaderPod := qpuPod("fluence", "")
+	leaderPod.Name = leader
+	leaderPod.Namespace = ns
+	leaderPod.Labels = map[string]string{QuantumGroupLabel: group}
+	m := &Mutator{Client: fake.NewSimpleClientset(pg, leaderPod)}
+
+	// A SECOND pod from the same template: identical spec, requests QPU, same
+	// group label, but a different name — it is NOT the recorded leader.
+	second := qpuPod("fluence", "")
+	second.Name = "qaoa-def456"
+	second.Namespace = ns
+	second.Labels = map[string]string{QuantumGroupLabel: group}
+
+	ops := m.Mutate(context.Background(), second)
+	if !hasGateOp(ops) {
+		t.Error("second pod in a pod-template gang must be gated as a worker, not treated as leader")
+	}
+	if hasSidecarOp(ops) {
+		t.Error("second pod must NOT get a sidecar (it is a worker, not the leader)")
 	}
 }

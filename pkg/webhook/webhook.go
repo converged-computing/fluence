@@ -55,11 +55,22 @@ const (
 	QuantumLeaderAnnotation       = "fluence.flux-framework.org/quantum-leader"
 	QuantumGateName               = "quantum.braket/ready"
 	QuantumClassicalPriorityClass = "fluence-quantum-classical"
-	SidecarImage                  = "ghcr.io/converged-computing/fluence-sidecar-braket:latest"
+	SidecarImage                  = "ghcr.io/converged-computing/fluence-sidecar:latest"
 	SidecarServiceAccount         = "fluence-sidecar"
-	InterceptorConfigMap          = "fluence-braket-interceptor"
-	InterceptorVolumeName         = "fluence-braket-interceptor"
-	InterceptorMountPath          = "/etc/fluence/fluence_braket_intercept.py"
+	InterceptorConfigMap          = "fluence-interceptor"
+	InterceptorVolumeName         = "fluence-interceptor"
+	InterceptorMountPath          = "/etc/fluence/fluence_intercept.py"
+
+	// QuantumResourceName is the specific Fluxion resource a pod requests when
+	// it wants Fluence to schedule quantum work. It is the trigger for the
+	// quantum handler (sidecar + interceptor injection). Distinct from the
+	// generic FluxionResourcePrefix, which marks any Fluxion-graph resource.
+	QuantumResourceName = "fluxion.flux-framework.org/qpu"
+
+	// ObserveLabel opts a quantum pod into observe-only telemetry: the sidecar
+	// is injected and polls queue position but ungates nothing. Used by
+	// experiments to get a uniform queue-position measurement path.
+	ObserveLabel = "fluence.flux-framework.org/observe"
 )
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -74,6 +85,8 @@ type Mutator struct {
 	AttributeKeys []string
 	Client        kubernetes.Interface
 	SidecarImage  string
+	// Handlers overrides the default handler set; nil means defaultHandlers().
+	Handlers []ResourceHandler
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -117,6 +130,30 @@ func requestsFluxionResource(c corev1.Container) bool {
 	for name := range c.Resources.Requests {
 		if strings.HasPrefix(string(name), placement.FluxionResourcePrefix) {
 			return true
+		}
+	}
+	return false
+}
+
+// podRequestsFluxionResource reports whether any container requests a
+// fluxion.flux-framework.org/* resource.
+func podRequestsFluxionResource(pod *corev1.Pod) bool {
+	for _, c := range pod.Spec.Containers {
+		if requestsFluxionResource(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// podRequestsQuantumResource reports whether any container requests the quantum
+// resource specifically. This is the trigger for the quantum handler.
+func podRequestsQuantumResource(pod *corev1.Pod) bool {
+	for _, c := range pod.Spec.Containers {
+		for name := range c.Resources.Requests {
+			if string(name) == QuantumResourceName {
+				return true
+			}
 		}
 	}
 	return false
@@ -337,30 +374,13 @@ func quantumWorkerGateOps(pod *corev1.Pod) []jsonPatchOp {
 	return []jsonPatchOp{{Op: "add", Path: "/spec/schedulingGates/-", Value: gate}}
 }
 
-func (m *Mutator) sidecarOps(pod *corev1.Pod) []jsonPatchOp {
+// interceptorOps mounts the all-providers interceptor file into the quantum-
+// submitting container(s) and sets PYTHONSTARTUP so it runs before user code.
+// This is what tags the submitted task with the pod uid for sidecar discovery.
+// It does NOT add the sidecar container — a pod can be tagged without being
+// coordinated (e.g. a standalone quantum pod with nothing to ungate).
+func (m *Mutator) interceptorOps(pod *corev1.Pod) []jsonPatchOp {
 	var ops []jsonPatchOp
-
-	sidecar := corev1.Container{
-		Name:            "fluence-sidecar",
-		Image:           m.sidecarImage(),
-		ImagePullPolicy: corev1.PullIfNotPresent,
-		Env: []corev1.EnvVar{
-			fieldEnv("FLUENCE_POD_UID", "metadata.uid"),
-			fieldEnv("FLUENCE_POD_NAME", "metadata.name"),
-			fieldEnv("FLUENCE_NAMESPACE", "metadata.namespace"),
-		},
-		Resources: corev1.ResourceRequirements{
-			Requests: corev1.ResourceList{
-				corev1.ResourceCPU:    *resourceQuantity("100m"),
-				corev1.ResourceMemory: *resourceQuantity("256Mi"),
-			},
-		},
-	}
-	if len(pod.Spec.Containers) == 0 {
-		ops = append(ops, jsonPatchOp{Op: "add", Path: "/spec/containers", Value: []corev1.Container{sidecar}})
-	} else {
-		ops = append(ops, jsonPatchOp{Op: "add", Path: "/spec/containers/-", Value: sidecar})
-	}
 
 	vol := corev1.Volume{
 		Name: InterceptorVolumeName,
@@ -377,7 +397,7 @@ func (m *Mutator) sidecarOps(pod *corev1.Pod) []jsonPatchOp {
 	}
 
 	mount := corev1.VolumeMount{Name: InterceptorVolumeName, MountPath: InterceptorMountPath,
-		SubPath: "fluence_braket_intercept.py", ReadOnly: true}
+		SubPath: "fluence_intercept.py", ReadOnly: true}
 	startup := corev1.EnvVar{Name: "PYTHONSTARTUP", Value: InterceptorMountPath}
 	for i, c := range pod.Spec.Containers {
 		if !requestsFluxionResource(c) {
@@ -396,11 +416,45 @@ func (m *Mutator) sidecarOps(pod *corev1.Pod) []jsonPatchOp {
 			}
 		}
 	}
+	return ops
+}
+
+// sidecarContainerOps adds the fluence-sidecar container and sets the sidecar
+// ServiceAccount. observe=true puts the sidecar in observe-only telemetry mode
+// (polls queue position, ungates nothing).
+func (m *Mutator) sidecarContainerOps(pod *corev1.Pod, observe bool) []jsonPatchOp {
+	var ops []jsonPatchOp
+
+	env := []corev1.EnvVar{
+		fieldEnv("FLUENCE_POD_UID", "metadata.uid"),
+		fieldEnv("FLUENCE_POD_NAME", "metadata.name"),
+		fieldEnv("FLUENCE_NAMESPACE", "metadata.namespace"),
+	}
+	if observe {
+		env = append(env, corev1.EnvVar{Name: "FLUENCE_OBSERVE", Value: "true"})
+	}
+
+	sidecar := corev1.Container{
+		Name:            "fluence-sidecar",
+		Image:           m.sidecarImage(),
+		ImagePullPolicy: corev1.PullIfNotPresent,
+		Env:             env,
+		Resources: corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU:    *resourceQuantity("100m"),
+				corev1.ResourceMemory: *resourceQuantity("256Mi"),
+			},
+		},
+	}
+	if len(pod.Spec.Containers) == 0 {
+		ops = append(ops, jsonPatchOp{Op: "add", Path: "/spec/containers", Value: []corev1.Container{sidecar}})
+	} else {
+		ops = append(ops, jsonPatchOp{Op: "add", Path: "/spec/containers/-", Value: sidecar})
+	}
 
 	if pod.Spec.ServiceAccountName == "" || pod.Spec.ServiceAccountName == "default" {
 		ops = append(ops, jsonPatchOp{Op: "add", Path: "/spec/serviceAccountName", Value: SidecarServiceAccount})
 	}
-
 	return ops
 }
 
@@ -424,14 +478,56 @@ func podUIDOps(pod *corev1.Pod) []jsonPatchOp {
 
 // ── Mutate ─────────────────────────────────────────────────────────────────────
 
-func (m *Mutator) Mutate(ctx context.Context, pod *corev1.Pod) []jsonPatchOp {
-	if pod.Spec.SchedulerName != SchedulerName {
-		return nil
+// ── Resource handlers ────────────────────────────────────────────────────────
+//
+// The webhook's behavior is expressed as a set of independent handlers rather
+// than hardcoded rules. Each handler decides for itself whether it applies to a
+// pod (Applies) and, if so, returns the mutations to inject (Mutate). The
+// webhook runs every registered handler in order and concatenates their ops.
+//
+// This keeps the core dispatcher domain-agnostic: quantum/braket is one handler,
+// not a special case. New behavior is a new handler, matched on whatever pod
+// condition it likes (a resource request, a label, an annotation, ...).
+
+// ResourceHandler inspects a pod and, when it applies, contributes JSON patch
+// operations. Applies is fully general — it receives the pod (and the Mutator,
+// for handlers that must consult cluster state, e.g. resolving a group's
+// leader) and decides.
+type ResourceHandler interface {
+	// Name identifies the handler in logs.
+	Name() string
+	// Applies reports whether this handler should act on the pod. It may use
+	// the Mutator's client to consult cluster state.
+	Applies(ctx context.Context, m *Mutator, pod *corev1.Pod) bool
+	// Mutate returns the patch ops to inject. It may use the Mutator's client
+	// for side effects (creating PodGroups, RBAC, copying ConfigMaps).
+	Mutate(ctx context.Context, m *Mutator, pod *corev1.Pod) []jsonPatchOp
+}
+
+// defaultHandlers is the ordered set of handlers the webhook runs. Order
+// matters only where handlers touch the same paths; these three are
+// independent except that env injection is harmless before the others.
+func defaultHandlers() []ResourceHandler {
+	return []ResourceHandler{
+		&fluxionEnvHandler{},
+		&gangHandler{},
+		&quantumHandler{},
 	}
+}
 
+// fluxionEnvHandler injects the FLUXION_* env contract into any container that
+// requests a fluxion.flux-framework.org/* resource. Generic to all Fluxion
+// resources, not quantum-specific.
+type fluxionEnvHandler struct{}
+
+func (h *fluxionEnvHandler) Name() string { return "fluxion-env" }
+
+func (h *fluxionEnvHandler) Applies(ctx context.Context, m *Mutator, pod *corev1.Pod) bool {
+	return podRequestsFluxionResource(pod)
+}
+
+func (h *fluxionEnvHandler) Mutate(ctx context.Context, m *Mutator, pod *corev1.Pod) []jsonPatchOp {
 	var ops []jsonPatchOp
-
-	// Rule 1: inject FLUXION_* env contract
 	contract := m.injectedEnv()
 	for i, c := range pod.Spec.Containers {
 		if !requestsFluxionResource(c) {
@@ -450,33 +546,143 @@ func (m *Mutator) Mutate(ctx context.Context, pod *corev1.Pod) []jsonPatchOp {
 			}
 		}
 	}
-
-	// Rule 2: quantum leader/worker split
-	g := groupName(pod)
-	if g == "" {
-		return ops
-	}
-
-	leader := m.podGroupLeader(ctx, pod)
-	if leader == "" {
-		log.Printf("[fluence-webhook] pod %s/%s is quantum leader for group %s", pod.Namespace, pod.Name, g)
-		m.ensureQuantumPodGroup(ctx, pod, g)
-		m.ensureSidecarRBAC(ctx, pod.Namespace)
-		m.recordLeader(ctx, pod)
-		// Link the leader to the PodGroup so the scheduler gangs the group.
-		ops = append(ops, schedulingGroupOps(pod, g)...)
-		ops = append(ops, m.sidecarOps(pod)...)
-		ops = append(ops, podUIDOps(pod)...)
-	} else {
-		log.Printf("[fluence-webhook] pod %s/%s is quantum worker (leader=%s)", pod.Namespace, pod.Name, leader)
-		// Link the worker to the same PodGroup, then gate it. The gate holds the
-		// worker at PreEnqueue so the scheduler ignores it until the sidecar
-		// ungates it at QPU position==1.
-		ops = append(ops, schedulingGroupOps(pod, g)...)
-		ops = append(ops, quantumWorkerGateOps(pod)...)
-	}
-
 	return ops
+}
+
+// gangHandler gang-schedules pods that carry the group label, by creating a
+// Fluence-owned PodGroup and stamping spec.schedulingGroup.podGroupName so the
+// scheduler gangs them. Independent of whether the work is quantum: a non-
+// quantum group is simply gang-scheduled with no sidecar.
+type gangHandler struct{}
+
+func (h *gangHandler) Name() string { return "gang" }
+
+func (h *gangHandler) Applies(ctx context.Context, m *Mutator, pod *corev1.Pod) bool {
+	return groupName(pod) != ""
+}
+
+func (h *gangHandler) Mutate(ctx context.Context, m *Mutator, pod *corev1.Pod) []jsonPatchOp {
+	g := groupName(pod)
+	// First pod admitted in the group creates the PodGroup; all pods are linked.
+	if m.podGroupLeader(ctx, pod) == "" {
+		m.ensureQuantumPodGroup(ctx, pod, g)
+		m.recordLeader(ctx, pod)
+	}
+	return schedulingGroupOps(pod, g)
+}
+
+// quantumHandler injects the provider interceptor + sidecar for pods that
+// request the quantum resource, and (when the pod is also part of a group)
+// gates the non-leader workers. This is the only handler that knows about
+// quantum coordination; the interceptor/sidecar machinery itself is generic.
+type quantumHandler struct{}
+
+func (h *quantumHandler) Name() string { return "quantum" }
+
+// Applies if the pod participates in quantum coordination, in either role:
+//   - it requests the quantum resource (the leader, or a standalone quantum
+//     pod), or
+//   - it is a non-leader member of a group whose leader is a quantum pod (a
+//     classical worker to be gated). Workers are classical and do not request
+//     the QPU resource themselves, so role is determined by group membership.
+func (h *quantumHandler) Applies(ctx context.Context, m *Mutator, pod *corev1.Pod) bool {
+	if podRequestsQuantumResource(pod) {
+		return true
+	}
+	return h.isWorkerOfQuantumGroup(ctx, m, pod)
+}
+
+// isWorkerOfQuantumGroup reports whether pod is a non-leader member of a group
+// whose recorded leader is a quantum (QPU-requesting) pod.
+func (h *quantumHandler) isWorkerOfQuantumGroup(ctx context.Context, m *Mutator, pod *corev1.Pod) bool {
+	g := groupName(pod)
+	if g == "" || m.Client == nil {
+		return false
+	}
+	leader := m.podGroupLeader(ctx, pod)
+	if leader == "" || leader == pod.Name {
+		return false // no leader yet, or this pod is the leader
+	}
+	lp, err := m.Client.CoreV1().Pods(pod.Namespace).Get(ctx, leader, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	return podRequestsQuantumResource(lp)
+}
+
+func (h *quantumHandler) Mutate(ctx context.Context, m *Mutator, pod *corev1.Pod) []jsonPatchOp {
+	var ops []jsonPatchOp
+
+	g := groupName(pod)
+
+	// Determine role by ADMISSION ORDER, not by resource request. In a gang
+	// built from a pod template (Deployment/Job/StatefulSet), every pod has an
+	// identical spec — same group label, and every pod requests the quantum
+	// resource. The leader is simply the first pod admitted, recorded on the
+	// PodGroup by the gang handler. Every other pod in the group is a worker,
+	// regardless of whether it requests the quantum resource itself.
+	if g != "" {
+		leader := m.podGroupLeader(ctx, pod)
+		if leader != "" && leader != pod.Name {
+			// Worker: not the recorded leader. Gate it; the leader's sidecar
+			// ungates it when the quantum task is ready. (The gang handler has
+			// already linked it to the PodGroup via spec.schedulingGroup.)
+			log.Printf("[fluence-webhook] quantum worker %s/%s (leader=%s) — gating",
+				pod.Namespace, pod.Name, leader)
+			return quantumWorkerGateOps(pod)
+		}
+	}
+
+	// Submitter role: the recorded group leader, or a standalone single quantum
+	// pod. Always gets the interceptor + pod-uid env so its task is tagged for
+	// discovery. It gets the SIDECAR only when there is coordination to do:
+	//   - it is a group leader (workers to ungate), or
+	//   - observe-only telemetry is requested via the observe label.
+	// A standalone quantum pod with no group and no observe label has nothing to
+	// coordinate, so no sidecar is injected (no surprise machinery).
+	isLeader := g != ""
+	observe := pod.Labels != nil && pod.Labels[ObserveLabel] == "true"
+
+	log.Printf("[fluence-webhook] quantum pod %s/%s — interceptor (leader=%v observe=%v)",
+		pod.Namespace, pod.Name, isLeader, observe)
+
+	ops = append(ops, podUIDOps(pod)...)
+	ops = append(ops, m.interceptorOps(pod)...)
+
+	if isLeader || observe {
+		m.ensureSidecarRBAC(ctx, pod.Namespace)
+		ops = append(ops, m.sidecarContainerOps(pod, observe)...)
+	}
+	return ops
+}
+
+// ── Mutate ─────────────────────────────────────────────────────────────────────
+
+// Mutate dispatches the pod to every registered handler and concatenates the
+// patch operations from those that apply. Pods not scheduled by Fluence are
+// left untouched.
+func (m *Mutator) Mutate(ctx context.Context, pod *corev1.Pod) []jsonPatchOp {
+	if pod.Spec.SchedulerName != SchedulerName {
+		return nil
+	}
+	var ops []jsonPatchOp
+	for _, h := range m.handlers() {
+		if h.Applies(ctx, m, pod) {
+			log.Printf("[fluence-webhook] handler %q applies to %s/%s",
+				h.Name(), pod.Namespace, pod.Name)
+			ops = append(ops, h.Mutate(ctx, m, pod)...)
+		}
+	}
+	return ops
+}
+
+// handlers returns the Mutator's handler set, defaulting to defaultHandlers if
+// none were configured (tests may inject their own).
+func (m *Mutator) handlers() []ResourceHandler {
+	if m.Handlers != nil {
+		return m.Handlers
+	}
+	return defaultHandlers()
 }
 
 // ── HTTP handler ───────────────────────────────────────────────────────────────
