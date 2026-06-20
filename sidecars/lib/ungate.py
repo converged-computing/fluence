@@ -29,14 +29,18 @@ def kubectl(args):
     return result.stdout.strip()
 
 
-def ungate_pods(gated_pods, task_arn, namespace):
+JOB_ID_ANNOTATION = "fluence.flux-framework.org/quantum-job-id"
+
+
+def ungate_pods(gated_pods, job_id, namespace):
     """
     For each gated pod:
-      1. Patch braket.quantum/task-arn annotation with the task ARN
-      2. Remove the quantum.braket/ready scheduling gate
+      1. Patch the fluence.flux-framework.org/quantum-job-id annotation with the
+         (vendor-neutral) job id so the worker can locate the quantum result.
+      2. Set the high-priority class and remove the scheduling gate atomically.
 
     gated_pods: list of pod names
-    task_arn:   the vendor task ARN to propagate (may be empty string if unknown)
+    job_id:     the vendor-neutral job identifier (may be empty if unknown)
     namespace:  Kubernetes namespace
     """
     for pod_name in gated_pods:
@@ -46,20 +50,20 @@ def ungate_pods(gated_pods, task_arn, namespace):
 
         log(f"Ungating pod: {pod_name}")
 
-        # 1. Patch task ARN annotation
-        if task_arn:
+        # 1. Patch job-id annotation
+        if job_id:
             try:
                 kubectl([
                     "annotate", "pod", pod_name,
                     "-n", namespace,
-                    f"braket.quantum/task-arn={task_arn}",
+                    f"{JOB_ID_ANNOTATION}={job_id}",
                     "--overwrite",
                 ])
-                log(f"  Patched task ARN onto {pod_name}: {task_arn}")
+                log(f"  Patched job id onto {pod_name}: {job_id}")
             except RuntimeError as e:
                 log(f"  WARNING: could not patch annotation on {pod_name}: {e}")
         else:
-            log(f"  WARNING: no task ARN available to patch onto {pod_name}")
+            log(f"  WARNING: no job id available to patch onto {pod_name}")
 
         # 2. Set high priority class and remove scheduling gate atomically
         # Priority is set here (not in webhook) to avoid admission controller
