@@ -250,7 +250,7 @@ func (m *Mutator) InterceptorOps(pod *corev1.Pod) []spec.Op {
 	initc := corev1.Container{
 		Name:            "fluence-stage",
 		Image:           m.sidecarImage(),
-		ImagePullPolicy: corev1.PullIfNotPresent,
+		ImagePullPolicy: corev1.PullAlways,
 		Command: []string{"sh", "-c",
 			fmt.Sprintf("python -m fluence.stage %s || echo '[fluence] staging skipped (interceptor unavailable)'", StageMountPath)},
 		VolumeMounts: []corev1.VolumeMount{{Name: StageVolumeName, MountPath: StageMountPath}},
@@ -323,7 +323,7 @@ func (m *Mutator) SidecarContainerOps(pod *corev1.Pod, observe bool) []spec.Op {
 		}
 	}
 	sidecar := corev1.Container{
-		Name: "fluence-sidecar", Image: m.sidecarImage(), ImagePullPolicy: corev1.PullIfNotPresent,
+		Name: "fluence-sidecar", Image: m.sidecarImage(), ImagePullPolicy: corev1.PullAlways,
 		Env: env,
 		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
 			corev1.ResourceCPU: *resourceQuantity("100m"), corev1.ResourceMemory: *resourceQuantity("256Mi"),
