@@ -184,11 +184,27 @@ spec:
         - name: webhook
           image: ghcr.io/converged-computing/fluence:latest
           command: ["/bin/fluence-webhook"]
+          # The webhook derives the FLUXION_* env contract (FLUXION_VENDOR,
+          # FLUXION_QRMI_TYPE, ...) from the resource graph's attribute keys, so
+          # it needs the same graph the scheduler and device plugin read. Without
+          # this it injects only FLUXION_BACKEND, and the sidecar can't route to
+          # a provider (which keys on qrmi_type).
+          env:
+            - name: FLUENCE_RESOURCES
+              value: /etc/fluence/resources.yaml
           ports:
             - containerPort: 8443
           readinessProbe:
             httpGet: {path: /healthz, port: 8443, scheme: HTTPS}
             initialDelaySeconds: 2
+          volumeMounts:
+            - name: config
+              mountPath: /etc/fluence
+      volumes:
+        - name: config
+          projected:
+            sources:
+              - configMap: {name: fluence-resources, optional: true}
 ---
 apiVersion: v1
 kind: Service
