@@ -21,7 +21,7 @@ spec:
       containers:
         - name: deviceplugin
           image: ghcr.io/converged-computing/fluence:latest
-          imagePullPolicy: Never
+          # imagePullPolicy: Never
           command: ["/bin/fluence-deviceplugin"]
           env:
             - name: FLUENCE_RESOURCES
