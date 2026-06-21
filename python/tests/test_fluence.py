@@ -17,18 +17,18 @@ def test_braket_registered():
 
 def test_resolve_braket_by_vendor():
     from fluence.providers import resolve
-    assert resolve("braket", "").name == "braket"
+    assert resolve({"vendor": "braket"}).name == "braket"
 
 
 def test_resolve_braket_by_arn_backend():
     from fluence.providers import resolve
-    p = resolve("", "arn:aws:braket:us-east-1::device/quantum-simulator/amazon/sv1")
+    p = resolve({"arn": "arn:aws:braket:us-east-1::device/quantum-simulator/amazon/sv1"})
     assert p is not None and p.name == "braket"
 
 
 def test_resolve_unknown_returns_none():
     from fluence.providers import resolve
-    assert resolve("nope", "nope") is None
+    assert resolve({"vendor": "nope", "backend": "nope"}) is None
 
 
 def test_interceptor_failsoft_without_sdk():
@@ -95,13 +95,14 @@ def test_staged_sitecustomize_runs_interceptor():
 
 
 
-def test_braket_matches_amazon_vendor():
-    # The resource graph labels Braket devices vendor="amazon"; the provider
-    # must resolve for that (and for sv1 by name/arn).
+def test_braket_matches_by_qrmi_type_and_vendor():
+    # The authoritative routing key is qrmi_type (braket-*), which holds even
+    # when the hardware vendor is quera/rigetti/iqm rather than amazon.
     from fluence.providers import resolve
-    assert resolve("amazon", "sv1") is not None
-    assert resolve("amazon", "sv1").name == "braket"
-    assert resolve("", "arn:aws:braket:::device/quantum-simulator/amazon/sv1").name == "braket"
+    assert resolve({"vendor": "amazon", "backend": "sv1"}).name == "braket"
+    # aquila: vendor=quera but qrmi_type=braket-ahs must still route to braket.
+    assert resolve({"vendor": "quera", "backend": "aquila",
+                    "qrmi_type": "braket-ahs"}).name == "braket"
 
 
 if __name__ == "__main__":

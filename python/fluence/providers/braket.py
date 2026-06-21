@@ -55,13 +55,21 @@ class BraketProvider(Provider):
 
     # ── sidecar half ───────────────────────────────────────────────────────────
 
-    def matches(self, vendor: str, backend: str) -> bool:
-        v, b = (vendor or "").lower(), (backend or "").lower()
-        # The Fluxion resource graph labels Braket devices with vendor "amazon"
-        # (the operator of the Braket service); accept "braket" too for clarity.
-        if v in ("braket", "amazon", "aws"):
+    def matches(self, attrs: "dict[str, str]") -> bool:
+        # Authoritative routing key: qrmi_type. Every Braket-accessed device —
+        # gate simulators (sv1/tn1/dm1), gate QPUs (rigetti/iqm/ionq), and AHS
+        # (aquila, ahs_local) — carries a "braket-*" qrmi_type, regardless of
+        # which company (amazon, quera, rigetti, iqm, ...) made the hardware.
+        qrmi = (attrs.get("qrmi_type") or "").lower()
+        if qrmi.startswith("braket"):
             return True
-        return "braket" in b or b.startswith("arn:aws:braket")
+        # Fallbacks for graphs that don't set qrmi_type: vendor or backend/arn.
+        vendor  = (attrs.get("vendor") or "").lower()
+        backend = (attrs.get("backend") or "").lower()
+        arn     = (attrs.get("arn") or "").lower()
+        if vendor in ("braket", "amazon", "aws"):
+            return True
+        return "braket" in backend or arn.startswith("arn:aws:braket")
 
     def _client(self, backend: str):
         import boto3

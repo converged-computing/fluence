@@ -62,9 +62,16 @@ class Provider:
 
     # ── sidecar half (runs in the sidecar container) ───────────────────────────
 
-    def matches(self, vendor: str, backend: str) -> bool:
-        """True if this provider handles the given vendor/backend (resolved at
-        runtime from the pod's backend annotation)."""
+    def matches(self, attrs: "dict[str, str]") -> bool:
+        """True if this provider handles the backend Fluxion selected.
+
+        attrs is the full set of FLUXION_* values surfaced from the matched
+        qdevice's properties (backend, vendor, qrmi_type, arn, region, ...), so a
+        provider can route on whichever attribute is authoritative for it. For
+        Braket the routing key is qrmi_type (e.g. "braket-ahs", "braket-gate"):
+        the device is reached through the Braket SDK regardless of which company
+        (amazon, quera, rigetti, iqm, ...) built the hardware.
+        """
         raise NotImplementedError
 
     def find_my_task(self, pod_uid: str, backend: str, timeout: int) -> "Task | None":
@@ -101,11 +108,19 @@ def all_providers() -> "list[Provider]":
     return list(_REGISTRY)
 
 
-def resolve(vendor: str = "", backend: str = "") -> "Provider | None":
-    """Return the registered provider matching vendor/backend, or None."""
+def resolve(attrs: "dict[str, str] | None" = None, **legacy) -> "Provider | None":
+    """Return the registered provider matching the selected backend, or None.
+
+    attrs is the FLUXION_* attribute set from the matched qdevice. Accepts legacy
+    keyword args (vendor=, backend=) for older callers/tests, folding them in.
+    """
+    a = dict(attrs or {})
+    for k, v in legacy.items():
+        if v:
+            a.setdefault(k, v)
     for p in _REGISTRY:
         try:
-            if p.matches(vendor, backend):
+            if p.matches(a):
                 return p
         except Exception as e:  # a provider's matches() must never break resolution
             log(f"provider {p.name!r} matches() error: {e}")
@@ -113,5 +128,10 @@ def resolve(vendor: str = "", backend: str = "") -> "Provider | None":
 
 
 def resolve_from_env() -> "Provider | None":
-    return resolve(os.environ.get("FLUXION_VENDOR", ""),
-                   os.environ.get("FLUXION_BACKEND", ""))
+    # Gather every FLUXION_* var the webhook injected (backend, vendor,
+    # qrmi_type, arn, region, ...) into a lowercased-key attribute dict.
+    attrs = {}
+    for k, v in os.environ.items():
+        if k.startswith("FLUXION_"):
+            attrs[k[len("FLUXION_"):].lower()] = v
+    return resolve(attrs)
