@@ -50,36 +50,34 @@ def _poll(provider, task, poll_interval, ungate):
 
 def main():
     pod_uid = os.environ.get("FLUENCE_POD_UID", "")
+    pod_name = os.environ.get("FLUENCE_POD_NAME", "")
+    group = os.environ.get("FLUENCE_GROUP", "")
     backend = os.environ.get("FLUXION_BACKEND", "")
     observe = os.environ.get("FLUENCE_OBSERVE", "").lower() == "true"
     discovery_timeout = int(os.environ.get("FLUENCE_TASK_DISCOVERY_TIMEOUT", 300))
     poll_interval = int(os.environ.get("FLUENCE_POLL_INTERVAL", 30))
+    expected_workers = int(os.environ.get("FLUENCE_EXPECTED_WORKERS", 0))
+    ungate_timeout = int(os.environ.get("FLUENCE_UNGATE_TIMEOUT", 120))
 
     namespace = namespace_from_env()
-    gated_pods = gated_pods_from_env()
 
     log("starting fluence quantum sidecar")
-    log(f"  pod_uid={pod_uid} namespace={namespace} backend={backend} "
-        f"observe={observe} gated_pods={gated_pods}")
+    log(f"  pod_uid={pod_uid} namespace={namespace} group={group} "
+        f"backend={backend} observe={observe} expected_workers={expected_workers}")
 
     provider = resolve_from_env()
     if provider is None:
         log("ERROR: could not resolve a quantum provider from the backend")
-        if gated_pods and not observe:
-            ungate_pods(gated_pods, "", namespace)
         sys.exit(1)
     log(f"resolved provider: {provider.name}")
-
-    if not observe and not gated_pods:
-        log("no gated workers and not observe mode — nothing to do")
-        return
 
     task = provider.find_my_task(pod_uid, backend, discovery_timeout)
     if task is None:
         log("ERROR: could not discover quantum task")
-        if gated_pods and not observe:
-            log("ungating workers anyway to avoid deadlock")
-            ungate_pods(gated_pods, "", namespace)
+        if not observe:
+            ungate_pods(wait_for_gated_pods(namespace, group, expected_workers,
+                                            exclude=pod_name, timeout=ungate_timeout),
+                        "", namespace)
         sys.exit(1)
 
     job_id = provider.job_id(task)
@@ -91,6 +89,13 @@ def main():
         log("observe-only run complete")
         return
 
+    # Wait until all expected gated workers are present (gang is submitted
+    # together), then ungate them. expected_workers is N-1, propagated by the
+    # webhook from the leader at admission; if unset we ungate whatever is found.
+    gated_pods = gated_pods_from_env() or wait_for_gated_pods(
+        namespace, group, expected_workers, exclude=pod_name,
+        timeout=ungate_timeout)
+    log(f"ungating {len(gated_pods)} worker(s): {gated_pods}")
     ungate_pods(gated_pods, job_id, namespace)
     log("done — workers ungated")
 

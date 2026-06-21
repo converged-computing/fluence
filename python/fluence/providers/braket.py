@@ -57,7 +57,9 @@ class BraketProvider(Provider):
 
     def matches(self, vendor: str, backend: str) -> bool:
         v, b = (vendor or "").lower(), (backend or "").lower()
-        if v == "braket":
+        # The Fluxion resource graph labels Braket devices with vendor "amazon"
+        # (the operator of the Braket service); accept "braket" too for clarity.
+        if v in ("braket", "amazon", "aws"):
             return True
         return "braket" in b or b.startswith("arn:aws:braket")
 

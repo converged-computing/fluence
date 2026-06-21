@@ -94,6 +94,16 @@ def test_staged_sitecustomize_runs_interceptor():
         assert "pod-xyz" in out.stdout, out.stdout + out.stderr
 
 
+
+def test_braket_matches_amazon_vendor():
+    # The resource graph labels Braket devices vendor="amazon"; the provider
+    # must resolve for that (and for sv1 by name/arn).
+    from fluence.providers import resolve
+    assert resolve("amazon", "sv1") is not None
+    assert resolve("amazon", "sv1").name == "braket"
+    assert resolve("", "arn:aws:braket:::device/quantum-simulator/amazon/sv1").name == "braket"
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

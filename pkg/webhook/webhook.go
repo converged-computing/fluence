@@ -55,6 +55,13 @@ const (
 	// LeaderAnnotation records the admission-order leader on a PodGroup.
 	LeaderAnnotation = "fluence.flux-framework.org/leader"
 
+	// ExpectedWorkersAnnotation, set by the workload on the leader pod, tells the
+	// sidecar how many gated workers to wait for before ungating. The count is
+	// known at admission (the workload declares it) even though worker names are
+	// not, so it travels as a static sidecar env var. The core treats it as an
+	// opaque string and ascribes no meaning to it beyond propagation.
+	ExpectedWorkersAnnotation = "fluence.flux-framework.org/expected-workers"
+
 	// Sidecar/staging infrastructure (generic — not quantum-specific).
 	SidecarImage          = "ghcr.io/converged-computing/fluence-sidecar:latest"
 	SidecarServiceAccount = "fluence-sidecar"
@@ -289,13 +296,31 @@ func (m *Mutator) InterceptorOps(pod *corev1.Pod) []spec.Op {
 // ServiceAccount. observe=true selects observe-only telemetry mode.
 func (m *Mutator) SidecarContainerOps(pod *corev1.Pod, observe bool) []spec.Op {
 	var ops []spec.Op
+	// The sidecar resolves its vendor provider at runtime from the backend the
+	// scheduler chose. It gets the same FLUXION_* contract as the workload
+	// containers (FLUXION_BACKEND + attribute vars like FLUXION_VENDOR), sourced
+	// via the downward API from the scheduler's annotations — so the values
+	// resolve once the scheduler writes them, after admission.
 	env := []corev1.EnvVar{
 		spec.FieldEnv("FLUENCE_POD_UID", "metadata.uid"),
 		spec.FieldEnv("FLUENCE_POD_NAME", "metadata.name"),
 		spec.FieldEnv("FLUENCE_NAMESPACE", "metadata.namespace"),
+		spec.FieldEnv("FLUENCE_GROUP", "metadata.labels['"+GroupLabel+"']"),
 	}
+	env = append(env, m.InjectedEnv()...)
 	if observe {
 		env = append(env, corev1.EnvVar{Name: "FLUENCE_OBSERVE", Value: "true"})
+	}
+	// The gang size is known at admission (the leader carries it), even though
+	// the worker NAMES are not yet. Propagate the expected worker count to the
+	// sidecar as a static env var so it can wait until it has discovered that
+	// many gated workers before ungating, rather than ungating a partial set.
+	// Read from a generic annotation so the core stays domain-agnostic; the
+	// workload manifest sets it (e.g. from its own N_WORKERS).
+	if pod.Annotations != nil {
+		if n := pod.Annotations[ExpectedWorkersAnnotation]; n != "" {
+			env = append(env, corev1.EnvVar{Name: "FLUENCE_EXPECTED_WORKERS", Value: n})
+		}
 	}
 	sidecar := corev1.Container{
 		Name: "fluence-sidecar", Image: m.sidecarImage(), ImagePullPolicy: corev1.PullIfNotPresent,

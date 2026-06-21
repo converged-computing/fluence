@@ -69,5 +69,67 @@ def gated_pods_from_env():
             if p.strip()]
 
 
+GROUP_LABEL = "fluence.flux-framework.org/group"
+
+
+def discover_gated_pods(namespace, group, exclude=""):
+    """
+    Find the names of pods in the same group that still carry the quantum
+    scheduling gate (i.e. the workers this sidecar's leader must ungate).
+
+    The leader's sidecar is created before the workers are admitted, so the gated
+    set cannot be known at admission time and must be discovered at runtime. We
+    list pods by the group label and keep those with the QUANTUM_GATE_NAME gate
+    still present, excluding the leader pod itself.
+    """
+    if not group:
+        return []
+    try:
+        out = kubectl([
+            "get", "pods", "-n", namespace,
+            "-l", f"{GROUP_LABEL}={group}",
+            "-o", "json",
+        ])
+    except RuntimeError as e:
+        log(f"could not list group pods: {e}")
+        return []
+    import json as _json
+    names = []
+    for item in _json.loads(out).get("items", []):
+        name = item["metadata"]["name"]
+        if name == exclude:
+            continue
+        gates = item.get("spec", {}).get("schedulingGates", []) or []
+        if any(g.get("name") == QUANTUM_GATE_NAME for g in gates):
+            names.append(name)
+    return names
+
+
+def wait_for_gated_pods(namespace, group, expected, exclude="", timeout=120,
+                        interval=3):
+    """
+    Wait until at least `expected` gated workers have been discovered in the
+    group, or `timeout` seconds elapse. The gang is submitted together, so all
+    workers appear quickly; the timeout is a backstop against a crashed/never-
+    admitted worker so the sidecar never hangs. Returns the discovered list
+    (which may be short of `expected` if the timeout fired).
+    """
+    deadline = time.time() + timeout
+    found = []
+    while time.time() < deadline:
+        found = discover_gated_pods(namespace, group, exclude=exclude)
+        if expected and len(found) >= expected:
+            log(f"all {expected} gated worker(s) present")
+            return found
+        if not expected:
+            # No expected count known — return whatever is present now.
+            return found
+        log(f"waiting for gated workers: {len(found)}/{expected}")
+        time.sleep(interval)
+    log(f"WARNING: timed out waiting for gated workers "
+        f"({len(found)}/{expected}); ungating what is present")
+    return found
+
+
 def namespace_from_env():
     return os.environ.get("FLUENCE_NAMESPACE", "default")
