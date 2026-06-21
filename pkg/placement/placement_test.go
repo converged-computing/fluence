@@ -90,6 +90,30 @@ func TestClassicalSingleMatch(t *testing.T) {
 // requested type rides the slot's `with`, not a class= constraint), while the
 // compute jobspec stays virtual=false and the device type does NOT leak into the
 // compute slot.
+// A quantum gang lists pods in arbitrary (informer) order, and only the leader
+// requests the qpu. The device match must be emitted even when the device
+// requester is not pods[0]; otherwise the group schedules with no backend.
+func TestGroupDeviceMatchWhenLeaderNotFirst(t *testing.T) {
+	worker := podWith("w0", corev1.ResourceList{corev1.ResourceCPU: qty(1)})
+	leader := podWith("leader", corev1.ResourceList{
+		corev1.ResourceCPU:            qty(1),
+		FluxionResourcePrefix + "qpu": qty(1),
+	})
+	// Leader deliberately placed last.
+	pods := []corev1.Pod{worker, worker, leader}
+	specs, err := JobspecsForGroup("qgrp", pods, map[string]bool{"qpu": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(specs) != 2 {
+		t.Fatalf("expected 2 jobspecs (compute + device) even with leader last, got %d", len(specs))
+	}
+	device := specs[1]
+	if !hasProp(constraintProps(t, device), "class=qpu") {
+		t.Errorf("device match must select class=qpu; got %v", constraintProps(t, device))
+	}
+}
+
 func TestDeviceProducesSecondMatch(t *testing.T) {
 	p := podWith("q", corev1.ResourceList{
 		corev1.ResourceCPU:            qty(1),

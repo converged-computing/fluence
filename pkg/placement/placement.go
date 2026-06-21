@@ -258,8 +258,23 @@ func JobspecsForGroup(
 	if len(pods) == 0 {
 		return nil, fmt.Errorf("pod group %q has no pods", groupName)
 	}
-	counts := podResources(&pods[0])
-	compute, devices := splitResources(counts)
+	// Compute sizing comes from a representative pod (the group is homogeneous in
+	// its per-pod compute slot), but DEVICE requests must be unioned across the
+	// whole group: in a quantum gang only the leader requests the qpu, and the
+	// pod order here is not guaranteed (groupPods lists in informer order), so
+	// keying off pods[0] alone would miss the leader's device entirely and emit
+	// a compute-only match with no backend.
+	compute, _ := splitResources(podResources(&pods[0]))
+
+	devices := map[string]int{}
+	for i := range pods {
+		_, podDevices := splitResources(podResources(&pods[i]))
+		for t, c := range podDevices {
+			if c > devices[t] {
+				devices[t] = c // take the max requested across the group
+			}
+		}
+	}
 
 	specs := []*jobspec.Jobspec{computeJobspec(groupName, len(pods), compute)}
 
