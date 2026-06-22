@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/converged-computing/fluence/pkg/jgf"
+	"github.com/converged-computing/fluence/pkg/placement"
 )
 
 // buildResourceNodes appends the given config's resource trees to a fresh graph
@@ -216,6 +217,44 @@ resources:
 	for i := range want {
 		if keys[i] != want[i] {
 			t.Fatalf("keys = %v, want %v", keys, want)
+		}
+	}
+}
+
+// The device name must be stamped as a match-only property
+// (fluxion.flux-framework.org/backend=<name>) on the device AND inherited by its
+// descendant nodes, so a require-backend constraint can pin it — but it must NOT
+// become a user attribute (that would double-inject FLUXION_BACKEND into pods).
+func TestBackendNameStampedAsMatchOnlyProperty(t *testing.T) {
+	cfg := `
+resources:
+  - type: qdevice
+    name: sv1
+    attributes:
+      vendor: amazon
+    with:
+      - type: qpu
+        attributes:
+          qubits: "34"
+`
+	c, err := LoadResourcesConfig([]byte(cfg))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dev := &c.Resources[0]
+	qpu := &dev.With[0]
+
+	backendProp := ComposeProperty(placement.FluxionResourcePrefix+"backend", "sv1")
+	if _, ok := virtualProperties(dev)[backendProp]; !ok {
+		t.Errorf("device missing backend property %q; got %v", backendProp, virtualProperties(dev))
+	}
+	if _, ok := virtualProperties(qpu)[backendProp]; !ok {
+		t.Errorf("qpu child did not inherit backend property %q; got %v", backendProp, virtualProperties(qpu))
+	}
+	// backend must NOT be in the env-injection attribute contract.
+	for _, k := range AttributeKeys(c.Resources) {
+		if k == "backend" {
+			t.Error("backend leaked into AttributeKeys (would double-inject FLUXION_BACKEND)")
 		}
 	}
 }

@@ -58,6 +58,11 @@ func virtualProperties(res *Resource) map[string]string {
 	for k, v := range res.ResolvedAttributes {
 		props[ComposeProperty(placement.FluxionResourcePrefix+k, v)] = ""
 	}
+	// Match-only property for the device identity, so require-backend can pin a
+	// device. Not a user attribute (avoids double-injecting FLUXION_BACKEND).
+	if res.BackendName != "" {
+		props[ComposeProperty(placement.FluxionResourcePrefix+"backend", res.BackendName)] = ""
+	}
 	return props
 }
 
