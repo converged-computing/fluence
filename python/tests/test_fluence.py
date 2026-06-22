@@ -105,6 +105,40 @@ def test_braket_matches_by_qrmi_type_and_vendor():
                     "qrmi_type": "braket-ahs"}).name == "braket"
 
 
+
+def test_find_my_task_matches_tag_client_side():
+    # SearchQuantumTasks has no tags filter; the provider must match the tag
+    # client-side. It calls search_quantum_tasks DIRECTLY (not the paginator,
+    # which rejects empty filters) and pages via nextToken. Fake that here.
+    from fluence.providers.braket import BraketProvider, BraketTask
+    from fluence.providers.base import TAG_KEY
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = 0
+        def search_quantum_tasks(self, filters=None, maxResults=None, nextToken=None):
+            assert isinstance(filters, list)          # empty list is valid
+            # Two pages, to exercise nextToken paging.
+            if nextToken is None:
+                return {"quantumTasks": [
+                    {"quantumTaskArn": "arn:other", "createdAt": "2026-01-01T00:00:00Z",
+                     "tags": {TAG_KEY: "someone-else"}},
+                ], "nextToken": "page2"}
+            return {"quantumTasks": [
+                {"quantumTaskArn": "arn:mine", "createdAt": "2026-01-02T00:00:00Z",
+                 "tags": {TAG_KEY: "me-123"}},
+            ]}  # no nextToken -> last page
+
+    p = BraketProvider()
+    p._client = lambda backend: FakeClient()   # bypass real boto3
+    task = p.find_my_task("me-123", "sv1", timeout=5)
+    assert task is not None and task.arn == "arn:mine"
+
+    # No matching tag -> times out -> None (short timeout to keep the test fast).
+    none_task = p.find_my_task("nobody", "sv1", timeout=1)
+    assert none_task is None
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0
