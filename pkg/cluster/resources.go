@@ -60,6 +60,13 @@ type Resource struct {
 	// ResolvedAttributes is the concrete attribute map after reference
 	// resolution. Populated by LoadResourcesConfig; nil if none.
 	ResolvedAttributes map[string]string `json:"-"`
+
+	// BackendName is the identity of the top-level device this resource belongs
+	// to (the named qdevice), threaded down to descendants during resolution. It
+	// is stamped as a match-only property (fluxion.flux-framework.org/backend=
+	// <name>) so a require-backend constraint can pin a device, WITHOUT becoming
+	// a user attribute (which would double-inject FLUXION_BACKEND into pods).
+	BackendName string `json:"-"`
 }
 
 // AttributeSpec is a polymorphic attributes field: either a reference (a string
@@ -206,7 +213,13 @@ func resolveResourceInherited(
 		r.ResolvedAttributes = nil
 	}
 
+	// Thread the device identity down: a named top-level device sets it; children
+	// inherit it. Stamped as a match-only property by virtualProperties.
+	if topLevel && r.Name != "" {
+		r.BackendName = r.Name
+	}
 	for i := range r.With {
+		r.With[i].BackendName = r.BackendName
 		if err := resolveResourceInherited(&r.With[i], registry, false, merged); err != nil {
 			return err
 		}
