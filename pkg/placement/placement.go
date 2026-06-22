@@ -95,6 +95,42 @@ func ComposeClassProperty(resourceType string) string {
 	return ClassPropertyPrefix + resourceType
 }
 
+// RequireAnnotationPrefix is how a workload constrains which backend Fluxion may
+// select: an annotation fluence.flux-framework.org/require-<attr>: <value> on the
+// leader pod adds a property constraint fluxion.flux-framework.org/<attr>=<value>
+// to the device match. e.g. require-qrmi_type: braket-gate keeps a gate workload
+// off an AHS device; require-vendor: amazon, require-backend: sv1, etc.
+const RequireAnnotationPrefix = "fluence.flux-framework.org/require-"
+
+// ComposeAttributeProperty builds the graph property string for an attribute
+// constraint, matching how attributes are stamped as node properties.
+func ComposeAttributeProperty(attr, value string) string {
+	return FluxionResourcePrefix + attr + "=" + value
+}
+
+// requireConstraintsFromPods collects fluence.flux-framework.org/require-<attr>
+// annotations across the group (the leader carries them) into graph property
+// constraints to AND into the device match.
+func requireConstraintsFromPods(pods []corev1.Pod) []string {
+	seen := map[string]bool{}
+	var props []string
+	for i := range pods {
+		for k, v := range pods[i].Annotations {
+			if !strings.HasPrefix(k, RequireAnnotationPrefix) || v == "" {
+				continue
+			}
+			attr := strings.TrimPrefix(k, RequireAnnotationPrefix)
+			pr := ComposeAttributeProperty(attr, v)
+			if !seen[pr] {
+				seen[pr] = true
+				props = append(props, pr)
+			}
+		}
+	}
+	sort.Strings(props)
+	return props
+}
+
 // computeTypes are the Fluxion graph types that live under a physical
 // (virtual=false) compute node. Everything requested via the
 // fluxion.flux-framework.org/<type> prefix is a virtual device type instead.
@@ -215,7 +251,11 @@ func computeJobspec(groupName string, slots int, compute map[string]int) *jobspe
 // type — picks which one. A nested type (e.g. qpu under a qdevice node) is
 // reachable because every ancestor node also advertises class=<type> for the
 // types beneath it, so the global constraint does not prune the path.
-func deviceJobspec(groupName, deviceType string, count int) *jobspec.Jobspec {
+func deviceJobspec(groupName, deviceType string, count int, extraProps []string) *jobspec.Jobspec {
+	props := append([]string{
+		VirtualPropertyTrue,
+		ComposeClassProperty(deviceType),
+	}, extraProps...)
 	return &jobspec.Jobspec{
 		Version: 9999,
 		Resources: []jobspec.Resource{{
@@ -224,10 +264,7 @@ func deviceJobspec(groupName, deviceType string, count int) *jobspec.Jobspec {
 			Label: "device",
 			With:  []jobspec.Resource{{Type: "node", Count: count}},
 		}},
-		Attributes: systemAttributes([]string{
-			VirtualPropertyTrue,
-			ComposeClassProperty(deviceType),
-		}),
+		Attributes: systemAttributes(props),
 		Tasks: []jobspec.Task{{
 			Command: []string{groupName},
 			Slot:    "device",
@@ -285,6 +322,7 @@ func JobspecsForGroup(
 	}
 	sort.Strings(deviceTypes)
 
+	requireProps := requireConstraintsFromPods(pods)
 	for _, t := range deviceTypes {
 		if len(knownDevices) > 0 && !knownDevices[t] {
 			return nil, fmt.Errorf(
@@ -296,7 +334,7 @@ func JobspecsForGroup(
 				"pod group %q requests virtual resource %q but no resources graph is configured",
 				groupName, t)
 		}
-		specs = append(specs, deviceJobspec(groupName, t, devices[t]))
+		specs = append(specs, deviceJobspec(groupName, t, devices[t], requireProps))
 	}
 	return specs, nil
 }
