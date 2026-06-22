@@ -322,6 +322,26 @@ func (m *Mutator) SidecarContainerOps(pod *corev1.Pod, observe bool) []spec.Op {
 			env = append(env, corev1.EnvVar{Name: "FLUENCE_EXPECTED_WORKERS", Value: n})
 		}
 	}
+	// The sidecar talks to the same backend the workload does (e.g. to find the
+	// task and read its queue position), so it needs the same credentials. Copy
+	// the workload container's secret/configmap-sourced env onto the sidecar.
+	// This stays domain-agnostic: we don't know or name the provider's creds, we
+	// just propagate whatever the workload pulls from a secret/configMap (e.g.
+	// AWS_*, IBM tokens). Existing FLUENCE_/FLUXION_ names are not overwritten.
+	if len(pod.Spec.Containers) > 0 {
+		have := map[string]bool{}
+		for _, e := range env {
+			have[e.Name] = true
+		}
+		for _, e := range pod.Spec.Containers[0].Env {
+			if have[e.Name] || e.ValueFrom == nil {
+				continue
+			}
+			if e.ValueFrom.SecretKeyRef != nil || e.ValueFrom.ConfigMapKeyRef != nil {
+				env = append(env, e)
+			}
+		}
+	}
 	sidecar := corev1.Container{
 		Name: "fluence-sidecar", Image: m.sidecarImage(), ImagePullPolicy: corev1.PullAlways,
 		Env: env,
