@@ -114,6 +114,118 @@ func TestGroupDeviceMatchWhenLeaderNotFirst(t *testing.T) {
 	}
 }
 
+func qpuPodWithRequires(name string, requires map[string]string) corev1.Pod {
+	p := podWith(name, corev1.ResourceList{
+		corev1.ResourceCPU:            qty(1),
+		FluxionResourcePrefix + "qpu": qty(1),
+	})
+	if len(requires) > 0 && p.Annotations == nil {
+		p.Annotations = map[string]string{}
+	}
+	for k, v := range requires {
+		p.Annotations[RequireAnnotationPrefix+k] = v
+	}
+	return p
+}
+
+// Zero require- annotations: the device match must carry ONLY the base
+// constraints, nothing extra (over-constraining would break unconstrained runs).
+func TestNoRequireAnnotationsAddsNoConstraints(t *testing.T) {
+	p := qpuPodWithRequires("q", nil)
+	specs, err := JobspecsForGroup("g", []corev1.Pod{p}, map[string]bool{"qpu": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	props := constraintProps(t, specs[1])
+	if len(props) != 2 {
+		t.Errorf("expected exactly [virtual=true class=qpu] with no requires; got %v", props)
+	}
+}
+
+// Exactly one require- constraint.
+func TestSingleRequireConstraint(t *testing.T) {
+	p := qpuPodWithRequires("q", map[string]string{"qrmi_type": "braket-gate"})
+	specs, err := JobspecsForGroup("g", []corev1.Pod{p}, map[string]bool{"qpu": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	props := constraintProps(t, specs[1])
+	if len(props) != 3 {
+		t.Errorf("expected base 2 + 1 require = 3 constraints; got %v", props)
+	}
+	if !hasProp(props, "fluxion.flux-framework.org/qrmi_type=braket-gate") {
+		t.Errorf("missing the single required constraint; got %v", props)
+	}
+}
+
+// Several require- constraints, and the same constraint repeated across pods in
+// the group must be de-duplicated (not added twice).
+func TestMultipleRequireConstraintsAreDeduped(t *testing.T) {
+	leader := qpuPodWithRequires("leader", map[string]string{
+		"qrmi_type": "braket-gate",
+		"vendor":    "amazon",
+		"backend":   "sv1",
+	})
+	// a worker that happens to repeat one of the same require- annotations
+	worker := qpuPodWithRequires("w0", map[string]string{"vendor": "amazon"})
+	specs, err := JobspecsForGroup("g", []corev1.Pod{leader, worker},
+		map[string]bool{"qpu": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	props := constraintProps(t, specs[1])
+	// base 2 + three distinct requires = 5 (vendor=amazon counted once)
+	if len(props) != 5 {
+		t.Errorf("expected 5 constraints (2 base + 3 distinct requires, deduped); got %v", props)
+	}
+	for _, want := range []string{
+		"fluxion.flux-framework.org/qrmi_type=braket-gate",
+		"fluxion.flux-framework.org/vendor=amazon",
+		"fluxion.flux-framework.org/backend=sv1",
+	} {
+		if !hasProp(props, want) {
+			t.Errorf("missing %q; got %v", want, props)
+		}
+	}
+	// dedup: vendor=amazon must appear exactly once
+	n := 0
+	for _, p := range props {
+		if p == "fluxion.flux-framework.org/vendor=amazon" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("vendor=amazon should appear once after dedup, appeared %d times", n)
+	}
+}
+
+func TestRequireAnnotationConstrainsDevice(t *testing.T) {
+	leader := podWith("leader", corev1.ResourceList{
+		corev1.ResourceCPU:            qty(1),
+		FluxionResourcePrefix + "qpu": qty(1),
+	})
+	if leader.Annotations == nil {
+		leader.Annotations = map[string]string{}
+	}
+	leader.Annotations[RequireAnnotationPrefix+"qrmi_type"] = "braket-gate"
+	leader.Annotations[RequireAnnotationPrefix+"vendor"] = "amazon"
+
+	specs, err := JobspecsForGroup("qgrp", []corev1.Pod{leader},
+		map[string]bool{"qpu": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	props := constraintProps(t, specs[1])
+	for _, want := range []string{
+		"fluxion.flux-framework.org/qrmi_type=braket-gate",
+		"fluxion.flux-framework.org/vendor=amazon",
+	} {
+		if !hasProp(props, want) {
+			t.Errorf("device match missing required constraint %q; got %v", want, props)
+		}
+	}
+}
+
 func TestDeviceProducesSecondMatch(t *testing.T) {
 	p := podWith("q", corev1.ResourceList{
 		corev1.ResourceCPU:            qty(1),
