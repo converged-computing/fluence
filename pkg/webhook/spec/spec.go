@@ -6,6 +6,7 @@
 package spec
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -19,6 +20,22 @@ type Op struct {
 	Op    string `json:"op"`
 	Path  string `json:"path"`
 	Value any    `json:"value,omitempty"`
+	// EmitNull forces "value": null in the output (JSON null cannot be expressed
+	// through Value because of omitempty). Used to clear spec.priority so the
+	// priority admission controller recomputes it from priorityClassName.
+	EmitNull bool `json:"-"`
+}
+
+// MarshalJSON honors EmitNull; otherwise it omits value when nil and includes it
+// when present, matching the previous struct-tag behavior.
+func (o Op) MarshalJSON() ([]byte, error) {
+	m := map[string]any{"op": o.Op, "path": o.Path}
+	if o.EmitNull {
+		m["value"] = nil
+	} else if o.Value != nil {
+		m["value"] = o.Value
+	}
+	return json.Marshal(m)
 }
 
 // ── pod inspection ──────────────────────────────────────────────────────────────

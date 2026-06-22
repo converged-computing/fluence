@@ -131,14 +131,15 @@ func gateOps(pod *corev1.Pod) []spec.Op {
 	// already declare one (don't overwrite a user's class).
 	if pod.Spec.PriorityClassName == "" {
 		ops = append(ops, spec.Op{Op: "add", Path: "/spec/priorityClassName", Value: QuantumClassicalPriorityClass})
-		// The API server defaults spec.priority to 0 before mutating webhooks
-		// run. Adding a priorityClassName that resolves to a non-zero value while
-		// an explicit priority is present makes the Priority admission controller
-		// reject the pod ("the integer value of priority (0) must not be
-		// provided"). Clear the defaulted field so it is recomputed from the
-		// class. Use replace (not add) so it is a no-op-safe overwrite; priority
-		// is always present on the admitted object.
-		ops = append(ops, spec.Op{Op: "remove", Path: "/spec/priority"})
+		// Clear spec.priority so the priority admission controller recomputes it
+		// from the class. The controller errors only when spec.priority is
+		// non-nil AND differs from the class value; setting it to null avoids
+		// that in every case. We use add-with-null (not remove): a JSON Patch
+		// "remove" of an absent path is a hard error, and whether the API has
+		// already defaulted spec.priority differs across clusters/k8s versions
+		// (it broke in CI but not on GKE, or vice versa). add-null is valid
+		// whether the field is absent, 0, or set.
+		ops = append(ops, spec.Op{Op: "add", Path: "/spec/priority", EmitNull: true})
 	}
 	return ops
 }
