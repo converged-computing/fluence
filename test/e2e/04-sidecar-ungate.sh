@@ -71,8 +71,15 @@ gate=$(kubectl get pod sidecar-test-worker \
   || fail "worker pod does not have quantum.braket/ready gate (got: $gate)"
 log "  quantum.braket/ready gate set on worker"
 
+# 7. Worker pod should have the fluence-quantum-classical priority class set by
+#    the webhook at admission (so it schedules reliably once ungated).
+pc=$(kubectl get pod sidecar-test-worker -o jsonpath='{.spec.priorityClassName}')
+[ "$pc" = "fluence-quantum-classical" ] \
+  || fail "worker pod missing fluence-quantum-classical priority class (got: $pc)"
+log "  fluence-quantum-classical priority class set on worker"
+
 log "PASS: webhook correctly created RBAC, injected sidecar, gated worker"
-log "NOTE: fluence-quantum-classical priority is set by the sidecar at ungate time, not the webhook"
+log "NOTE: fluence-quantum-classical priority is set by the webhook at admission (immutable post-creation)"
 log "NOTE: braket sidecar integration test (SDK intercept, tag discovery,"
 log "      queue polling) is in sidecars/providers/braket/test/integration.sh"
 
