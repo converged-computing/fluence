@@ -7,8 +7,11 @@ log "TEST 1: classical gang scheduling"
 kubectl apply -f examples/single-podgroup.yaml
 
 # All pods in the 'training' deployment must reach Running (scheduled + started).
+# Wait for the pod to EXIST before waiting for Ready — kubectl wait errors out
+# immediately if the Deployment's pod hasn't been registered yet (a race that
+# fails the test at 0s with "no matching resources found").
 log "waiting for both training pods to schedule"
-kubectl wait --for=condition=Ready pod -l app=training || fail "training gang did not all become Ready (gang scheduling failed)"
+wait_pods_ready "app=training" 1 180 || fail "training gang did not all become Ready (gang scheduling failed)"
 
 # Each pod must have a real node assigned by fluence.
 for p in $(kubectl get pods -l app=training -o name); do

@@ -6,6 +6,23 @@ NS_KUBE="${NS_KUBE:-kube-system}"
 TIMEOUT="${TIMEOUT:-180s}"
 
 log()  { echo "=== $*"; }
+
+# Wait until at least N pods matching a label selector EXIST, then wait for them
+# to be Ready. `kubectl wait` errors immediately ("no matching resources found")
+# if the pods are not yet registered, so a Deployment that has only just been
+# applied races it — wait for existence first.
+wait_pods_ready() {
+  local selector="$1" want="${2:-1}" timeout="${3:-180}"
+  local deadline=$(( $(date +%s) + timeout ))
+  while :; do
+    local n
+    n="$(kubectl get pods -l "$selector" --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+    [ "${n:-0}" -ge "$want" ] && break
+    [ "$(date +%s)" -ge "$deadline" ] && return 1
+    sleep 2
+  done
+  kubectl wait --for=condition=Ready pod -l "$selector" --timeout="${timeout}s"
+}
 fail() { echo "FAIL: $*" >&2; dump; exit 1; }
 
 # Dump cluster state to help debug a CI failure.
