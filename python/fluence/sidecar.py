@@ -27,7 +27,7 @@ import time
 
 from fluence.providers import resolve_from_env
 from fluence.providers.base import log
-from fluence.ungate import ungate_pods, gated_pods_from_env, namespace_from_env
+from fluence.ungate import ungate_pods, gated_pods_from_env, namespace_from_env, wait_for_gated_pods
 
 
 def _poll(provider, task, poll_interval, ungate):
@@ -96,8 +96,11 @@ def main():
         namespace, group, expected_workers, exclude=pod_name,
         timeout=ungate_timeout)
     log(f"ungating {len(gated_pods)} worker(s): {gated_pods}")
-    ungate_pods(gated_pods, job_id, namespace)
-    log("done — workers ungated")
+    n_ok = ungate_pods(gated_pods, job_id, namespace)
+    if n_ok == len(gated_pods):
+        log(f"done — {n_ok} worker(s) ungated")
+    else:
+        log(f"WARNING: ungated only {n_ok}/{len(gated_pods)} worker(s) — see errors above")
 
 
 if __name__ == "__main__":

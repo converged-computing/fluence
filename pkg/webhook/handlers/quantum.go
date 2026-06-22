@@ -109,16 +109,32 @@ func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *
 	return ops
 }
 
-// gateOps adds the quantum scheduling gate (idempotent).
+// QuantumClassicalPriorityClass is given to gated classical workers at
+// admission. priorityClassName is immutable after creation, so it MUST be set
+// here (when the gate is added), not at ungate time. Without a raised priority,
+// the workers — released all at once after the leader's quantum task is ready —
+// may not schedule reliably against other pending work.
+const QuantumClassicalPriorityClass = "fluence-quantum-classical"
+
+// gateOps adds the quantum scheduling gate (idempotent) and, at the same time,
+// sets the classical-worker priority class if the pod doesn't already declare
+// one (priorityClassName can't be changed later, and we must not overwrite a
+// user-specified class).
 func gateOps(pod *corev1.Pod) []spec.Op {
 	for _, g := range pod.Spec.SchedulingGates {
 		if g.Name == QuantumGate {
 			return nil
 		}
 	}
+	var ops []spec.Op
 	gate := corev1.PodSchedulingGate{Name: QuantumGate}
 	if len(pod.Spec.SchedulingGates) == 0 {
-		return []spec.Op{{Op: "add", Path: "/spec/schedulingGates", Value: []corev1.PodSchedulingGate{gate}}}
+		ops = append(ops, spec.Op{Op: "add", Path: "/spec/schedulingGates", Value: []corev1.PodSchedulingGate{gate}})
+	} else {
+		ops = append(ops, spec.Op{Op: "add", Path: "/spec/schedulingGates/-", Value: gate})
 	}
-	return []spec.Op{{Op: "add", Path: "/spec/schedulingGates/-", Value: gate}}
+	if pod.Spec.PriorityClassName == "" {
+		ops = append(ops, spec.Op{Op: "add", Path: "/spec/priorityClassName", Value: QuantumClassicalPriorityClass})
+	}
+	return ops
 }

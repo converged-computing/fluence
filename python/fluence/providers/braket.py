@@ -81,19 +81,41 @@ class BraketProvider(Provider):
         client = self._client(backend)
         log(f"[braket] searching for task tagged {TAG_KEY}={pod_uid}")
         deadline = time.time() + timeout
+        # SearchQuantumTasks only accepts filter names quantumTaskArn, deviceArn,
+        # jobArn, status, createdAt — there is NO tags filter. An EMPTY filter
+        # list is valid and returns all tasks, so we filter only by deviceArn when
+        # the backend is an ARN (avoids the fragile createdAt timestamp format),
+        # then match our tag CLIENT-SIDE from each task summary's `tags` map. The
+        # newest matching task wins (createdAt is returned on each summary).
         device_arn = backend if backend.startswith("arn:aws:braket") else None
+        filters = []
+        if device_arn:
+            filters = [{"name": "deviceArn", "operator": "EQUAL",
+                        "values": [device_arn]}]
         while time.time() < deadline:
             try:
-                filters = [{"name": f"tags:{TAG_KEY}", "operator": "EQUAL",
-                            "values": [pod_uid]}]
-                if device_arn:
-                    filters.append({"name": "deviceArn", "operator": "EQUAL",
-                                    "values": [device_arn]})
-                resp = client.search_quantum_tasks(filters=filters, maxResults=10)
-                tasks = resp.get("quantumTasks", [])
-                if tasks:
-                    tasks.sort(key=lambda t: t.get("createdAt", ""), reverse=True)
-                    arn = tasks[0]["quantumTaskArn"]
+                # Call search_quantum_tasks DIRECTLY with manual nextToken paging.
+                # The boto3 paginator rejects an empty filters=[] (it serializes
+                # the required `filters` parameter differently); the direct call
+                # accepts it and returns all tasks. We match our pod-uid tag
+                # CLIENT-SIDE from each summary's `tags` map (there is no tags
+                # filter on the API). Newest matching task wins.
+                match = None
+                next_token = None
+                while True:
+                    kwargs = {"filters": filters, "maxResults": 100}
+                    if next_token:
+                        kwargs["nextToken"] = next_token
+                    resp = client.search_quantum_tasks(**kwargs)
+                    for t in resp.get("quantumTasks", []):
+                        if (t.get("tags") or {}).get(TAG_KEY) == pod_uid:
+                            if match is None or str(t.get("createdAt", "")) > str(match.get("createdAt", "")):
+                                match = t
+                    next_token = resp.get("nextToken")
+                    if not next_token:
+                        break
+                if match:
+                    arn = match["quantumTaskArn"]
                     log(f"[braket] found task by tag: {arn}")
                     return BraketTask(arn)
             except Exception as e:

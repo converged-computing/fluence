@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 
 from fluence.providers.base import log
 
@@ -32,10 +33,17 @@ def ungate_pods(gated_pods, job_id, namespace):
     For each gated worker pod:
       1. Stamp the vendor-neutral job-id annotation so the worker can locate
          the quantum result.
-      2. Set the high-priority class and remove the scheduling gate atomically
-         (priority is set here, not in the webhook, to avoid the admission
-         controller conflict where priority:0 is already defaulted).
+      2. Remove the scheduling gate so the pod can be scheduled.
+
+    NOTE: priorityClassName is NOT set here — it is immutable after pod creation
+    (the API server forbids changing any spec field but image/tolerations/
+    activeDeadlineSeconds/terminationGracePeriodSeconds on an existing pod). If a
+    priority class is wanted on the classical gang, the webhook must set it at
+    admission, when the pod is created. Setting it in the ungate patch made the
+    whole patch fail atomically, so the gate was never removed and workers stayed
+    gated.
     """
+    ok = 0
     for pod_name in gated_pods:
         pod_name = pod_name.strip()
         if not pod_name:
@@ -53,15 +61,16 @@ def ungate_pods(gated_pods, job_id, namespace):
             log(f"  WARNING: no job id to patch onto {pod_name}")
 
         patch = json.dumps([
-            {"op": "add", "path": "/spec/priorityClassName", "value": PRIORITY_CLASS},
             {"op": "remove", "path": "/spec/schedulingGates/0"},
         ])
         try:
             kubectl(["patch", "pod", pod_name, "-n", namespace,
                      "--type=json", f"-p={patch}"])
-            log(f"  set priority and removed gate from {pod_name}")
+            log(f"  removed gate from {pod_name}")
+            ok += 1
         except RuntimeError as e:
             log(f"  WARNING: could not patch {pod_name}: {e}")
+    return ok
 
 
 def gated_pods_from_env():
