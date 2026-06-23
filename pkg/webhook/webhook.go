@@ -158,6 +158,11 @@ func (m *Mutator) EnsurePodGroup(ctx context.Context, namespace, group, leaderPo
 		ObjectMeta: metav1.ObjectMeta{
 			Name: group, Namespace: namespace,
 			Labels: map[string]string{"app": "fluence", GroupLabel: group},
+			// Ownership claim: the reconciler in pkg/fluence deletes a completed
+			// gang's PodGroup (to free its Fluxion allocation) ONLY if this
+			// annotation is present. A user-created PodGroup (e.g. a native gang
+			// not created by this webhook) never carries it and is never touched.
+			Annotations: map[string]string{placement.CreatedByAnnotation: placement.CreatedByValue},
 		},
 		Spec: schedulingv1alpha2.PodGroupSpec{
 			SchedulingPolicy: schedulingv1alpha2.PodGroupSchedulingPolicy{
