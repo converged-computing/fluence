@@ -568,6 +568,13 @@ func (f *Fluence) onPodUpdated(oldObj, newObj interface{}) {
 //     that prevents freeing resources out from under workers that ungated after
 //     the leader finished.
 func (f *Fluence) reconcileGroup(ctx context.Context, namespace, group string) {
+	// Defensive: the scheduler handle (and thus the API client / informers) may
+	// be absent in unit tests or before the framework is fully wired. Reconcile
+	// needs the API to read/delete PodGroups, so without a handle it is a no-op
+	// rather than a nil dereference.
+	if f.handle == nil || group == "" {
+		return
+	}
 	pg, err := f.handle.ClientSet().SchedulingV1alpha2().PodGroups(namespace).
 		Get(ctx, group, metav1.GetOptions{})
 	if err != nil {
