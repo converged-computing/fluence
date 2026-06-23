@@ -206,10 +206,16 @@ func TestOnPodDeletedUngroupedCancels(t *testing.T) {
 // Deleting a grouped pod must NOT cancel: the allocation belongs to the
 // PodGroup and is freed only when the PodGroup is deleted. Cancelling here would
 // free the gang's allocation while other pods still hold it.
-func TestOnPodDeletedGroupedIgnored(t *testing.T) {
+func TestOnPodDeletedGroupedDoesNotCancelDirectly(t *testing.T) {
 	m := &fakeMatcher{}
 	f := newTestFluence(m)
 
+	// A grouped pod being deleted must NOT directly cancel the gang's allocation
+	// (the allocation is owned by the PodGroup, freed only when the whole gang is
+	// done). onPodDeleted now triggers reconcileGroup instead of ignoring the
+	// pod, but reconcile frees nothing here: there is no scheduler handle in this
+	// unit context, so reconcile is a safe no-op. The invariant under test —
+	// "one grouped pod's deletion never frees the gang" — still holds.
 	f.onPodDeleted(groupedPod("default", "training-abc", "training", ann("5")))
 
 	if len(m.cancelled) != 0 {
