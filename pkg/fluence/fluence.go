@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/converged-computing/fluence/pkg/cluster"
 	"github.com/converged-computing/fluence/pkg/graph"
@@ -166,8 +167,63 @@ func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error
 		placement:    map[string]groupAlloc{},
 	}
 	f.registerCancelHandlers()
+	// Periodic + startup reconcile of completed Fluence-created PodGroups, so a
+	// gang's allocation is freed even if a completion/delete event is missed
+	// (informer resync gaps, controller restart, force-deleted pods). The
+	// event-driven path (onPodUpdated) handles the common case promptly; this is
+	// the correctness backstop.
+	go f.runReconcileSweeps(ctx)
 	return f, nil
 }
+
+// runReconcileSweeps reconciles all Fluence-created PodGroups on startup and then
+// periodically. On startup it also catches allocations that outlived a scheduler
+// restart: a completed gang whose PodGroup still exists is deleted here, freeing
+// its allocation via onPodGroupDeleted (cancelGroup reads jobids from the
+// PodGroup annotation, which survives restart, so the free works even though the
+// in-memory placement memo was lost).
+func (f *Fluence) runReconcileSweeps(ctx context.Context) {
+	// Let informer caches sync before the first sweep so listers are populated.
+	if !cache.WaitForCacheSync(ctx.Done(),
+		f.handle.SharedInformerFactory().Scheduling().V1alpha2().PodGroups().Informer().HasSynced,
+		f.handle.SharedInformerFactory().Core().V1().Pods().Informer().HasSynced) {
+		return
+	}
+	f.reconcileAll(ctx)
+	ticker := time.NewTicker(reconcileInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			f.reconcileAll(ctx)
+		}
+	}
+}
+
+// reconcileAll lists every Fluence-created PodGroup and reconciles it (deleting
+// the ones whose gangs have fully completed). Listing is from the informer
+// cache, so this is cheap to run periodically.
+func (f *Fluence) reconcileAll(ctx context.Context) {
+	pgs, err := f.handle.SharedInformerFactory().Scheduling().V1alpha2().
+		PodGroups().Lister().List(labels.Everything())
+	if err != nil {
+		log.Printf("fluence: reconcile sweep list failed: %v", err)
+		return
+	}
+	for _, pg := range pgs {
+		if pg.Annotations[placement.CreatedByAnnotation] != placement.CreatedByValue {
+			continue // only ever consider Fluence-created PodGroups
+		}
+		f.reconcileGroup(ctx, pg.Namespace, pg.Name)
+	}
+}
+
+// reconcileInterval is how often the backstop sweep runs. The event-driven path
+// handles the prompt case; this only needs to be frequent enough to bound how
+// long a leaked allocation can persist after a missed event.
+const reconcileInterval = 60 * time.Second
 
 // Name returns the plugin name.
 func (f *Fluence) Name() string { return Name }
@@ -463,15 +519,11 @@ func podTerminal(p *corev1.Pod) bool {
 	return p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed
 }
 
-// onPodUpdated frees an ungrouped pod's allocation when the pod finishes
-// (transitions into a terminal phase). A completed pod is not deleted, so this
-// is the path that releases resources when a job ends normally; the DeleteFunc
-// path remains as a backstop for pods removed without completing. Cancel is
-// idempotent, so a completion-cancel followed by a later delete-cancel is safe.
-//
-// Grouped pods are ignored here for the same reason as onPodDeleted: the gang's
-// allocation is owned by the PodGroup, and freeing it when one pod finishes would
-// release the whole gang's resources while its siblings still run.
+// onPodUpdated frees an ungrouped pod's allocation when the pod finishes, and
+// for a GROUPED pod triggers gang cleanup when the whole group has finished. A
+// completed pod is not deleted, so this is the path that releases resources when
+// a job ends normally; the DeleteFunc path remains as a backstop. Cancel and
+// PodGroup deletion are both idempotent, so repeated triggers are safe.
 func (f *Fluence) onPodUpdated(oldObj, newObj interface{}) {
 	oldPod, ok := oldObj.(*corev1.Pod)
 	if !ok {
@@ -482,15 +534,112 @@ func (f *Fluence) onPodUpdated(oldObj, newObj interface{}) {
 		return
 	}
 	// Only act on the transition INTO a terminal phase (UpdateFunc fires on every
-	// pod update; this avoids re-cancelling on each subsequent update).
+	// pod update; this avoids re-acting on each subsequent update).
 	if podTerminal(oldPod) || !podTerminal(newPod) {
 		return
 	}
-	if placement.PodGroupName(newPod) != "" {
+	group := placement.PodGroupName(newPod)
+	if group == "" {
+		// Ungrouped pod: its allocation is owned by the pod; free on completion.
+		f.cancelGroup(newPod.Namespace+"/"+newPod.Name, newPod.Annotations)
 		return
 	}
-	f.cancelGroup(newPod.Namespace+"/"+newPod.Name, newPod.Annotations)
+	// Grouped pod: the gang's allocation is owned by the PodGroup, so we must not
+	// free it when a single member finishes. Instead, when the LAST member goes
+	// terminal, reconcile the group — which (for a Fluence-created PodGroup)
+	// deletes the PodGroup and lets onPodGroupDeleted free the allocation.
+	f.reconcileGroup(context.Background(), newPod.Namespace, group)
 }
+
+// reconcileGroup deletes a COMPLETED, Fluence-created gang's PodGroup so its
+// Fluxion allocation is freed (through the normal onPodGroupDeleted path). It is
+// the single decision point for "is this gang done, and may we clean it up?" and
+// is safe to call repeatedly (PodGroup deletion is idempotent).
+//
+// Safety rules, in order:
+//  1. The PodGroup must exist and carry the Fluence ownership annotation. A
+//     user-created PodGroup is NEVER deleted, even if all its pods are terminal.
+//  2. The gang must have actually materialized: at least one member pod must
+//     exist. This guards the window right after the leader is admitted, before
+//     the gated workers are created — we must not reap a group that has not yet
+//     grown its members.
+//  3. EVERY member pod (gated or not) must be in a terminal phase. A single
+//     running or still-gated member keeps the gang alive — exactly the property
+//     that prevents freeing resources out from under workers that ungated after
+//     the leader finished.
+func (f *Fluence) reconcileGroup(ctx context.Context, namespace, group string) {
+	pg, err := f.handle.ClientSet().SchedulingV1alpha2().PodGroups(namespace).
+		Get(ctx, group, metav1.GetOptions{})
+	if err != nil {
+		return // gone already, or not ours to inspect
+	}
+	if pg.Annotations[placement.CreatedByAnnotation] != placement.CreatedByValue {
+		return // rule 1: not Fluence-created — never delete a user's PodGroup
+	}
+
+	members, err := f.handle.SharedInformerFactory().Core().V1().Pods().Lister().
+		Pods(namespace).List(labels.Everything())
+	if err != nil {
+		return
+	}
+	seen := 0
+	for _, p := range members {
+		// Match by the native scheduling-group field OR the group label, so a
+		// gated worker that has not yet been linked still counts as a member.
+		if placement.PodGroupName(p) != group &&
+			p.Labels[webhookGroupLabel] != group {
+			continue
+		}
+		seen++
+		if !podTerminal(p) {
+			return // rule 3: a live/gated member keeps the gang alive
+		}
+	}
+
+	// Rule 2 (refined): distinguish two "zero live members" states, which member
+	// count alone cannot:
+	//   (a) brand-new gang: PodGroup just created, workers not yet created. Must
+	//       NOT reap — that would kill a gang before it starts.
+	//   (b) finished/abandoned gang: pods completed and were already removed,
+	//       leaving the PodGroup holding a Fluxion allocation. MUST reap, or the
+	//       allocation leaks and blocks future gangs ("qpu match failed -1").
+	// We tell them apart by whether the gang was ever scheduled: a scheduled gang
+	// carries the jobid annotation (written in PreBind). A jobid + zero live
+	// members ⇒ case (b), reap. No jobid + zero members ⇒ case (a) or never
+	// scheduled; protect it with a creation grace period as a backstop.
+	if seen == 0 {
+		_, scheduled := parseJobIDs(pg.Annotations)
+		if !scheduled {
+			if time.Since(pg.CreationTimestamp.Time) < reconcileGraceForEmpty {
+				return // case (a): brand-new, give workers time to appear
+			}
+			// old, never scheduled, no members — nothing was ever allocated, but
+			// it is safe (and tidy) to remove a stale empty PodGroup we created.
+		}
+		// else: scheduled (has jobid) with no live members ⇒ case (b), reap.
+	}
+
+	// All members terminal (or a scheduled gang whose pods are already gone) and
+	// the PodGroup is ours: delete it. onPodGroupDeleted then frees the Fluxion
+	// allocation (cancelGroup reads jobids from the annotation).
+	if err := f.handle.ClientSet().SchedulingV1alpha2().PodGroups(namespace).
+		Delete(ctx, group, metav1.DeleteOptions{}); err != nil {
+		log.Printf("fluence: reconcile delete of completed PodGroup %s/%s failed: %v",
+			namespace, group, err)
+		return
+	}
+	log.Printf("fluence: reconciled completed gang %s/%s — deleted Fluence-created PodGroup, allocation freed",
+		namespace, group)
+}
+
+// reconcileGraceForEmpty is how long a Fluence-created PodGroup with no live
+// members and no allocation (never scheduled) is protected from reaping, to
+// cover the window between PodGroup creation and the gang's pods appearing.
+const reconcileGraceForEmpty = 2 * time.Minute
+
+// webhookGroupLabel duplicates pkg/webhook.GroupLabel without importing that
+// package (the scheduler must not depend on the webhook). Kept in sync with it.
+const webhookGroupLabel = "fluence.flux-framework.org/group"
 
 // onPodGroupDeleted frees the gang's allocation when its PodGroup is deleted.
 func (f *Fluence) onPodGroupDeleted(obj interface{}) {
@@ -522,7 +671,14 @@ func (f *Fluence) onPodDeleted(obj interface{}) {
 			return
 		}
 	}
-	if placement.PodGroupName(pod) != "" {
+	if g := placement.PodGroupName(pod); g != "" {
+		// Grouped pod deleted: do not free the gang's allocation on a single
+		// pod's removal, but DO reconcile — if this was the last member, the
+		// PodGroup is now empty-but-allocated and reconcileGroup will reap it
+		// (and free the allocation). This closes the gap where a completed gang's
+		// pods are deleted (not just completed): onPodUpdated never fires for a
+		// deletion, so without this the cleanup would wait for the periodic sweep.
+		f.reconcileGroup(context.Background(), pod.Namespace, g)
 		return
 	}
 	f.cancelGroup(pod.Namespace+"/"+pod.Name, pod.Annotations)

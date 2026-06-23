@@ -28,6 +28,14 @@ const (
 	// when that object is deleted, and replayed on scheduler restart.
 	JobIDAnnotation = "fluence.flux-framework.org/jobid"
 
+	// CreatedByAnnotation marks an object as created by Fluence (the mutating
+	// webhook). The scheduler's PodGroup reconciler deletes a completed gang's
+	// PodGroup — to free its Fluxion allocation — ONLY when this annotation is
+	// present with CreatedByValue. A PodGroup the user created (e.g. a native
+	// gang) never carries it, so the reconciler never deletes user objects.
+	CreatedByAnnotation = "fluence.flux-framework.org/created-by"
+	CreatedByValue      = "fluence-webhook"
+
 	// AttributeAnnotationPrefix namespaces the matched backend's attributes when
 	// the scheduler stamps them onto the pod (e.g.
 	// fluence.flux-framework.org/attr-region=us-east-1). The webhook injects one

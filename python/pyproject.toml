@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 # PyPI distribution name (the import name `fluence` is taken on PyPI, so we
 # distribute under a scoped name but import as `fluence`).
 name = "fluence-hpc"
-version = "0.0.1"
+version = "0.0.11"
 description = "Fluence quantum-classical scheduling coordination library (sidecar + interceptor + providers)"
 readme = "README.md"
 requires-python = ">=3.9"
