@@ -1,6 +1,6 @@
 # fluence
 
-![img/fluence.png](img/fluence.png)
+![img/fluence-glasses.png](img/fluence-glasses.png)
 [![PyPI version](https://badge.fury.io/py/fluence-hpc.svg)](https://badge.fury.io/py/fluence-hpc)
 
 🚧 **UNDER DEVELOPMENT** 🚧 Thank you for your patience! -@vsoch
