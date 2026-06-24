@@ -371,12 +371,15 @@ the backend. (When we control local quantum devices this will change.)
 
 ### 3. Quantum workflow groups (leader + workers)
 
-For workflows where a leader pod submits quantum work and worker pods process
-the results, add the group label to all pods. Fluence gates the workers until
-the QPU task reaches position==1 in the vendor queue:
+A quantum workflow group is one pod that **submits** quantum work (the leader)
+plus N pods that **wait** for the result (the workers). All pods share a group
+label; Fluence co-schedules them, gives the leader a sidecar that watches the
+vendor queue, and gates the workers so they consume no node resources during the
+(long, variable) QPU queue wait — releasing them only when the task reaches
+`queue_position == 1`.
 
 ```yaml
-# All pods in the group get the same label
+# Every pod in the group carries the same group label + schedulerName: fluence
 metadata:
   labels:
     fluence.flux-framework.org/group: my-qaoa-workflow
@@ -384,22 +387,71 @@ spec:
   schedulerName: fluence
 ```
 
-The first pod admitted becomes the leader — Fluence injects the sidecar and
-creates a PodGroup with `minCount: 1`. All subsequent pods get a
-`quantum.braket/ready` scheduling gate and consume no node resources during
-the QPU queue wait. When the sidecar observes `queue_position == 1`, it
-patches the task ARN onto each worker pod's annotations and removes their
-gates atomically with setting `fluence-quantum-classical` priority class.
+#### How the leader is chosen — two mechanisms
 
-Per-namespace RBAC (`fluence-sidecar` ServiceAccount/Role/RoleBinding) and
-the interceptor ConfigMap are created automatically by the webhook on first
-use — no manual setup required.
+There are two ways Fluence decides which pod is the leader. They are mutually
+exclusive per group; pick the one that matches how your workload is built.
+
+**(a) Explicit role (recommended for leader/worker workflows).** Each pod
+declares its role with an annotation. This is **authoritative**: admission order
+is never consulted, and the same value is injected into the container as
+`FLUENCE_ROLE` so your application reads the exact role Fluence used — the two
+can never disagree.
+
+```yaml
+metadata:
+  labels:
+    fluence.flux-framework.org/group: my-qaoa-workflow
+  annotations:
+    fluence.flux-framework.org/role: leader     # or: worker
+```
+
+Use this when the leader and workers are **different** (the leader submits the
+quantum task and runs the sidecar; workers process results). The leader gets the
+interceptor + sidecar; workers are gated. Because the decision is declared, it is
+race-free regardless of which pod the API server admits first. Your container can
+branch on `$FLUENCE_ROLE` (e.g. `leader` → submit; `worker` → wait).
+
+**(b) Admission order (default when no role annotation is present).** If pods
+carry the group label but **no** role annotation, the **first pod admitted**
+becomes the leader and every subsequent pod is a worker. This suits a
+*homogeneous* pod-template gang (Deployment/Job/StatefulSet) where every replica
+is byte-identical — any one of them can lead, so "first admitted" is a fine
+tiebreaker. It is **not** suitable for a heterogeneous leader/worker workflow:
+since admission order is nondeterministic, a worker pod could be admitted first
+and wrongly elected leader. Use mechanism (a) for that case.
+
+> Rule of thumb: identical replicas → admission order is fine. Distinct
+> leader/worker pods → use the explicit `role` annotation.
+
+#### What Fluence does
+
+Regardless of mechanism, the leader gets the sidecar and a PodGroup is created
+(`minCount: 1`); workers get a `quantum.braket/ready` scheduling gate and consume
+no node resources during the QPU queue wait. When the sidecar observes
+`queue_position == 1`, it patches the task ARN onto each worker's annotations and
+removes their gates atomically with setting the `fluence-quantum-classical`
+priority class so they reschedule promptly.
+
+Per-namespace RBAC (`fluence-sidecar` ServiceAccount/Role/RoleBinding) and the
+interceptor ConfigMap are created automatically by the webhook on first use — no
+manual setup required.
 
 ```bash
-# Apply per-namespace RBAC is NOT needed — webhook creates it automatically.
-# Just apply your pods with the group label and schedulerName: fluence.
+# Just apply your pods with the group label (+ optional role annotation) and
+# schedulerName: fluence. RBAC is created for you.
 kubectl apply -f my-quantum-workflow.yaml
 ```
+
+#### A note on the homogeneous "all submit" case
+
+A group where *every* pod submits its own quantum task (no leader/worker split)
+is possible but rarely what you want: N independent submissions land in the
+vendor queue and run at uncoordinated times, so there is no coordination benefit
+from grouping them — you would just have N standalone quantum pods. For a single
+quantum submission, use a standalone pod (no group label, see §2). For a
+coordinated workflow, use the leader/worker form above with an explicit role.
+
 
 ### Notes
 

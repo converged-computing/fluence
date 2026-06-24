@@ -130,7 +130,9 @@ def test_find_my_task_matches_tag_client_side():
             ]}  # no nextToken -> last page
 
     p = BraketProvider()
-    p._client = lambda backend: FakeClient()   # bypass real boto3
+    fake = FakeClient()
+    p._client = lambda backend: fake            # bypass real boto3 (legacy path)
+    p._region_client = lambda region: fake      # multi-region search uses this
     task = p.find_my_task("me-123", "sv1", timeout=5)
     assert task is not None and task.arn == "arn:mine"
 

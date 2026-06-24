@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"fmt"
 	"log"
 
 	"github.com/converged-computing/fluence/pkg/webhook"
@@ -30,6 +31,10 @@ const (
 	// ObserveLabel opts a standalone quantum pod into observe-only telemetry:
 	// the sidecar is injected and polls queue position but ungates nothing.
 	ObserveLabel = "fluence.flux-framework.org/observe"
+
+	// Role values for webhook.RoleAnnotation.
+	RoleLeader = "leader"
+	RoleWorker = "worker"
 )
 
 // quantumHandler coordinates quantum-classical workflows. It applies to a pod
@@ -48,6 +53,12 @@ func (h *quantumHandler) Name() string { return "quantum" }
 
 func (h *quantumHandler) Applies(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod) bool {
 	if spec.PodRequestsResource(pod, QuantumResource) {
+		return true
+	}
+	// An explicitly-declared worker applies (so it gets gated) even if it
+	// doesn't request the quantum resource and the leader isn't recorded yet —
+	// this removes the admission-order race for explicitly-roled gangs.
+	if webhook.Role(pod) == RoleWorker && webhook.GroupName(pod) != "" {
 		return true
 	}
 	return h.isWorkerOfQuantumGroup(ctx, m, pod)
@@ -76,35 +87,82 @@ func (h *quantumHandler) isWorkerOfQuantumGroup(ctx context.Context, m webhook.M
 func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod) []spec.Op {
 	g := webhook.GroupName(pod)
 
-	// Role is decided by ADMISSION ORDER, not resource request. In a pod-template
-	// gang (Deployment/Job/StatefulSet) every pod has an identical spec — same
-	// group label, every pod requests the quantum resource. The leader is simply
-	// the first pod admitted (recorded on the PodGroup by the gang handler);
-	// every other pod is a worker, regardless of its own resource request.
-	if g != "" {
-		leader := m.PodGroupLeader(ctx, pod.Namespace, g)
-		if leader != "" && leader != pod.Name {
-			log.Printf("[fluence-webhook] quantum worker %s/%s (leader=%s) — gating",
-				pod.Namespace, pod.Name, leader)
-			return gateOps(pod)
+	// Determine role. An explicit role annotation is AUTHORITATIVE: the workload
+	// declares which pod leads and which wait, and Fluence honors it directly —
+	// no admission-order race, and the same value is echoed to the app as
+	// FLUENCE_ROLE so the webhook's notion of leader and the application's notion
+	// cannot disagree. When the annotation is absent, fall back to the legacy
+	// behavior: role is decided by admission order (the first pod admitted in the
+	// group, recorded on the PodGroup by the gang handler). The admission-order
+	// path suits a homogeneous pod-template gang where every pod is identical;
+	// the explicit annotation suits a heterogeneous leader/worker gang.
+	role := webhook.Role(pod)
+	var isWorker bool
+	switch role {
+	case RoleWorker:
+		isWorker = true
+	case RoleLeader:
+		isWorker = false
+	default:
+		if g != "" {
+			leader := m.PodGroupLeader(ctx, pod.Namespace, g)
+			isWorker = leader != "" && leader != pod.Name
 		}
 	}
 
-	// Submitter role: recorded group leader, or a standalone quantum pod. Always
-	// gets the interceptor (so its task is tagged). It gets the SIDECAR only when
-	// there is coordination to do: it is a group leader (workers to ungate), or
-	// observe-only telemetry is requested. A standalone quantum pod with neither
-	// has nothing to coordinate, so no sidecar is injected.
+	if g != "" && isWorker {
+		log.Printf("[fluence-webhook] quantum worker %s/%s (role=%q) — gating",
+			pod.Namespace, pod.Name, role)
+		ops := gateOps(pod)
+		ops = append(ops, roleEnvOps(pod, RoleWorker)...)
+		return ops
+	}
+
+	// Submitter/leader role: recorded or declared group leader, or a standalone
+	// quantum pod. Always gets the interceptor (so its task is tagged). It gets
+	// the SIDECAR only when there is coordination to do: it is a group leader
+	// (workers to ungate), or observe-only telemetry is requested.
 	isLeader := g != ""
 	observe := spec.Label(pod, ObserveLabel) == "true"
 
-	log.Printf("[fluence-webhook] quantum pod %s/%s — interceptor (leader=%v observe=%v)",
-		pod.Namespace, pod.Name, isLeader, observe)
+	log.Printf("[fluence-webhook] quantum pod %s/%s — interceptor (leader=%v role=%q observe=%v)",
+		pod.Namespace, pod.Name, isLeader, role, observe)
 
 	ops := m.InterceptorOps(pod)
+	ops = append(ops, roleEnvOps(pod, RoleLeader)...)
 	if isLeader || observe {
 		m.EnsureSidecarRBAC(ctx, pod.Namespace)
 		ops = append(ops, m.SidecarContainerOps(pod, observe)...)
+	}
+	return ops
+}
+
+// roleEnvOps injects FLUENCE_ROLE into every (non-sidecar) container so the
+// application reads its gang role from the same source of truth the webhook
+// used. effectiveRole is what the webhook decided (leader/worker), used only
+// when the pod carries no explicit role annotation; when the annotation is
+// present we source the value from it via the downward API so the two always
+// agree. Unlike InterceptorOps, this is NOT limited to Fluxion-resource
+// containers — worker containers do not request the quantum resource but still
+// need to know they are workers.
+func roleEnvOps(pod *corev1.Pod, effectiveRole string) []spec.Op {
+	var value corev1.EnvVar
+	if webhook.Role(pod) != "" {
+		value = spec.AnnotationEnv("FLUENCE_ROLE", webhook.RoleAnnotation)
+	} else {
+		value = corev1.EnvVar{Name: "FLUENCE_ROLE", Value: effectiveRole}
+	}
+	var ops []spec.Op
+	for i, c := range pod.Spec.Containers {
+		if c.Name == "fluence-sidecar" || spec.HasEnv(c, "FLUENCE_ROLE") {
+			continue
+		}
+		if len(c.Env) == 0 {
+			ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/env", i), Value: []corev1.EnvVar{value}})
+		} else {
+			ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/env/-", i), Value: value})
+		}
+		pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env, value)
 	}
 	return ops
 }

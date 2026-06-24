@@ -66,17 +66,19 @@ jobs:
         run: |
           kubectl apply -f deploy/fluence-test.yaml
           kubectl rollout status -n kube-system deployment/fluence --timeout=180s
-          # Wait for a Running pod — rollout status can return before the old
-          # pod is fully gone and the new one is ready to exec into.
+          # rollout status can return while the OLD ReplicaSet's pod is still
+          # Running (terminating). Selecting by phase=Running alone can grab that
+          # stale pod, which then 404s on exec/logs. Wait until exactly one
+          # fluence pod remains, and require it to be Ready and not terminating.
           POD=""
           for i in $(seq 1 60); do
+            # names of pods that are Ready AND have no deletionTimestamp (not terminating)
             POD=$(kubectl -n kube-system get pods -l app=fluence \
-              --field-selector=status.phase=Running \
-              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+              -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{$name := .metadata.name}}{{range .status.conditions}}{{if and (eq .type "Ready") (eq .status "True")}}{{$name}}{{"\n"}}{{end}}{{end}}{{end}}{{end}}' 2>/dev/null | head -1 || true)
             [ -n "$POD" ] && break
             sleep 2
           done
-          [ -n "$POD" ] || { echo "ERROR: no Running fluence pod found"; exit 1; }
+          [ -n "$POD" ] || { echo "ERROR: no Ready non-terminating fluence pod found"; kubectl -n kube-system get pods -l app=fluence -o wide; exit 1; }
           echo "Using pod: $POD"
           # Brief sleep to let the container runtime stabilize before exec
           sleep 5
@@ -99,15 +101,17 @@ jobs:
             kubectl get nodes -o jsonpath='{range .items[*]}{.status.allocatable}{"\n"}{end}' | grep -q 'fluxion.flux-framework.org/qpu' && break
             sleep 1
           done
+          # After a rollout restart BOTH the old and new pods are briefly Running.
+          # Select only a Ready pod with no deletionTimestamp (i.e. the new one,
+          # not the terminating old one) so exec/logs don't 404.
           POD=""
           for i in $(seq 1 60); do
             POD=$(kubectl -n kube-system get pods -l app=fluence \
-              --field-selector=status.phase=Running \
-              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+              -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{$name := .metadata.name}}{{range .status.conditions}}{{if and (eq .type "Ready") (eq .status "True")}}{{$name}}{{"\n"}}{{end}}{{end}}{{end}}{{end}}' 2>/dev/null | head -1 || true)
             [ -n "$POD" ] && break
             sleep 2
           done
-          [ -n "$POD" ] || { echo "ERROR: no Running fluence pod found after restart"; exit 1; }
+          [ -n "$POD" ] || { echo "ERROR: no Ready non-terminating fluence pod found after restart"; kubectl -n kube-system get pods -l app=fluence -o wide; exit 1; }
           echo "Using pod: $POD"
           # Brief sleep to let the container runtime stabilize before exec
           sleep 5

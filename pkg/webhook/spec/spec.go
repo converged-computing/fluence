@@ -92,6 +92,13 @@ func Label(pod *corev1.Pod, key string) string {
 	return pod.Labels[key]
 }
 
+func Annotation(pod *corev1.Pod, key string) string {
+	if pod.Annotations == nil {
+		return ""
+	}
+	return pod.Annotations[key]
+}
+
 // ── env var builders ──────────────────────────────────────────────────────────
 
 func AnnotationEnv(envName, annotationKey string) corev1.EnvVar {
