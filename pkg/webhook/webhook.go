@@ -55,6 +55,15 @@ const (
 	// LeaderAnnotation records the admission-order leader on a PodGroup.
 	LeaderAnnotation = "fluence.flux-framework.org/leader"
 
+	// RoleAnnotation, set by the workload on each pod, explicitly declares the
+	// pod's gang role ("leader" or "worker"). When present it is AUTHORITATIVE:
+	// the quantum handler gates workers and gives the leader the sidecar based
+	// on this value, instead of inferring the leader by admission order. The
+	// same value is injected into the container env as FLUENCE_ROLE so the
+	// application reads its role from the same source of truth Fluence used.
+	// When absent, role falls back to admission order (backwards compatible).
+	RoleAnnotation = "fluence.flux-framework.org/role"
+
 	// ExpectedWorkersAnnotation, set by the workload on the leader pod, tells the
 	// sidecar how many gated workers to wait for before ungating. The count is
 	// known at admission (the workload declares it) even though worker names are
@@ -93,6 +102,10 @@ func (m *Mutator) sidecarImage() string {
 
 // GroupName returns the value of GroupLabel on the pod, or "".
 func GroupName(pod *corev1.Pod) string { return spec.Label(pod, GroupLabel) }
+
+// Role returns the explicit gang role declared on the pod via RoleAnnotation
+// ("leader"/"worker"), or "" if unset (caller falls back to admission order).
+func Role(pod *corev1.Pod) string { return spec.Annotation(pod, RoleAnnotation) }
 
 func resourceQuantity(s string) *resource.Quantity {
 	q := resource.MustParse(s)

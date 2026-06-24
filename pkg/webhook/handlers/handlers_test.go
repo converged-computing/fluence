@@ -244,6 +244,121 @@ func TestPodTemplateGangSecondPodIsWorker(t *testing.T) {
 	}
 }
 
+// ── quantum handler: explicit role annotation ──────────────────────────────────
+//
+// These cover the fluence.flux-framework.org/role annotation, which makes the
+// leader/worker split EXPLICIT rather than inferred by admission order. When the
+// annotation is present it is authoritative; the same value is echoed to the
+// container as FLUENCE_ROLE so the app reads the role Fluence used.
+
+// roledQPUPod is a QPU-requesting pod in a group with an explicit role.
+func roledQPUPod(ns, group, name, role string) *corev1.Pod {
+	p := qpuPod("fluence")
+	p.Name = name
+	p.Namespace = ns
+	p.Labels = map[string]string{webhook.GroupLabel: group}
+	p.Annotations = map[string]string{webhook.RoleAnnotation: role}
+	return p
+}
+
+// An explicitly-declared leader gets the sidecar and is NOT gated — even though
+// no leader is recorded on the PodGroup (admission order never consulted).
+func TestExplicitLeaderGetsSidecarNotGated(t *testing.T) {
+	ns, group := "default", "qaoa"
+	// fixture with NO LeaderAnnotation recorded — proves we don't rely on it.
+	pg := &schedulingv1alpha2.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: group, Namespace: ns},
+	}
+	m := &webhook.Mutator{Clientset: fake.NewSimpleClientset(pg)}
+
+	leader := roledQPUPod(ns, group, "qaoa-leader", RoleLeader)
+	ops := m.Mutate(context.Background(), leader)
+	if hasGateOp(ops) {
+		t.Error("explicit leader must NOT be gated")
+	}
+	if !hasSidecarOp(ops) {
+		t.Error("explicit leader must get the sidecar")
+	}
+	if !contains(opEnvNames(ops), "FLUENCE_ROLE") {
+		t.Error("leader must get FLUENCE_ROLE injected for the app to read")
+	}
+}
+
+// An explicitly-declared worker is gated and gets no sidecar — even if it
+// requests the QPU resource itself and even if it (wrongly) appears as the
+// recorded leader. The annotation overrides both.
+func TestExplicitWorkerIsGatedRegardlessOfAdmission(t *testing.T) {
+	ns, group := "default", "qaoa"
+	// Adversarial fixture: record THIS worker's own name as the admission-order
+	// leader. The explicit role:worker must still win and gate it.
+	worker := roledQPUPod(ns, group, "qaoa-worker-0", RoleWorker)
+	pg := &schedulingv1alpha2.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: group, Namespace: ns,
+			Annotations: map[string]string{webhook.LeaderAnnotation: worker.Name}},
+	}
+	m := &webhook.Mutator{Clientset: fake.NewSimpleClientset(pg)}
+
+	ops := m.Mutate(context.Background(), worker)
+	if !hasGateOp(ops) {
+		t.Error("explicit worker must be gated even if mis-recorded as the admission-order leader")
+	}
+	if hasSidecarOp(ops) {
+		t.Error("explicit worker must NOT get a sidecar")
+	}
+	if !contains(opEnvNames(ops), "FLUENCE_ROLE") {
+		t.Error("worker must get FLUENCE_ROLE injected so the app knows it is a worker")
+	}
+}
+
+// A heterogeneous gang declared with explicit roles resolves to exactly one
+// leader (sidecar, ungated) and the rest workers (gated) — independent of the
+// order in which the webhook admits the pods. This is the property a
+// leader/worker quantum gang needs and that admission order cannot guarantee.
+func TestExplicitRolesResolveRegardlessOfOrder(t *testing.T) {
+	ns, group := "default", "qaoa"
+	pg := &schedulingv1alpha2.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{Name: group, Namespace: ns}, // no recorded leader
+	}
+	m := &webhook.Mutator{Clientset: fake.NewSimpleClientset(pg)}
+
+	pods := []*corev1.Pod{
+		roledQPUPod(ns, group, "w0", RoleWorker),
+		roledQPUPod(ns, group, "leader", RoleLeader),
+		roledQPUPod(ns, group, "w1", RoleWorker),
+	}
+	var leaders, workers int
+	for _, p := range pods { // any admission order
+		ops := m.Mutate(context.Background(), p)
+		switch {
+		case hasSidecarOp(ops) && !hasGateOp(ops):
+			leaders++
+		case hasGateOp(ops) && !hasSidecarOp(ops):
+			workers++
+		default:
+			t.Fatalf("pod %s resolved to neither a clean leader nor worker", p.Name)
+		}
+	}
+	if leaders != 1 || workers != 2 {
+		t.Fatalf("want 1 leader + 2 workers, got %d leaders / %d workers", leaders, workers)
+	}
+}
+
+// Backwards compatibility: with NO role annotation, the leader is still chosen
+// by admission order (the recorded PodGroup leader), exactly as before.
+func TestNoRoleAnnotationFallsBackToAdmissionOrder(t *testing.T) {
+	ns, group, leader := "default", "qaoa", "qaoa-leader"
+	m := &webhook.Mutator{Clientset: quantumGroupFixture(ns, group, leader)}
+
+	// a second pod with no role annotation, not the recorded leader -> worker
+	second := qpuPod("fluence")
+	second.Name = "qaoa-second"
+	second.Namespace = ns
+	second.Labels = map[string]string{webhook.GroupLabel: group}
+	if !hasGateOp(m.Mutate(context.Background(), second)) {
+		t.Error("without a role annotation, a non-leader group member must be gated by admission order")
+	}
+}
+
 // ── gang handler: scheduling group linkage ──────────────────────────────────────
 
 func TestGangStampsSchedulingGroup(t *testing.T) {
