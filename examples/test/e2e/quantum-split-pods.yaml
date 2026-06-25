@@ -1,0 +1,55 @@
+# Heterogeneous quantum gang for the two-group split e2e. Leader requests qpu and
+# is role=leader; two workers are role=worker. group-size on the leader makes the
+# leader group minCount deterministic (1); the worker group is derived as N-1.
+# (Owner-derived N from an indexed Job is exercised by the unit tests; a raw-pod
+# mock has no owning Job, so we make the split observable via explicit roles.)
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qsplit-leader
+  labels:
+    app: qsplit
+    fluence.flux-framework.org/group: qsplit
+  annotations:
+    fluence.flux-framework.org/role: leader
+    fluence.flux-framework.org/group-size: "3"
+spec:
+  schedulerName: fluence
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: busybox
+      command: ["sh","-c","echo leader; sleep 600"]
+      resources:
+        requests: {fluxion.flux-framework.org/qpu: "1"}
+        limits:   {fluxion.flux-framework.org/qpu: "1"}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qsplit-worker-0
+  labels: {app: qsplit, fluence.flux-framework.org/group: qsplit}
+  annotations: {fluence.flux-framework.org/role: worker, fluence.flux-framework.org/group-size: "3"}
+spec:
+  schedulerName: fluence
+  restartPolicy: Never
+  containers:
+    - name: w
+      image: busybox
+      command: ["sh","-c","echo worker; sleep 30"]
+      resources: {requests: {cpu: "100m"}}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qsplit-worker-1
+  labels: {app: qsplit, fluence.flux-framework.org/group: qsplit}
+  annotations: {fluence.flux-framework.org/role: worker, fluence.flux-framework.org/group-size: "3"}
+spec:
+  schedulerName: fluence
+  restartPolicy: Never
+  containers:
+    - name: w
+      image: busybox
+      command: ["sh","-c","echo worker; sleep 30"]
+      resources: {requests: {cpu: "100m"}}

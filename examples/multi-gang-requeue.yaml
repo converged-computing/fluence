@@ -1,0 +1,48 @@
+# Requeue-on-capacity test for EventsToRegister.
+# gang-win: a 2-pod gang that runs a SHORT job and COMPLETES (pods -> Succeeded),
+#           freeing its nodes. Pod completion is the capacity-free event.
+# gang-wait: a 2-pod gang needing the same nodes; loses the initial race and sits
+#            Unschedulable. When gang-win completes, fluence's QueueingHint must
+#            wake gang-wait so it schedules and runs — with NO manual nudge.
+# On a 3-worker (~3-core) cluster the two 2-pod gangs (4 cores) cannot co-run.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gang-win
+spec:
+  completions: 2
+  parallelism: 2
+  completionMode: Indexed
+  template:
+    metadata:
+      labels: {fluence.flux-framework.org/group: gang-win}
+      annotations: {fluence.flux-framework.org/group-size: "2"}
+    spec:
+      schedulerName: fluence
+      restartPolicy: Never
+      containers:
+        - name: w
+          image: busybox
+          command: ["sh","-c","sleep 30"]   # completes, frees nodes
+          resources: {requests: {cpu: "1"}}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gang-wait
+spec:
+  completions: 2
+  parallelism: 2
+  completionMode: Indexed
+  template:
+    metadata:
+      labels: {fluence.flux-framework.org/group: gang-wait}
+      annotations: {fluence.flux-framework.org/group-size: "2"}
+    spec:
+      schedulerName: fluence
+      restartPolicy: Never
+      containers:
+        - name: w
+          image: busybox
+          command: ["sh","-c","sleep 10"]
+          resources: {requests: {cpu: "1"}}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
 
 	"github.com/converged-computing/fluence/pkg/webhook"
 	"github.com/converged-computing/fluence/pkg/webhook/spec"
@@ -35,6 +37,13 @@ const (
 	// Role values for webhook.RoleAnnotation.
 	RoleLeader = "leader"
 	RoleWorker = "worker"
+
+	// WorkerGroupSuffix: a quantum gang of size N is split into TWO PodGroups —
+	// the leader keeps <group> (minCount 1) and the workers move to
+	// <group>-workers (minCount N-1, all gated). This suffix MUST match what the
+	// sidecar uses to discover workers (FLUENCE_WORKER_GROUP env, set on the
+	// leader's sidecar by the webhook).
+	WorkerGroupSuffix = "-workers"
 )
 
 // quantumHandler coordinates quantum-classical workflows. It applies to a pod
@@ -73,7 +82,7 @@ func (h *quantumHandler) isWorkerOfQuantumGroup(ctx context.Context, m webhook.M
 	if g == "" || m.Client() == nil {
 		return false
 	}
-	leader := m.PodGroupLeader(ctx, pod.Namespace, g)
+	leader := podGroupLeader(ctx, m, pod.Namespace, g)
 	if leader == "" || leader == pod.Name {
 		return false
 	}
@@ -105,15 +114,24 @@ func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *
 		isWorker = false
 	default:
 		if g != "" {
-			leader := m.PodGroupLeader(ctx, pod.Namespace, g)
+			leader := podGroupLeader(ctx, m, pod.Namespace, g)
 			isWorker = leader != "" && leader != pod.Name
 		}
 	}
 
 	if g != "" && isWorker {
-		log.Printf("[fluence-webhook] quantum worker %s/%s (role=%q) — gating",
-			pod.Namespace, pod.Name, role)
-		ops := gateOps(pod)
+		// Two-group split: workers live in <group>-workers with minCount = N-1
+		// (the leader is the other group, size 1). N is the full gang size from
+		// the owning Job. The worker is RE-LINKED from <group> to the worker
+		// group, and the worker PodGroup is created (idempotent) with minCount
+		// N-1 so the worker set schedules atomically among itself.
+		wg := g + WorkerGroupSuffix
+		workerMin := workerCount(ctx, m, pod) // N-1: the worker subgroup schedules atomically among itself
+		m.EnsurePodGroup(ctx, pod.Namespace, wg, pod.Name, workerMin)
+		log.Printf("[fluence-webhook] quantum worker %s/%s (role=%q) — group %s minCount=%d, gating",
+			pod.Namespace, pod.Name, role, wg, workerMin)
+		ops := relinkGroupOps(pod, wg) // move label + schedulingGroup to <group>-workers
+		ops = append(ops, gateOps(pod)...)
 		ops = append(ops, roleEnvOps(pod, RoleWorker)...)
 		return ops
 	}
@@ -128,11 +146,35 @@ func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *
 	log.Printf("[fluence-webhook] quantum pod %s/%s — interceptor (leader=%v role=%q observe=%v)",
 		pod.Namespace, pod.Name, isLeader, role, observe)
 
-	ops := m.InterceptorOps(pod)
+	if isLeader {
+		// Leader is its own group of 1 (the workers are <group>-workers). Create
+		// the leader PodGroup with minCount=1 so the last-running gang handler
+		// (which would otherwise parent-derive N) finds it already present and
+		// leaves it alone. Also record the admission-order leader so a worker
+		// admitted without an explicit role can resolve its role by membership.
+		m.EnsurePodGroup(ctx, pod.Namespace, g, pod.Name, 1)
+		recordLeaderIfUnset(ctx, m, pod.Namespace, g, leaderName(pod))
+	}
+	sc := sidecarFor(m)
+	ops := sc.InterceptorOps(pod)
 	ops = append(ops, roleEnvOps(pod, RoleLeader)...)
 	if isLeader || observe {
-		m.EnsureSidecarRBAC(ctx, pod.Namespace)
-		ops = append(ops, m.SidecarContainerOps(pod, observe)...)
+		sc.EnsureRBAC(ctx, pod.Namespace)
+		// Leader/worker sidecar env is supplied HERE (the quantum handler owns the
+		// split), keeping the core domain-agnostic. FLUENCE_EXPECTED_WORKERS is
+		// copied verbatim from the expected-workers ANNOTATION: env var values
+		// cannot be computed-and-patched dynamically at admission, so the workload
+		// declares the count as an annotation and the webhook propagates it to the
+		// env var the sidecar reads — annotation and env var are the same value in
+		// two representations.
+		var extra []corev1.EnvVar
+		if isLeader {
+			if n := spec.Annotation(pod, webhook.ExpectedWorkersAnnotation); n != "" {
+				extra = append(extra, corev1.EnvVar{Name: "FLUENCE_EXPECTED_WORKERS", Value: n})
+			}
+			extra = append(extra, corev1.EnvVar{Name: "FLUENCE_WORKER_GROUP_BASE", Value: g})
+		}
+		ops = append(ops, sc.ContainerOps(pod, observe, extra)...)
 	}
 	return ops
 }
@@ -165,6 +207,51 @@ func roleEnvOps(pod *corev1.Pod, effectiveRole string) []spec.Op {
 		pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env, value)
 	}
 	return ops
+}
+
+// relinkGroupOps moves a worker pod into the worker group: it overwrites the
+// group label and the schedulingGroup.podGroupName link to point at wg
+// (<group>-workers). This is what puts the worker into the size-(N-1) PodGroup
+// instead of the leader's size-1 group.
+func relinkGroupOps(pod *corev1.Pod, wg string) []spec.Op {
+	var ops []spec.Op
+	// label (the value the sidecar lists workers by) — escape "/" and "~" per JSON Pointer
+	labelPath := "/metadata/labels/" + escapeJSONPointer(webhook.GroupLabel)
+	ops = append(ops, spec.Op{Op: "add", Path: labelPath, Value: wg})
+	// the native gang link
+	ops = append(ops, spec.Op{Op: "add", Path: "/spec/schedulingGroup",
+		Value: map[string]string{"podGroupName": wg}})
+	return ops
+}
+
+// escapeJSONPointer escapes "~" and "/" for use in a JSON Pointer path segment.
+func escapeJSONPointer(s string) string {
+	s = strings.ReplaceAll(s, "~", "~0")
+	s = strings.ReplaceAll(s, "/", "~1")
+	return s
+}
+
+// workerCount returns N-1, the size of the worker subgroup in a quantum gang of
+// full size N (N from the group-size annotation, else the owning Job's
+// parallelism). Used for the worker PodGroup's gang minCount so the workers
+// schedule atomically among themselves. (The sidecar's FLUENCE_EXPECTED_WORKERS
+// is a SEPARATE value, copied from the expected-workers annotation — env vars
+// cannot be patched dynamically, so the workload declares that count explicitly.)
+// Minimum 1.
+func workerCount(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod) int32 {
+	n := int32(0)
+	if pod.Annotations != nil {
+		if v, err := strconv.Atoi(pod.Annotations[webhook.GroupSizeAnnotation]); err == nil && v > 0 {
+			n = int32(v)
+		}
+	}
+	if n == 0 {
+		n = ownerJobN(ctx, m, pod)
+	}
+	if n > 1 {
+		return n - 1
+	}
+	return 1
 }
 
 // gateOps adds the quantum scheduling gate (idempotent).

@@ -77,12 +77,21 @@ type Fluence struct {
 	mu sync.Mutex
 	// placement maps a group key to its allocation (nodes, backend, jobids).
 	placement map[string]groupAlloc
+	// excludedNodes maps a group key to the set of node names that have been
+	// rejected for that group by other scheduler plugins (taints, affinity,
+	// volume topology that Fluxion's graph does not model). PostFilter adds the
+	// whole failed allocation's nodes here; PreFilter feeds them back as an RFC 31
+	// negated-hostlist constraint so the re-match is forced onto untried nodes.
+	// The set only grows for a group, guaranteeing the retry converges (finite
+	// node pool) and is cleared on teardown. Guarded by mu.
+	excludedNodes map[string]map[string]bool
 }
 
 var (
-	_ fwk.PreFilterPlugin = (*Fluence)(nil)
-	_ fwk.FilterPlugin    = (*Fluence)(nil)
-	_ fwk.PreBindPlugin   = (*Fluence)(nil)
+	_ fwk.PreFilterPlugin  = (*Fluence)(nil)
+	_ fwk.FilterPlugin     = (*Fluence)(nil)
+	_ fwk.PostFilterPlugin = (*Fluence)(nil)
+	_ fwk.PreBindPlugin    = (*Fluence)(nil)
 )
 
 // New builds the plugin: discover cluster nodes, optionally inject quantum
@@ -161,10 +170,11 @@ func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error
 	fluxion.Init(tmp.Name(), os.Getenv("FLUENCE_MATCH_POLICY"), "")
 
 	f := &Fluence{
-		handle:       h,
-		matcher:      fluxion,
-		knownDevices: knownDevices,
-		placement:    map[string]groupAlloc{},
+		handle:        h,
+		matcher:       fluxion,
+		knownDevices:  knownDevices,
+		placement:     map[string]groupAlloc{},
+		excludedNodes: map[string]map[string]bool{},
 	}
 	f.registerCancelHandlers()
 	// Periodic + startup reconcile of completed Fluence-created PodGroups, so a
@@ -251,7 +261,15 @@ func (f *Fluence) PreFilter(
 		return nil, fwk.AsStatus(err)
 	}
 
-	specs, err := placement.JobspecsForGroup(group, pods, f.knownDevices)
+	f.mu.Lock()
+	excluded := make([]string, 0, len(f.excludedNodes[group]))
+	for n := range f.excludedNodes[group] {
+		excluded = append(excluded, n)
+	}
+	f.mu.Unlock()
+	sort.Strings(excluded) // deterministic constraint for stable matching/logs
+
+	specs, err := placement.JobspecsForGroup(group, pods, f.knownDevices, excluded)
 	if err != nil {
 		return nil, fwk.AsStatus(err)
 	}
@@ -388,6 +406,69 @@ func (f *Fluence) Filter(
 		}
 	}
 	return fwk.NewStatus(fwk.Unschedulable, "node not in fluxion allocation for this group")
+}
+
+// PostFilter runs when a pod could not be scheduled after Filter — for a Fluence
+// group, this means the cached Fluxion allocation's nodes did not all survive
+// the other scheduler plugins' Filter checks (a taint, node affinity, or volume
+// topology constraint that Fluxion's resource graph does not model rejected one
+// or more of them). Without intervention the group would retry forever against
+// the same cached allocation while the Fluxion reservation leaked, because
+// PreFilter short-circuits on the cache and nothing else releases it on a
+// scheduling failure.
+//
+// We react by abandoning the failed allocation: the ENTIRE cached node set is
+// added to the group's exclusion set, the Fluxion jobids are cancelled, and the
+// cached placement is deleted. The next PreFilter for the group re-matches with
+// an RFC 31 negated-hostlist constraint over the accumulated exclusion set, so
+// Fluxion is forced onto untried nodes. We exclude the whole set (not just the
+// individually-rejected nodes) deliberately: if the group as a whole could not
+// be admitted, a node that happened to survive this round carries no guarantee
+// for the next, and excluding the whole set makes each retry a strictly smaller,
+// monotonic search that converges — either to a feasible allocation on untried
+// nodes, or to a clean no-match (Unschedulable) once the graph is exhausted, at
+// which point the pod waits for a cluster-state change rather than busy-looping.
+func (f *Fluence) PostFilter(
+	ctx context.Context,
+	state fwk.CycleState,
+	pod *corev1.Pod,
+	filteredNodeStatusMap fwk.NodeToStatusReader,
+) (*fwk.PostFilterResult, *fwk.Status) {
+	group := groupKey(pod)
+
+	f.mu.Lock()
+	alloc, ok := f.placement[group]
+	if !ok {
+		// No cached allocation for this group — nothing of ours to reconcile.
+		// (Another plugin's PostFilter, or a non-group pod.)
+		f.mu.Unlock()
+		return nil, fwk.NewStatus(fwk.Unschedulable)
+	}
+	// Accumulate the whole failed allocation's nodes into the exclusion set.
+	if f.excludedNodes[group] == nil {
+		f.excludedNodes[group] = map[string]bool{}
+	}
+	for _, n := range alloc.place.Nodes {
+		f.excludedNodes[group][n] = true
+	}
+	excludedCount := len(f.excludedNodes[group])
+	jobids := alloc.jobids
+	delete(f.placement, group)
+	f.mu.Unlock()
+
+	// Release the Fluxion reservation for the abandoned allocation so the graph
+	// does not leak it while the group retries.
+	f.cancelJobids(jobids)
+
+	log.Printf("[fluence] group %s unschedulable: abandoning allocation (nodes %v, "+
+		"jobids %v); %d node(s) now excluded, will re-match on next cycle",
+		group, alloc.place.Nodes, jobids, excludedCount)
+
+	// Returning Unschedulable (no nominated node) lets the pod be requeued; the
+	// next PreFilter re-matches with the enlarged exclusion set. We do not
+	// nominate a node — Fluxion, not PostFilter preemption, chooses the next
+	// placement.
+	return nil, fwk.NewStatus(fwk.Unschedulable)
 }
 
 // PreBindPreFlight runs before PreBind. It returns Success when we have a cached
@@ -718,6 +799,7 @@ func (f *Fluence) cancelGroup(key string, ann map[string]string) {
 
 	f.mu.Lock()
 	delete(f.placement, key)
+	delete(f.excludedNodes, key) // drop accumulated exclusions so a future group reusing the name starts clean
 	f.mu.Unlock()
 }
 

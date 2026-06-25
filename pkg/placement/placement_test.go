@@ -64,7 +64,7 @@ func TestClassicalSingleMatch(t *testing.T) {
 		podWith("p0", corev1.ResourceList{corev1.ResourceCPU: qty(4), "nvidia.com/gpu": qty(1)}),
 		podWith("p1", corev1.ResourceList{corev1.ResourceCPU: qty(4), "nvidia.com/gpu": qty(1)}),
 	}
-	specs, err := JobspecsForGroup("grp", pods, nil)
+	specs, err := JobspecsForGroup("grp", pods, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestGroupDeviceMatchWhenLeaderNotFirst(t *testing.T) {
 	})
 	// Leader deliberately placed last.
 	pods := []corev1.Pod{worker, worker, leader}
-	specs, err := JobspecsForGroup("qgrp", pods, map[string]bool{"qpu": true})
+	specs, err := JobspecsForGroup("qgrp", pods, map[string]bool{"qpu": true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func qpuPodWithRequires(name string, requires map[string]string) corev1.Pod {
 // constraints, nothing extra (over-constraining would break unconstrained runs).
 func TestNoRequireAnnotationsAddsNoConstraints(t *testing.T) {
 	p := qpuPodWithRequires("q", nil)
-	specs, err := JobspecsForGroup("g", []corev1.Pod{p}, map[string]bool{"qpu": true})
+	specs, err := JobspecsForGroup("g", []corev1.Pod{p}, map[string]bool{"qpu": true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestNoRequireAnnotationsAddsNoConstraints(t *testing.T) {
 // Exactly one require- constraint.
 func TestSingleRequireConstraint(t *testing.T) {
 	p := qpuPodWithRequires("q", map[string]string{"qrmi_type": "braket-gate"})
-	specs, err := JobspecsForGroup("g", []corev1.Pod{p}, map[string]bool{"qpu": true})
+	specs, err := JobspecsForGroup("g", []corev1.Pod{p}, map[string]bool{"qpu": true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestMultipleRequireConstraintsAreDeduped(t *testing.T) {
 	// a worker that happens to repeat one of the same require- annotations
 	worker := qpuPodWithRequires("w0", map[string]string{"vendor": "amazon"})
 	specs, err := JobspecsForGroup("g", []corev1.Pod{leader, worker},
-		map[string]bool{"qpu": true})
+		map[string]bool{"qpu": true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func TestRequireAnnotationConstrainsDevice(t *testing.T) {
 	leader.Annotations[RequireAnnotationPrefix+"vendor"] = "amazon"
 
 	specs, err := JobspecsForGroup("qgrp", []corev1.Pod{leader},
-		map[string]bool{"qpu": true})
+		map[string]bool{"qpu": true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestDeviceProducesSecondMatch(t *testing.T) {
 		FluxionResourcePrefix + "qpu": qty(1),
 	})
 	known := map[string]bool{"qpu": true}
-	specs, err := JobspecsForGroup("qgrp", []corev1.Pod{p}, known)
+	specs, err := JobspecsForGroup("qgrp", []corev1.Pod{p}, known, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestDeviceProducesSecondMatch(t *testing.T) {
 // node), so there are two matches: compute (core=1, virtual=false) and device.
 func TestDeviceOnlyStillForcesCompute(t *testing.T) {
 	p := podWith("q", corev1.ResourceList{FluxionResourcePrefix + "qpu": qty(1)})
-	specs, err := JobspecsForGroup("qonly", []corev1.Pod{p}, map[string]bool{"qpu": true})
+	specs, err := JobspecsForGroup("qonly", []corev1.Pod{p}, map[string]bool{"qpu": true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestDeviceOnlyStillForcesCompute(t *testing.T) {
 // Requesting a device type the graph does not model is a hard error.
 func TestUnknownDeviceErrors(t *testing.T) {
 	p := podWith("q", corev1.ResourceList{FluxionResourcePrefix + "fpga": qty(1)})
-	_, err := JobspecsForGroup("grp", []corev1.Pod{p}, map[string]bool{"qpu": true})
+	_, err := JobspecsForGroup("grp", []corev1.Pod{p}, map[string]bool{"qpu": true}, nil)
 	if err == nil {
 		t.Fatal("expected an error for an unmodeled device type")
 	}
@@ -301,7 +301,7 @@ func TestHoldDurationZero(t *testing.T) {
 		corev1.ResourceCPU:            qty(1),
 		FluxionResourcePrefix + "qpu": qty(1),
 	})
-	specs, err := JobspecsForGroup("g", []corev1.Pod{p}, map[string]bool{"qpu": true})
+	specs, err := JobspecsForGroup("g", []corev1.Pod{p}, map[string]bool{"qpu": true}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -365,4 +365,77 @@ func TestPlacementUnmarkedNodeIsCompute(t *testing.T) {
 	if p.Backend != "" {
 		t.Fatalf("unmarked node should not be a backend, got %q", p.Backend)
 	}
+}
+
+// When excludeNodes is non-empty, the compute jobspec's constraint must AND the
+// base properties with an RFC 31 negated hostlist, so a re-match avoids the
+// rejected nodes. When empty, the constraint must be the plain properties form
+// (byte-for-byte the pre-exclusion behavior).
+func TestExcludeNodesAddsNegatedHostlist(t *testing.T) {
+	p := podWith("p", corev1.ResourceList{corev1.ResourceCPU: qty(1)})
+
+	// no exclusion -> plain properties, no `and`/`not`
+	specs, err := JobspecsForGroup("g", []corev1.Pod{p}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cons := computeConstraints(t, specs[0])
+	if _, hasAnd := cons["and"]; hasAnd {
+		t.Fatalf("no-exclusion constraint must not use `and`: %#v", cons)
+	}
+	if _, hasProps := cons["properties"]; !hasProps {
+		t.Fatalf("no-exclusion constraint must have plain properties: %#v", cons)
+	}
+
+	// with exclusion -> and[ properties, not[ hostlist ] ]
+	specs, err = JobspecsForGroup("g", []corev1.Pod{p}, nil, []string{"node-b", "node-c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cons = computeConstraints(t, specs[0])
+	andTerms, ok := cons["and"].([]interface{})
+	if !ok || len(andTerms) != 2 {
+		t.Fatalf("exclusion constraint must be `and` of 2 terms: %#v", cons)
+	}
+	// find the not/hostlist term
+	foundHostlist := false
+	for _, term := range andTerms {
+		tm, _ := term.(map[string]interface{})
+		notTerm, ok := tm["not"].([]interface{})
+		if !ok || len(notTerm) == 0 {
+			continue
+		}
+		inner, _ := notTerm[0].(map[string]interface{})
+		hl, ok := inner["hostlist"].([]string)
+		if !ok {
+			// json round-trip may make it []interface{}; accept both
+			if hlAny, ok2 := inner["hostlist"].([]interface{}); ok2 {
+				if len(hlAny) == 2 {
+					foundHostlist = true
+				}
+			}
+			continue
+		}
+		if len(hl) == 2 {
+			foundHostlist = true
+		}
+	}
+	if !foundHostlist {
+		t.Fatalf("exclusion constraint must contain not[hostlist[2 nodes]]: %#v", cons)
+	}
+}
+
+// computeConstraints digs out attributes.system.constraints from the compute
+// jobspec (the first spec; device specs do not carry node exclusions).
+func computeConstraints(t *testing.T, spec *jobspec.Jobspec) map[string]interface{} {
+	t.Helper()
+	sys, ok := spec.Attributes["system"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("no system attributes: %#v", spec.Attributes)
+	}
+	cons, ok := sys["constraints"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("no constraints: %#v", sys)
+	}
+	return cons
 }

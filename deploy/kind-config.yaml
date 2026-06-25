@@ -33,3 +33,4 @@ nodes:
               value: "GenericWorkload=true"
   - role: worker
   - role: worker
+  - role: worker
