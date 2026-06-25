@@ -27,3 +27,7 @@ count="$(kubectl get pods -l app=training --no-headers | wc -l | tr -d ' ')"
 log "PASS: classical gang placed all $count pods via fluence"
 kubectl delete -f examples/single-podgroup.yaml --wait=false || true
 kubectl patch podgroup training --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+# Wait for the pods to actually be gone before the next test runs — otherwise a
+# terminating 'training' pod (same name/labels reused by other scenarios) can be
+# misread as the next test's placement.
+kubectl wait --for=delete pod -l app=training --timeout=60s 2>/dev/null || true

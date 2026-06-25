@@ -214,14 +214,36 @@ func withEntries(counts map[string]int) []jobspec.Resource {
 // allocation (duration 0 runs to graph end) plus an RFC 31 property constraint
 // selecting the eligible node set. properties is the AND-set of composed
 // key=value property strings a matched node must carry.
-func systemAttributes(properties []string) map[string]interface{} {
+func systemAttributes(properties []string, excludeNodes []string) map[string]interface{} {
+	// Base property constraint (the eligible-node property AND-set).
+	constraints := map[string]interface{}{
+		"properties": properties,
+	}
+	// When a group has had a placement rejected by other scheduler plugins
+	// (taints, affinity, volume topology that Fluxion's graph does not model),
+	// PostFilter accumulates the rejected hostnames and we AND in an RFC 31
+	// negated hostlist so the re-match is forced onto untried nodes. RFC 31 is
+	// JsonLogic-style ({operator:[values]}, one operator per object), so to AND
+	// two operators we nest them under an explicit `and`. We only do this when
+	// there is something to exclude, so the no-exclusion jobspec is byte-for-byte
+	// what it was before (and existing tests/behavior are unchanged).
+	if len(excludeNodes) > 0 {
+		constraints = map[string]interface{}{
+			"and": []interface{}{
+				map[string]interface{}{"properties": properties},
+				map[string]interface{}{
+					"not": []interface{}{
+						map[string]interface{}{"hostlist": excludeNodes},
+					},
+				},
+			},
+		}
+	}
 	return map[string]interface{}{
 		"system": map[string]interface{}{
 			// duration 0 => hold the allocation until we explicitly Cancel.
-			"duration": 0,
-			"constraints": map[string]interface{}{
-				"properties": properties,
-			},
+			"duration":    0,
+			"constraints": constraints,
 		},
 	}
 }
@@ -229,7 +251,7 @@ func systemAttributes(properties []string) map[string]interface{} {
 // computeJobspec builds the physical-compute jobspec for a group: one slot per
 // pod holding the compute resources, constrained to virtual=false nodes. This is
 // the only jobspec for a group that requests no virtual devices.
-func computeJobspec(groupName string, slots int, compute map[string]int) *jobspec.Jobspec {
+func computeJobspec(groupName string, slots int, compute map[string]int, excludeNodes []string) *jobspec.Jobspec {
 	return &jobspec.Jobspec{
 		Version: 9999,
 		Resources: []jobspec.Resource{{
@@ -238,7 +260,7 @@ func computeJobspec(groupName string, slots int, compute map[string]int) *jobspe
 			Label: "default",
 			With:  withEntries(compute),
 		}},
-		Attributes: systemAttributes([]string{VirtualPropertyFalse}),
+		Attributes: systemAttributes([]string{VirtualPropertyFalse}, excludeNodes),
 		Tasks: []jobspec.Task{{
 			Command: []string{groupName},
 			Slot:    "default",
@@ -272,7 +294,7 @@ func deviceJobspec(groupName, deviceType string, count int, extraProps []string)
 			Label: "device",
 			With:  []jobspec.Resource{{Type: "node", Count: count}},
 		}},
-		Attributes: systemAttributes(props),
+		Attributes: systemAttributes(props, nil),
 		Tasks: []jobspec.Task{{
 			Command: []string{groupName},
 			Slot:    "device",
@@ -299,6 +321,7 @@ func JobspecsForGroup(
 	groupName string,
 	pods []corev1.Pod,
 	knownDevices map[string]bool,
+	excludeNodes []string,
 ) ([]*jobspec.Jobspec, error) {
 	if len(pods) == 0 {
 		return nil, fmt.Errorf("pod group %q has no pods", groupName)
@@ -321,7 +344,7 @@ func JobspecsForGroup(
 		}
 	}
 
-	specs := []*jobspec.Jobspec{computeJobspec(groupName, len(pods), compute)}
+	specs := []*jobspec.Jobspec{computeJobspec(groupName, len(pods), compute, excludeNodes)}
 
 	// Deterministic device order for stable output.
 	deviceTypes := make([]string, 0, len(devices))

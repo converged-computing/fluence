@@ -1,6 +1,7 @@
 package fluence
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 	schedv1a2 "k8s.io/api/scheduling/v1alpha2"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
+	fwk "k8s.io/kube-scheduler/framework"
 )
 
 // fakeMatcher records Cancel calls so cancel behavior can be asserted without
@@ -46,7 +48,11 @@ func (m *fakeMatcher) Cancel(jobid uint64) error {
 }
 
 func newTestFluence(m matcher) *Fluence {
-	return &Fluence{matcher: m, placement: map[string]groupAlloc{}}
+	return &Fluence{
+		matcher:       m,
+		placement:     map[string]groupAlloc{},
+		excludedNodes: map[string]map[string]bool{},
+	}
 }
 
 func ann(jobid string) map[string]string {
@@ -343,5 +349,105 @@ func twoSpecs() []*jobspec.Jobspec {
 	return []*jobspec.Jobspec{
 		{Version: 9999},
 		{Version: 9999},
+	}
+}
+
+// --- PostFilter allocation reconciliation -----------------------------------
+
+// PostFilter must abandon a group's failed allocation: add the WHOLE cached node
+// set to the exclusion set, cancel the Fluxion jobids, and delete the cache, so
+// the next PreFilter re-matches onto untried nodes.
+func TestPostFilterAbandonsAndExcludesWholeNodeSet(t *testing.T) {
+	m := &fakeMatcher{}
+	f := newTestFluence(m)
+	key := "default/training"
+	f.placement[key] = groupAlloc{
+		place:  placement.Placement{Nodes: []string{"node-a", "node-b", "node-c"}},
+		jobids: []uint64{11, 12},
+	}
+	pod := groupedPod("default", "training-0", "training", nil)
+
+	_, status := f.PostFilter(context.Background(), nil, pod, nil)
+	if status == nil || status.Code() != fwk.Unschedulable {
+		t.Fatalf("expected Unschedulable status, got %v", status)
+	}
+	// cache cleared
+	if _, still := f.placement[key]; still {
+		t.Fatal("placement cache should be deleted after PostFilter")
+	}
+	// jobids cancelled
+	if len(m.cancelled) != 2 {
+		t.Fatalf("expected both jobids cancelled, got %v", m.cancelled)
+	}
+	// the WHOLE node set excluded
+	excl := f.excludedNodes[key]
+	for _, n := range []string{"node-a", "node-b", "node-c"} {
+		if !excl[n] {
+			t.Fatalf("expected %s excluded, set=%v", n, excl)
+		}
+	}
+	if len(excl) != 3 {
+		t.Fatalf("expected exactly 3 excluded nodes, got %v", excl)
+	}
+}
+
+// Repeated failures accumulate monotonically: a second abandoned allocation adds
+// its nodes to the existing exclusion set (the set only grows -> convergence).
+func TestPostFilterAccumulatesAcrossAttempts(t *testing.T) {
+	m := &fakeMatcher{}
+	f := newTestFluence(m)
+	key := "default/training"
+	pod := groupedPod("default", "training-0", "training", nil)
+
+	// attempt 1 fails on {a,b}
+	f.placement[key] = groupAlloc{place: placement.Placement{Nodes: []string{"node-a", "node-b"}}, jobids: []uint64{1}}
+	f.PostFilter(context.Background(), nil, pod, nil)
+	// attempt 2 (re-matched elsewhere) fails on {c,d}
+	f.placement[key] = groupAlloc{place: placement.Placement{Nodes: []string{"node-c", "node-d"}}, jobids: []uint64{2}}
+	f.PostFilter(context.Background(), nil, pod, nil)
+
+	excl := f.excludedNodes[key]
+	for _, n := range []string{"node-a", "node-b", "node-c", "node-d"} {
+		if !excl[n] {
+			t.Fatalf("expected %s in accumulated exclusion set, got %v", n, excl)
+		}
+	}
+	if len(excl) != 4 {
+		t.Fatalf("exclusion set should accumulate to 4, got %v", excl)
+	}
+}
+
+// PostFilter on a group with no cached allocation (not ours, or already cleared)
+// is a safe no-op: no panic, no cancel, returns Unschedulable.
+func TestPostFilterUnknownGroupNoop(t *testing.T) {
+	m := &fakeMatcher{}
+	f := newTestFluence(m)
+	pod := groupedPod("default", "stranger-0", "stranger", nil)
+
+	_, status := f.PostFilter(context.Background(), nil, pod, nil)
+	if status == nil || status.Code() != fwk.Unschedulable {
+		t.Fatalf("expected Unschedulable, got %v", status)
+	}
+	if len(m.cancelled) != 0 {
+		t.Fatalf("nothing should be cancelled for an unknown group, got %v", m.cancelled)
+	}
+	if len(f.excludedNodes) != 0 {
+		t.Fatalf("no exclusion set should be created for an unknown group, got %v", f.excludedNodes)
+	}
+}
+
+// Teardown (cancelGroup) must clear the exclusion set so a future group reusing
+// the same key does not inherit stale exclusions.
+func TestCancelGroupClearsExclusions(t *testing.T) {
+	m := &fakeMatcher{}
+	f := newTestFluence(m)
+	key := "default/training"
+	f.placement[key] = groupAlloc{jobids: []uint64{9}}
+	f.excludedNodes[key] = map[string]bool{"node-a": true}
+
+	f.cancelGroup(key, ann("9"))
+
+	if _, still := f.excludedNodes[key]; still {
+		t.Fatal("exclusion set should be cleared on teardown")
 	}
 }
