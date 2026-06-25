@@ -1,0 +1,29 @@
+# Multi-pod gang via the WEBHOOK path (the path the experiments use): pods carry
+# the group LABEL + group-size annotation; the fluence webhook creates the
+# PodGroup with minCount = group-size (3). All 3 must place or none.
+# The CI cluster has 3 workers; fluxion graphs ~1 core per node, so a 3-pod
+# gang needs all three. minCount=3 enforces all-or-none.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gang3
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: gang3}
+  template:
+    metadata:
+      labels:
+        app: gang3
+        fluence.flux-framework.org/group: gang3
+      annotations:
+        fluence.flux-framework.org/group-size: "3"
+    spec:
+      schedulerName: fluence
+      containers:
+        - name: worker
+          image: busybox
+          command: ["sleep", "3600"]
+          resources:
+            requests:
+              cpu: "100m"

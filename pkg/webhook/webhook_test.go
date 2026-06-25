@@ -40,7 +40,7 @@ func TestSidecarInheritsWorkloadSecretEnv(t *testing.T) {
 			}},
 		},
 	}
-	ops := m.SidecarContainerOps(pod, false)
+	ops := m.SidecarContainerOps(pod, false, nil)
 	var sidecar *corev1.Container
 	for _, op := range ops {
 		if c, ok := op.Value.(corev1.Container); ok && c.Name == "fluence-sidecar" {

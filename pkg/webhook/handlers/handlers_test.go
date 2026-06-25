@@ -166,7 +166,7 @@ func quantumGroupFixture(ns, group, leaderName string) *fake.Clientset {
 	pg := &schedulingv1alpha2.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: group, Namespace: ns,
-			Annotations: map[string]string{webhook.LeaderAnnotation: leaderName},
+			Annotations: map[string]string{LeaderAnnotation: leaderName},
 		},
 	}
 	leaderPod := qpuPod("fluence")
@@ -198,7 +198,7 @@ func TestClassicalGangWorkerNotGated(t *testing.T) {
 	ns, group, leader := "default", "classical", "classical-leader"
 	pg := &schedulingv1alpha2.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: group, Namespace: ns,
-			Annotations: map[string]string{webhook.LeaderAnnotation: leader}},
+			Annotations: map[string]string{LeaderAnnotation: leader}},
 	}
 	leaderPod := cpuPod("fluence")
 	leaderPod.Name = leader
@@ -222,7 +222,7 @@ func TestPodTemplateGangSecondPodIsWorker(t *testing.T) {
 	ns, group, leader := "default", "qaoa", "qaoa-abc123"
 	pg := &schedulingv1alpha2.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: group, Namespace: ns,
-			Annotations: map[string]string{webhook.LeaderAnnotation: leader}},
+			Annotations: map[string]string{LeaderAnnotation: leader}},
 	}
 	leaderPod := qpuPod("fluence")
 	leaderPod.Name = leader
@@ -294,7 +294,7 @@ func TestExplicitWorkerIsGatedRegardlessOfAdmission(t *testing.T) {
 	worker := roledQPUPod(ns, group, "qaoa-worker-0", RoleWorker)
 	pg := &schedulingv1alpha2.PodGroup{
 		ObjectMeta: metav1.ObjectMeta{Name: group, Namespace: ns,
-			Annotations: map[string]string{webhook.LeaderAnnotation: worker.Name}},
+			Annotations: map[string]string{LeaderAnnotation: worker.Name}},
 	}
 	m := &webhook.Mutator{Clientset: fake.NewSimpleClientset(pg)}
 

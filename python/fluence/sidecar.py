@@ -29,6 +29,12 @@ from fluence.providers import resolve_from_env
 from fluence.providers.base import log
 from fluence.ungate import ungate_pods, gated_pods_from_env, namespace_from_env, wait_for_gated_pods
 
+# MUST match handlers.WorkerGroupSuffix in the Go webhook. A quantum gang of size
+# N is split into the leader group <group> (size 1) and the worker group
+# <group>-workers (size N-1, all gated). The sidecar runs in the leader and
+# discovers/ungates workers in the WORKER group, not the leader's group.
+WORKER_GROUP_SUFFIX = "-workers"
+
 
 def _poll(provider, task, poll_interval, ungate):
     mode = "gang" if ungate else "observe-only"
@@ -52,6 +58,13 @@ def main():
     pod_uid = os.environ.get("FLUENCE_POD_UID", "")
     pod_name = os.environ.get("FLUENCE_POD_NAME", "")
     group = os.environ.get("FLUENCE_GROUP", "")
+    # Two-group quantum split: the leader (where this sidecar runs) is in
+    # <group>; the gated workers were moved to <group>-workers by the webhook.
+    # WORKER_GROUP_SUFFIX MUST match handlers.WorkerGroupSuffix in the Go webhook
+    # (pkg/webhook/handlers/quantum.go). The webhook also passes the base group
+    # via FLUENCE_WORKER_GROUP_BASE; prefer it, fall back to FLUENCE_GROUP.
+    worker_group_base = os.environ.get("FLUENCE_WORKER_GROUP_BASE", group)
+    worker_group = worker_group_base + WORKER_GROUP_SUFFIX if worker_group_base else ""
     backend = os.environ.get("FLUXION_BACKEND", "")
     observe = os.environ.get("FLUENCE_OBSERVE", "").lower() == "true"
     discovery_timeout = int(os.environ.get("FLUENCE_TASK_DISCOVERY_TIMEOUT", 300))
@@ -63,7 +76,7 @@ def main():
 
     log("starting fluence quantum sidecar")
     log(f"  pod_uid={pod_uid} namespace={namespace} group={group} "
-        f"backend={backend} observe={observe} expected_workers={expected_workers}")
+        f"backend={backend} observe={observe} expected_workers={expected_workers} worker_group={worker_group}")
 
     provider = resolve_from_env()
     if provider is None:
@@ -75,7 +88,7 @@ def main():
     if task is None:
         log("ERROR: could not discover quantum task")
         if not observe:
-            ungate_pods(wait_for_gated_pods(namespace, group, expected_workers,
+            ungate_pods(wait_for_gated_pods(namespace, worker_group, expected_workers,
                                             exclude=pod_name, timeout=ungate_timeout),
                         "", namespace)
         sys.exit(1)
@@ -93,7 +106,7 @@ def main():
     # together), then ungate them. expected_workers is N-1, propagated by the
     # webhook from the leader at admission; if unset we ungate whatever is found.
     gated_pods = gated_pods_from_env() or wait_for_gated_pods(
-        namespace, group, expected_workers, exclude=pod_name,
+        namespace, worker_group, expected_workers, exclude=pod_name,
         timeout=ungate_timeout)
     log(f"ungating {len(gated_pods)} worker(s): {gated_pods}")
     n_ok = ungate_pods(gated_pods, job_id, namespace)

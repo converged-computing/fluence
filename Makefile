@@ -55,13 +55,17 @@ test-image-deploy: test-image
 	kubectl patch podgroup training -n default --type=merge -p '{"metadata":{"finalizers":null}}' || true
 	kubectl delete deployments --all
 	kubectl delete pods --all
-	kubectl delete -f deploy/fluence-test.yaml
+	kubectl delete -f deploy/fluence-test.yaml || true
 	kubectl delete pods --all
 
+.PHONY: test-deploy-recreate
+test-deploy-recreate: test-image-deploy
+	kubectl apply -f deploy/fluence-pull-test.yaml
+	kubectl apply -f deploy/device-plugin.yaml
 
 .PHONY: deploy
 deploy: ## Install RBAC + scheduler into kube-system
-	kubectl apply -f deploy/fluence.yaml
+	kubectl apply -f deploy/fluence-.yaml
 
 .PHONY: help
 help:

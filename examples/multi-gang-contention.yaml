@@ -1,0 +1,40 @@
+# Two gangs that cannot both place: fluxion allocates one core per slot, so two
+# 2-pod gangs need 4 cores, but the cluster graphs ~3 (3 workers, ~1 core each). One gang places entirely; the loser stays FULLY pending
+# (all-or-nothing), never partial.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gang-a
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: gang-a}}
+  template:
+    metadata:
+      labels: {app: gang-a, fluence.flux-framework.org/group: gang-a}
+      annotations: {fluence.flux-framework.org/group-size: "2"}
+    spec:
+      schedulerName: fluence
+      containers:
+        - name: w
+          image: busybox
+          command: ["sleep", "3600"]
+          resources: {requests: {cpu: "100m"}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gang-b
+spec:
+  replicas: 2
+  selector: {matchLabels: {app: gang-b}}
+  template:
+    metadata:
+      labels: {app: gang-b, fluence.flux-framework.org/group: gang-b}
+      annotations: {fluence.flux-framework.org/group-size: "2"}
+    spec:
+      schedulerName: fluence
+      containers:
+        - name: w
+          image: busybox
+          command: ["sleep", "3600"]
+          resources: {requests: {cpu: "100m"}}

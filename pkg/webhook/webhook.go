@@ -52,9 +52,6 @@ const (
 	// meaning to it (a handler decides what a group means).
 	GroupLabel = "fluence.flux-framework.org/group"
 
-	// LeaderAnnotation records the admission-order leader on a PodGroup.
-	LeaderAnnotation = "fluence.flux-framework.org/leader"
-
 	// RoleAnnotation, set by the workload on each pod, explicitly declares the
 	// pod's gang role ("leader" or "worker"). When present it is AUTHORITATIVE:
 	// the quantum handler gates workers and gives the leader the sidecar based
@@ -70,6 +67,13 @@ const (
 	// not, so it travels as a static sidecar env var. The core treats it as an
 	// opaque string and ascribes no meaning to it beyond propagation.
 	ExpectedWorkersAnnotation = "fluence.flux-framework.org/expected-workers"
+
+	// GroupSizeAnnotation is the FULL gang member count N (leader + workers),
+	// set by the workload on each pod. It drives the PodGroup gang minCount so the
+	// whole group schedules atomically. This is distinct from
+	// ExpectedWorkersAnnotation (N-1: the workers the sidecar ungates; the leader
+	// is not gated). For a classical gang with no leader/worker split, N = size.
+	GroupSizeAnnotation = "fluence.flux-framework.org/group-size"
 
 	// Sidecar/staging infrastructure (generic — not quantum-specific).
 	SidecarImage          = "ghcr.io/converged-computing/fluence-sidecar:latest"
@@ -138,29 +142,13 @@ func (m *Mutator) EnvVarNames() []string {
 	return names
 }
 
-// PodGroupLeader returns the recorded admission-order leader for the group, or
-// "". Retries briefly to absorb the concurrent leader/worker admission race.
-func (m *Mutator) PodGroupLeader(ctx context.Context, namespace, group string) string {
-	if m.Clientset == nil || group == "" {
-		return ""
+// EnsurePodGroup creates a Fluence-owned PodGroup with gang minCount = the full
+// gang size N (the whole group schedules atomically) if absent. minCount<=0
+// falls back to 1.
+func (m *Mutator) EnsurePodGroup(ctx context.Context, namespace, group, leaderPod string, minCount int32) {
+	if minCount <= 0 {
+		minCount = 1
 	}
-	for i := 0; i < 3; i++ {
-		pg, err := m.Clientset.SchedulingV1alpha2().PodGroups(namespace).Get(ctx, group, metav1.GetOptions{})
-		if err != nil {
-			return ""
-		}
-		if pg.Annotations != nil && pg.Annotations[LeaderAnnotation] != "" {
-			return pg.Annotations[LeaderAnnotation]
-		}
-		if i < 2 {
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-	return ""
-}
-
-// EnsurePodGroup creates a Fluence-owned PodGroup (minCount:1) if absent.
-func (m *Mutator) EnsurePodGroup(ctx context.Context, namespace, group, leaderPod string) {
 	if m.Clientset == nil {
 		return
 	}
@@ -179,26 +167,14 @@ func (m *Mutator) EnsurePodGroup(ctx context.Context, namespace, group, leaderPo
 		},
 		Spec: schedulingv1alpha2.PodGroupSpec{
 			SchedulingPolicy: schedulingv1alpha2.PodGroupSchedulingPolicy{
-				Gang: &schedulingv1alpha2.GangSchedulingPolicy{MinCount: 1},
+				Gang: &schedulingv1alpha2.GangSchedulingPolicy{MinCount: minCount},
 			},
 		},
 	}
 	if _, err := m.Clientset.SchedulingV1alpha2().PodGroups(namespace).Create(ctx, pg, metav1.CreateOptions{}); err != nil {
 		log.Printf("[fluence-webhook] could not create PodGroup %s/%s: %v", namespace, group, err)
 	} else {
-		log.Printf("[fluence-webhook] created PodGroup %s/%s (minCount=1)", namespace, group)
-	}
-}
-
-// RecordLeader records leaderPod as the group's admission-order leader.
-func (m *Mutator) RecordLeader(ctx context.Context, namespace, group, leaderPod string) {
-	if m.Clientset == nil || group == "" {
-		return
-	}
-	patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:%q}}}`, LeaderAnnotation, leaderPod)
-	if _, err := m.Clientset.SchedulingV1alpha2().PodGroups(namespace).Patch(
-		ctx, group, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
-		log.Printf("[fluence-webhook] could not record leader on PodGroup %s/%s: %v", namespace, group, err)
+		log.Printf("[fluence-webhook] created PodGroup %s/%s (minCount=%d)", namespace, group, minCount)
 	}
 }
 
@@ -312,7 +288,7 @@ func (m *Mutator) InterceptorOps(pod *corev1.Pod) []spec.Op {
 
 // SidecarContainerOps adds the fluence-sidecar container and sets its
 // ServiceAccount. observe=true selects observe-only telemetry mode.
-func (m *Mutator) SidecarContainerOps(pod *corev1.Pod, observe bool) []spec.Op {
+func (m *Mutator) SidecarContainerOps(pod *corev1.Pod, observe bool, extraEnv []corev1.EnvVar) []spec.Op {
 	var ops []spec.Op
 	// The sidecar resolves its vendor provider at runtime from the backend the
 	// scheduler chose. It gets the same FLUXION_* contract as the workload
@@ -329,17 +305,11 @@ func (m *Mutator) SidecarContainerOps(pod *corev1.Pod, observe bool) []spec.Op {
 	if observe {
 		env = append(env, corev1.EnvVar{Name: "FLUENCE_OBSERVE", Value: "true"})
 	}
-	// The gang size is known at admission (the leader carries it), even though
-	// the worker NAMES are not yet. Propagate the expected worker count to the
-	// sidecar as a static env var so it can wait until it has discovered that
-	// many gated workers before ungating, rather than ungating a partial set.
-	// Read from a generic annotation so the core stays domain-agnostic; the
-	// workload manifest sets it (e.g. from its own N_WORKERS).
-	if pod.Annotations != nil {
-		if n := pod.Annotations[ExpectedWorkersAnnotation]; n != "" {
-			env = append(env, corev1.EnvVar{Name: "FLUENCE_EXPECTED_WORKERS", Value: n})
-		}
-	}
+	// Handler-supplied, domain-specific env (e.g. quantum's FLUENCE_EXPECTED_WORKERS
+	// and FLUENCE_WORKER_GROUP_BASE). The core does not know what these mean; the
+	// handler that owns the gang shape computes and passes them. Appended before
+	// the credential copy so workload creds still win on name collisions below.
+	env = append(env, extraEnv...)
 	// The sidecar talks to the same backend the workload does (e.g. to find the
 	// task and read its queue position), so it needs the same credentials. Copy
 	// the workload container's secret/configmap-sourced env onto the sidecar.

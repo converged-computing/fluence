@@ -12,9 +12,11 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"flag"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/converged-computing/fluence/pkg/cluster"
@@ -37,6 +39,29 @@ func main() {
 	ns := env("WEBHOOK_NAMESPACE", "kube-system")
 	cfgName := env("WEBHOOK_CONFIG", "fluence-webhook")
 	addr := env("WEBHOOK_ADDR", ":8443")
+
+	// Handler selection. By default ALL registered handlers are enabled. The
+	// operator may restrict the active set with --handlers (comma-separated) or
+	// the FLUENCE_HANDLERS env var, e.g. --handlers=fluxion,gang to run without
+	// quantum. An empty value means all enabled. Unknown names are warned about
+	// but not fatal (so config survives a handler being renamed/removed).
+	handlersFlag := flag.String("handlers", env("FLUENCE_HANDLERS", ""),
+		"comma-separated handlers in dispatch order (default: fluxion,quantum,gang). e.g. fluxion,gang disables quantum")
+	flag.Parse()
+
+	var requested []string
+	if *handlersFlag != "" {
+		for _, n := range strings.Split(*handlersFlag, ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				requested = append(requested, n)
+			}
+		}
+	}
+	active, unknown := webhook.SetActiveHandlers(requested)
+	for _, n := range unknown {
+		log.Printf("[fluence-webhook] WARNING: unknown handler %q — ignoring", n)
+	}
+	log.Printf("[fluence-webhook] active handlers (in dispatch order): %v", active)
 
 	dnsNames := []string{
 		svc + "." + ns + ".svc",
