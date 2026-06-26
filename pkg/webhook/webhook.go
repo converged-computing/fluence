@@ -71,6 +71,13 @@ const (
 	// opaque string and ascribes no meaning to it beyond propagation.
 	ExpectedWorkersAnnotation = "fluence.flux-framework.org/expected-workers"
 
+	// GroupSizeAnnotation is the FULL gang member count N (leader + workers),
+	// set by the workload on each pod. It drives the PodGroup gang minCount so the
+	// whole group schedules atomically. This is distinct from
+	// ExpectedWorkersAnnotation (N-1: the workers the sidecar ungates; the leader
+	// is not gated). For a classical gang with no leader/worker split, N = size.
+	GroupSizeAnnotation = "fluence.flux-framework.org/group-size"
+
 	// Sidecar/staging infrastructure (generic — not quantum-specific).
 	SidecarImage          = "ghcr.io/converged-computing/fluence-sidecar:latest"
 	SidecarServiceAccount = "fluence-sidecar"
@@ -159,8 +166,13 @@ func (m *Mutator) PodGroupLeader(ctx context.Context, namespace, group string) s
 	return ""
 }
 
-// EnsurePodGroup creates a Fluence-owned PodGroup (minCount:1) if absent.
-func (m *Mutator) EnsurePodGroup(ctx context.Context, namespace, group, leaderPod string) {
+// EnsurePodGroup creates a Fluence-owned PodGroup with gang minCount = the full
+// gang size N (the whole group schedules atomically) if absent. minCount<=0
+// falls back to 1.
+func (m *Mutator) EnsurePodGroup(ctx context.Context, namespace, group, leaderPod string, minCount int32) {
+	if minCount <= 0 {
+		minCount = 1
+	}
 	if m.Clientset == nil {
 		return
 	}
@@ -179,14 +191,14 @@ func (m *Mutator) EnsurePodGroup(ctx context.Context, namespace, group, leaderPo
 		},
 		Spec: schedulingv1alpha2.PodGroupSpec{
 			SchedulingPolicy: schedulingv1alpha2.PodGroupSchedulingPolicy{
-				Gang: &schedulingv1alpha2.GangSchedulingPolicy{MinCount: 1},
+				Gang: &schedulingv1alpha2.GangSchedulingPolicy{MinCount: minCount},
 			},
 		},
 	}
 	if _, err := m.Clientset.SchedulingV1alpha2().PodGroups(namespace).Create(ctx, pg, metav1.CreateOptions{}); err != nil {
 		log.Printf("[fluence-webhook] could not create PodGroup %s/%s: %v", namespace, group, err)
 	} else {
-		log.Printf("[fluence-webhook] created PodGroup %s/%s (minCount=1)", namespace, group)
+		log.Printf("[fluence-webhook] created PodGroup %s/%s (minCount=%d)", namespace, group, minCount)
 	}
 }
 

@@ -28,7 +28,7 @@ type MutatorAPI interface {
 	// PodGroup operations (gang scheduling). Group identity is the value of the
 	// group label, which the core treats as an opaque string.
 	PodGroupLeader(ctx context.Context, namespace, group string) string
-	EnsurePodGroup(ctx context.Context, namespace, group, leaderPod string)
+	EnsurePodGroup(ctx context.Context, namespace, group, leaderPod string, minCount int32)
 	RecordLeader(ctx context.Context, namespace, group, leaderPod string)
 
 	// EnsureSidecarRBAC provisions the per-namespace ServiceAccount/Role/Binding

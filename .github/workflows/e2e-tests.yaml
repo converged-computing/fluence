@@ -90,6 +90,9 @@ jobs:
       - name: E2E - classical gang
         run: bash test/e2e/01-classical-gang.sh
 
+      - name: E2E - multi-pod gang (all-or-nothing + contention)
+        run: bash test/e2e/06-multi-gang.sh
+
       - name: E2E - PostFilter re-match (taint-rejected allocation)
         run: bash test/e2e/05-postfilter-rematch.sh
 
