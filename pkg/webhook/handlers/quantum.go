@@ -37,10 +37,10 @@ func init() {
 //     position==1. NOT gated. The producer is one of the N members, so the
 //     application is run exactly N times — never N+1.
 //   - CONSUMERS (the other N-1 members): the <group> gang (minCount N-1), each
-//     gated on quantum.braket/ready + preempting priority, staged with the
-//     interceptor in FAUX mode so its submit returns the producer's task instead
-//     of resubmitting (the shared-result dedup). Ungated together when the
-//     producer's task is ready.
+//     gated on quantum.braket/ready + preempting priority, told its role via
+//     FLUENCE_COORDINATION_ROLE=consumer and handed the producer's task id via
+//     FLUENCE_QUANTUM_JOB_ID. A consumer does NOT submit; it fetches the shared
+//     result by that id. Ungated together when the producer's task is ready.
 //
 // In CoordinationIndependent mode (the default) there is no shared result to
 // coordinate: every member is its own standalone producer (real submit, no gate),
@@ -71,10 +71,9 @@ const (
 	CoordinationAnnotation = "fluence.flux-framework.org/coordination"
 
 	// CoordinationShared: one real task; the producer (index 0) submits and the
-	// other members are gated consumers that dedup to the producer's task. Serves
-	// BOTH the explicit-role contract (workers never call submit) and the
-	// identical-script contract (workers call submit; the faux interceptor returns
-	// the producer's cached task) — the handler is the same for both.
+	// other members are gated consumers that fetch the producer's result. Each
+	// member is told its role via FLUENCE_COORDINATION_ROLE; a role-aware workload
+	// branches on it (producer submits, consumer fetches by FLUENCE_QUANTUM_JOB_ID).
 	CoordinationShared = "shared"
 
 	// CoordinationIndependent (default): every member does its own quantum work;
@@ -101,7 +100,7 @@ const (
 )
 
 // quantumHandler splits a shared quantum gang into a single producer (real
-// submit + sidecar) and N-1 gated faux consumers, or runs every member
+// submit + sidecar) and N-1 gated, role-aware consumers, or runs every member
 // standalone in independent mode (see the package-level model comment). It is the
 // only place in the webhook that knows about quantum resources, gates,
 // coordination, or observe semantics.
@@ -154,7 +153,8 @@ func (h *quantumHandler) mutateProducer(ctx context.Context, m webhook.MutatorAP
 	pg := group + ProducerGroupSuffix
 	m.EnsurePodGroup(ctx, pod.Namespace, pg, pod.Name, 1)
 	ops := linkGroupOps(pod, pg)
-	ops = append(ops, interceptorOps(pod)...) // real (tag) mode — no fauxSubmitEnvOps
+	ops = append(ops, interceptorOps(pod)...)           // tag mode: the producer submits for real
+	ops = append(ops, roleEnvOps(pod, RoleProducer)...) // FLUENCE_COORDINATION_ROLE=producer
 	sc := sidecarFor(m)
 	sc.EnsureRBAC(ctx, pod.Namespace)
 	extra := []corev1.EnvVar{{Name: GangGroupEnv, Value: group}}
@@ -165,11 +165,12 @@ func (h *quantumHandler) mutateProducer(ctx context.Context, m webhook.MutatorAP
 }
 
 // mutateConsumer wires a non-producer member: it joins the <group> consumer gang
-// (minCount N-1), is gated until the producer's task is ready, and runs the same
-// image with the interceptor in FAUX mode so its submit returns the producer's
-// task (handed over as FLUENCE_QUANTUM_JOB_ID at ungate) instead of resubmitting.
-// In the explicit-role contract the consumer's script never calls submit, so the
-// faux interceptor is simply unused — harmless either way.
+// (minCount N-1) and is gated until the producer's task is ready. It is told its
+// role (FLUENCE_COORDINATION_ROLE=consumer) and handed the producer's task id
+// (FLUENCE_QUANTUM_JOB_ID, stamped on the pod by the sidecar at ungate). A
+// role-aware consumer reads those and fetches the shared result instead of
+// submitting — so the consumer never calls the vendor submit, and needs neither
+// the interceptor nor a faux flag.
 func (h *quantumHandler) mutateConsumer(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string, n int32) []spec.Op {
 	m.EnsurePodGroup(ctx, pod.Namespace, group, pod.Name, n-1)
 	ops := linkGroupOps(pod, group)
@@ -178,10 +179,43 @@ func (h *quantumHandler) mutateConsumer(ctx context.Context, m webhook.MutatorAP
 	// gate. applyOps gates the pod, raises priority, and stamps depends-on-*.
 	dep := Dependency{Kind: DependencyKindQuantumSubmit, Producer: group + ProducerGroupSuffix, Gate: QuantumGate}
 	ops = append(ops, dep.applyOps(pod)...)
-	ops = append(ops, interceptorOps(pod)...)
-	ops = append(ops, fauxSubmitEnvOps(pod)...)
-	log.Printf("[fluence-webhook] quantum consumer %s/%s — group %s minCount=%d, gated+faux",
+	ops = append(ops, consumerEnvOps(pod)...)
+	// A gated consumer never runs the QPU task — it only fetches the producer's
+	// shared result — so it must not hold the Fluxion quantum resource. Leaving it
+	// would make Fluxion allocate a qpu per consumer, capping the gang at the
+	// backend's graph qpu count and, on a single-slot real QPU, leaving the
+	// consumers unschedulable. Applies() already routed this pod on the request, so
+	// stripping it here is safe.
+	ops = append(ops, dropQuantumResourceOps(pod)...)
+	log.Printf("[fluence-webhook] quantum consumer %s/%s — group %s minCount=%d, gated (role=consumer, qpu stripped)",
 		pod.Namespace, pod.Name, group, n-1)
+	return ops
+}
+
+// dropQuantumResourceOps removes the Fluxion quantum resource from a consumer's
+// containers (requests and limits), returning the patch ops and mutating pod in
+// place. Only entries that are present are removed (a JSON-patch remove on a
+// missing path would fail). The sidecar container is never a consumer concern.
+func dropQuantumResourceOps(pod *corev1.Pod) []spec.Op {
+	rn := corev1.ResourceName(QuantumResource)
+	// JSON Pointer escaping for the resource key: '~' -> '~0', '/' -> '~1'.
+	key := strings.ReplaceAll(strings.ReplaceAll(QuantumResource, "~", "~0"), "/", "~1")
+	var ops []spec.Op
+	for i, c := range pod.Spec.Containers {
+		if c.Name == SidecarContainerName {
+			continue
+		}
+		if _, ok := c.Resources.Requests[rn]; ok {
+			ops = append(ops, spec.Op{Op: "remove",
+				Path: fmt.Sprintf("/spec/containers/%d/resources/requests/%s", i, key)})
+			delete(pod.Spec.Containers[i].Resources.Requests, rn)
+		}
+		if _, ok := c.Resources.Limits[rn]; ok {
+			ops = append(ops, spec.Op{Op: "remove",
+				Path: fmt.Sprintf("/spec/containers/%d/resources/limits/%s", i, key)})
+			delete(pod.Spec.Containers[i].Resources.Limits, rn)
+		}
+	}
 	return ops
 }
 
@@ -328,57 +362,66 @@ func escapeJSONPointer(s string) string {
 
 const QuantumClassicalPriorityClass = "fluence-quantum-classical"
 
-// ── faux-submit (worker submit dedup) ───────────────────────────────────────────
+// ── coordination role (producer / consumer) ─────────────────────────────────────
 //
-// Quantum-specific, and delivered through the SAME Python interceptor as the
-// submitter — not a second mechanism. The submitter's interceptor tags the
-// submit; the worker's interceptor (same staged code) no-ops the submit. Which
-// behavior runs is selected at runtime by FLUENCE_FAUX_SUBMIT, set here on the
-// worker. Workers run the submitter's image and may call submit, but by ungate
-// time the task already exists, so resubmitting would duplicate it N times.
+// In a shared gang each member is told its role positively, so the application
+// branches on it instead of relying on any submit-interception magic:
+//   producer  submits the one real task (and is tagged so the sidecar finds it);
+//   consumer  does NOT submit — it reads the producer's task id and fetches the
+//             shared result (e.g. via the vendor's S3-backed result API).
+// The role is decided at admission by isProducer (completion index 0, else the
+// producer-group claim) and surfaced as FLUENCE_COORDINATION_ROLE. Because the
+// election is the webhook's, this env is the single source of truth — the
+// container never re-derives its role from the Job index (which loose, non-Job
+// pods don't even have).
 
 const (
-	// FauxSubmitEnv selects the interceptor's no-op (faux) mode on workers.
-	// install_interceptor (see python/fluence/providers/braket.py) reads it and
-	// patches the vendor submit to return the existing task instead of submitting.
-	FauxSubmitEnv = "FLUENCE_FAUX_SUBMIT"
+	// CoordinationRoleEnv carries the pod's role in a shared gang. A role-aware
+	// workload branches on it: RoleProducer submits, RoleConsumer fetches the
+	// shared result by id. Unset for standalone/independent pods (they all submit).
+	CoordinationRoleEnv = "FLUENCE_COORDINATION_ROLE"
+	RoleProducer        = "producer"
+	RoleConsumer        = "consumer"
 
 	// QuantumJobIDAnnotation is the vendor-neutral task id the ungating sidecar
-	// stamps on each worker (mirrors python/fluence/ungate.py JOB_ID_ANNOTATION),
+	// stamps on each consumer (mirrors python/fluence/ungate.py JOB_ID_ANNOTATION),
 	// BEFORE removing the gate. Surfaced into FLUENCE_QUANTUM_JOB_ID via the
-	// downward API so the faux interceptor can return a handle to that task.
+	// downward API so a consumer can fetch the producer's result by id.
 	QuantumJobIDAnnotation = "fluence.flux-framework.org/quantum-job-id"
 
-	// QuantumJobIDEnv is the env the faux interceptor reads for the existing
-	// task's id.
+	// QuantumJobIDEnv is the env a consumer reads for the producer's task id.
 	QuantumJobIDEnv = "FLUENCE_QUANTUM_JOB_ID"
 )
 
-// fauxSubmitEnvOps sets, on each non-sidecar worker container, the faux-mode
-// marker (FLUENCE_FAUX_SUBMIT=true) and the existing task's id
+// roleEnvOps sets FLUENCE_COORDINATION_ROLE=<role> on each non-sidecar container.
+func roleEnvOps(pod *corev1.Pod, role string) []spec.Op {
+	return setContainerEnvOps(pod, corev1.EnvVar{Name: CoordinationRoleEnv, Value: role})
+}
+
+// consumerEnvOps tells a consumer its role and hands it the producer's task id
 // (FLUENCE_QUANTUM_JOB_ID, downward API from the annotation the ungating sidecar
-// stamps). The interceptor is staged separately via the shared sidecar
-// InterceptorOps path — these env vars only switch its mode and hand it the id.
-func fauxSubmitEnvOps(pod *corev1.Pod) []spec.Op {
-	faux := corev1.EnvVar{Name: FauxSubmitEnv, Value: "true"}
-	jobID := spec.AnnotationEnv(QuantumJobIDEnv, QuantumJobIDAnnotation)
+// stamps). A consumer never submits, so it gets neither the interceptor nor any
+// faux flag — just its role and the id to fetch the shared result with.
+func consumerEnvOps(pod *corev1.Pod) []spec.Op {
+	ops := roleEnvOps(pod, RoleConsumer)
+	ops = append(ops, setContainerEnvOps(pod, spec.AnnotationEnv(QuantumJobIDEnv, QuantumJobIDAnnotation))...)
+	return ops
+}
+
+// setContainerEnvOps appends env var e to every non-sidecar container that does
+// not already define it, returning the patch ops and mutating pod in place.
+func setContainerEnvOps(pod *corev1.Pod, e corev1.EnvVar) []spec.Op {
 	var ops []spec.Op
 	for i, c := range pod.Spec.Containers {
-		if c.Name == SidecarContainerName {
+		if c.Name == SidecarContainerName || spec.HasEnv(c, e.Name) {
 			continue
 		}
-		if !spec.HasEnv(c, FauxSubmitEnv) {
-			if len(c.Env) == 0 {
-				ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/env", i), Value: []corev1.EnvVar{faux}})
-				pod.Spec.Containers[i].Env = []corev1.EnvVar{faux}
-			} else {
-				ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/env/-", i), Value: faux})
-				pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env, faux)
-			}
-		}
-		if !spec.HasEnv(c, QuantumJobIDEnv) {
-			ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/env/-", i), Value: jobID})
-			pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env, jobID)
+		if len(c.Env) == 0 {
+			ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/env", i), Value: []corev1.EnvVar{e}})
+			pod.Spec.Containers[i].Env = []corev1.EnvVar{e}
+		} else {
+			ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/env/-", i), Value: e})
+			pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env, e)
 		}
 	}
 	return ops
@@ -410,7 +453,7 @@ const (
 
 	// defaultSidecarImage is used when FLUENCE_SIDECAR_IMAGE is not set. Owned by
 	// the quantum integration; the deployment may override it via the env var.
-	defaultSidecarImage = "ghcr.io/converged-computing/fluence-sidecar:latest"
+	defaultSidecarImage = "vanessa/fluence-sidecar:latest"
 
 	// StageVolumeName / StageMountPath: the shared emptyDir the init container
 	// stages the fluence Python package into, mounted into workload containers
@@ -471,9 +514,9 @@ func ensureSidecarRBAC(ctx context.Context, m webhook.MutatorAPI, namespace stri
 // interceptorOps stages the fluence Python package (Model C): an init container
 // copies it into a shared emptyDir, mounted into every workload container
 // (skipping the sidecar) with PYTHONPATH + FLUENCE_POD_UID, so Python auto-imports
-// the interceptor via sitecustomize. Broad mounting is safe (fail-soft when the
-// vendor SDK is absent) and is required so a quantum WORKER — which runs the same
-// image but does not request the resource — also gets the (faux-mode) interceptor.
+// the interceptor via sitecustomize, which tags the vendor submit so the sidecar
+// can find the task. Added to producers and standalone/independent pods (the ones
+// that actually submit); consumers don't submit, so they don't get it.
 func interceptorOps(pod *corev1.Pod) []spec.Op {
 	var ops []spec.Op
 
@@ -489,7 +532,7 @@ func interceptorOps(pod *corev1.Pod) []spec.Op {
 		Image:           sidecarImage(),
 		ImagePullPolicy: corev1.PullAlways,
 		Command: []string{"sh", "-c",
-			fmt.Sprintf("python -m fluence.stage %s || echo '[fluence] staging skipped (interceptor unavailable)'", StageMountPath)},
+			fmt.Sprintf("python3 -m fluence.stage %s || echo '[fluence] staging skipped (interceptor unavailable)'", StageMountPath)},
 		VolumeMounts: []corev1.VolumeMount{{Name: StageVolumeName, MountPath: StageMountPath}},
 	}
 	if len(pod.Spec.InitContainers) == 0 {
