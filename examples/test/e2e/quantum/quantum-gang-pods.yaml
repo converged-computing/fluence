@@ -1,13 +1,22 @@
-# Gang + submitter quantum workload for the e2e (no leader/worker).
+# Shared-coordination quantum gang for the e2e (producer/consumer, no submitter).
 #
-# Two pods, identical, both requesting the quantum resource, in group "qgang".
-# The user authors NO roles and NO submitter — the webhook treats this as a gang
-# of full size N=2 (group-size makes N deterministic for raw pods, which have no
-# owning Job/Deployment to derive it from), gates every pod, and ADDITIONALLY
-# creates the one-off submitter pod "qgang-submitter" (its own group-of-one) that
-# runs the real submit and ungates the gang. busybox stands in for the quantum
-# app; the interceptor staging fails soft (no python), which is fine for the
-# structural assertions in 02/03/04.
+# Two identical pods, both requesting the quantum resource, in group "qgang" with
+# coordination=shared. The user authors NO roles and NO submitter pod. The webhook
+# splits the gang by completion index:
+#   qgang-0 (index 0)  -> PRODUCER: its own group-of-one "qgang-producer"
+#                         (minCount 1), real submit, sidecar, NOT gated. It is a
+#                         real member, so the app runs N times, never N+1.
+#   qgang-1 (index 1+)  -> CONSUMER: the "qgang" gang (minCount N-1=1), gated on
+#                         quantum.braket/ready + preempting priority, interceptor
+#                         in faux mode (its submit returns the producer's task).
+#
+# These are raw pods (not a Job) so the e2e can reference stable names; the
+# completion-index annotation is set manually to make producer election
+# deterministic (a real workload uses an indexed Job, which the controller stamps
+# with batch.kubernetes.io/job-completion-index automatically). group-size makes N
+# deterministic for raw pods, which have no owning Job to derive it from. busybox
+# stands in for the quantum app; the interceptor staging fails soft (no python),
+# which is fine for the structural assertions in 02/03/04.
 apiVersion: v1
 kind: Pod
 metadata:
@@ -17,6 +26,8 @@ metadata:
     fluence.flux-framework.org/group: qgang
   annotations:
     fluence.flux-framework.org/group-size: "2"
+    fluence.flux-framework.org/coordination: shared
+    batch.kubernetes.io/job-completion-index: "0"   # -> producer
 spec:
   schedulerName: fluence
   restartPolicy: Never
@@ -37,6 +48,8 @@ metadata:
     fluence.flux-framework.org/group: qgang
   annotations:
     fluence.flux-framework.org/group-size: "2"
+    fluence.flux-framework.org/coordination: shared
+    batch.kubernetes.io/job-completion-index: "1"   # -> consumer
 spec:
   schedulerName: fluence
   restartPolicy: Never

@@ -4,8 +4,9 @@ Copyright 2024 Lawrence Livermore National Security, LLC
 SPDX-License-Identifier: Apache-2.0
 */
 
-// quantum_test.go — all tests for the quantum handler: the gang + submitter
-// model, faux-submit, the sidecar wiring, the Dependency primitive, and the
+// quantum_test.go — all tests for the quantum handler: the producer/consumer
+// shared-coordination split (no separate submitter pod), independent mode,
+// faux-submit, the sidecar wiring, the Dependency primitive, and the
 // standalone/observe paths. Shared fixtures (qpuPod, cpuPod, op helpers) live in
 // handlers_test.go.
 package handlers
@@ -56,11 +57,28 @@ func TestObserveLabelInjectsSidecar(t *testing.T) {
 	}
 }
 
-// ── gang + submitter ────────────────────────────────────────────────────────────
+// ── shared coordination: producer / consumer split ──────────────────────────────
 
-// gangQPUPod is a quantum workload pod (requests the resource) in a group,
-// owned by a Job of parallelism N — the common real shape (a MiniCluster /
-// indexed Job). No role annotation: the new model has no leader/worker.
+// sharedQPUPod is a quantum workload pod (requests the resource) in a group,
+// owned by a Job of parallelism N, with coordination=shared and a completion
+// index. Index "0" is the producer; any other index is a consumer. This is the
+// real shape: an indexed Job whose identical template yields differentiated
+// roles purely from the completion index.
+func sharedQPUPod(ns, group, name, job, index string) *corev1.Pod {
+	p := qpuPod("fluence")
+	p.Name = name
+	p.Namespace = ns
+	p.Labels = map[string]string{webhook.GroupLabel: group}
+	p.Annotations = map[string]string{
+		CoordinationAnnotation:    CoordinationShared,
+		CompletionIndexAnnotation: index,
+	}
+	p.OwnerReferences = []metav1.OwnerReference{{Kind: "Job", Name: job}}
+	return p
+}
+
+// gangQPUPod is a quantum workload pod in a group owned by a Job, with NO
+// coordination annotation — i.e. the default (independent) mode.
 func gangQPUPod(ns, group, name, job string) *corev1.Pod {
 	p := qpuPod("fluence")
 	p.Name = name
@@ -80,10 +98,11 @@ func mincount(t *testing.T, cs *fake.Clientset, ns, group string) (int32, bool) 
 	return pg.Spec.SchedulingPolicy.Gang.MinCount, true
 }
 
-// A quantum gang member (owned by Job parallelism=3) is gated + faux, its gang
-// PodGroup is minCount 3 (full N — no N-1 split), and Fluence creates the
-// separate <group>-submitter pod. It gets NO sidecar (it is gated).
-func TestQuantumGangGatedFauxAndSubmitterCreated(t *testing.T) {
+// A shared-mode CONSUMER (completion index != 0, owned by Job parallelism=3) is
+// gated + faux, joins the <group> consumer gang at minCount N-1 (the split), and
+// gets NO sidecar (it is gated). No separate submitter pod is ever created — the
+// producer is one of the N members.
+func TestSharedConsumerGatedFauxAndSplit(t *testing.T) {
 	ns, group, job := "default", "qg", "qg-job"
 	par := int32(3)
 	cs := fake.NewSimpleClientset(&batchv1.Job{
@@ -91,44 +110,33 @@ func TestQuantumGangGatedFauxAndSubmitterCreated(t *testing.T) {
 		Spec:       batchv1.JobSpec{Parallelism: &par, Completions: &par}})
 	m := &webhook.Mutator{Clientset: cs}
 
-	ops := m.Mutate(context.Background(), gangQPUPod(ns, group, "qg-0", job))
+	ops := m.Mutate(context.Background(), sharedQPUPod(ns, group, "qg-1", job, "1"))
 
 	if !hasGateOp(ops) {
-		t.Error("gang member must be gated")
+		t.Error("consumer must be gated")
 	}
 	if hasSidecarOp(ops) {
-		t.Error("gang member (gated) must NOT get a sidecar")
+		t.Error("consumer (gated) must NOT get a sidecar")
 	}
 	if e, ok := envOp(ops, FauxSubmitEnv); !ok || e.Value != "true" {
-		t.Errorf("gang member must get %s=true", FauxSubmitEnv)
+		t.Errorf("consumer must get %s=true", FauxSubmitEnv)
 	}
-	if mc, ok := mincount(t, cs, ns, group); !ok || mc != 3 {
-		t.Errorf("gang PodGroup minCount=%d (ok=%v), want 3 (full N, no split)", mc, ok)
+	// Consumer gang is minCount N-1 (the producer/consumer split).
+	if mc, ok := mincount(t, cs, ns, group); !ok || mc != 2 {
+		t.Errorf("consumer PodGroup minCount=%d (ok=%v), want 2 (N-1 split)", mc, ok)
 	}
-	// No <group>-workers subgroup in the new model.
-	if _, ok := mincount(t, cs, ns, group+"-workers"); ok {
-		t.Error("there must be no -workers subgroup in the gang+submitter model")
-	}
-	// Fluence created the submitter.
-	sub, err := cs.CoreV1().Pods(ns).Get(context.Background(), group+SubmitterGroupSuffix, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("submitter pod not created: %v", err)
-	}
-	if sub.Annotations[SubmitterAnnotation] != "true" {
-		t.Error("submitter must carry the submitter marker")
-	}
-	if sub.Annotations[GangGroupAnnotation] != group {
-		t.Errorf("submitter gang-group=%q, want %q", sub.Annotations[GangGroupAnnotation], group)
-	}
-	if len(sub.Spec.SchedulingGates) != 0 {
-		t.Error("submitter must NOT be gated")
+	// No separate submitter pod is created.
+	pods, _ := cs.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{})
+	if len(pods.Items) != 0 {
+		t.Errorf("shared mode must NOT spawn a separate submitter pod; found %d pods", len(pods.Items))
 	}
 }
 
-// The submitter pod, on its own admission, is wired as the real coordinator: its
-// own PodGroup minCount 1, the real sidecar (not faux), not gated, and told which
-// gang to ungate via FLUENCE_GANG_GROUP.
-func TestSubmitterWiredAsRealSidecar(t *testing.T) {
+// The shared-mode PRODUCER (completion index 0) is wired as the real coordinator:
+// its own group-of-one <group>-producer at minCount 1, the real sidecar (not
+// faux), not gated, and told which consumer group to ungate via
+// FLUENCE_GANG_GROUP. It is one of the N members — no extra pod is created.
+func TestSharedProducerWiredAsRealSidecar(t *testing.T) {
 	ns, group, job := "default", "qg2", "qg2-job"
 	par := int32(2)
 	cs := fake.NewSimpleClientset(&batchv1.Job{
@@ -136,24 +144,18 @@ func TestSubmitterWiredAsRealSidecar(t *testing.T) {
 		Spec:       batchv1.JobSpec{Parallelism: &par, Completions: &par}})
 	m := &webhook.Mutator{Clientset: cs}
 
-	// First a gang member, which creates the submitter.
-	m.Mutate(context.Background(), gangQPUPod(ns, group, "qg2-0", job))
-	sub, err := cs.CoreV1().Pods(ns).Get(context.Background(), group+SubmitterGroupSuffix, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("submitter not created: %v", err)
-	}
+	ops := m.Mutate(context.Background(), sharedQPUPod(ns, group, "qg2-0", job, "0"))
 
-	ops := m.Mutate(context.Background(), sub)
 	if !hasSidecarOp(ops) {
-		t.Error("submitter must get the real sidecar")
+		t.Error("producer must get the real sidecar")
 	}
 	if hasGateOp(ops) {
-		t.Error("submitter must NOT be gated")
+		t.Error("producer must NOT be gated")
 	}
 	if _, ok := envOp(ops, FauxSubmitEnv); ok {
-		t.Error("submitter must NOT be in faux mode")
+		t.Error("producer must NOT be in faux mode")
 	}
-	// FLUENCE_GANG_GROUP is on the sidecar container itself.
+	// FLUENCE_GANG_GROUP (the consumer group to ungate) is on the sidecar.
 	var sidecar *corev1.Container
 	for _, op := range ops {
 		if c, ok := op.Value.(corev1.Container); ok && c.Name == SidecarContainerName {
@@ -162,7 +164,7 @@ func TestSubmitterWiredAsRealSidecar(t *testing.T) {
 		}
 	}
 	if sidecar == nil {
-		t.Fatal("no sidecar container on submitter")
+		t.Fatal("no sidecar container on producer")
 	}
 	var gotGang bool
 	for _, e := range sidecar.Env {
@@ -171,16 +173,79 @@ func TestSubmitterWiredAsRealSidecar(t *testing.T) {
 		}
 	}
 	if !gotGang {
-		t.Errorf("submitter sidecar must get %s=%q", GangGroupEnv, group)
+		t.Errorf("producer sidecar must get %s=%q", GangGroupEnv, group)
 	}
-	if mc, ok := mincount(t, cs, ns, group+SubmitterGroupSuffix); !ok || mc != 1 {
-		t.Errorf("submitter PodGroup minCount=%d (ok=%v), want 1", mc, ok)
+	// Producer is its own group-of-one (minCount 1).
+	if mc, ok := mincount(t, cs, ns, group+ProducerGroupSuffix); !ok || mc != 1 {
+		t.Errorf("producer PodGroup %s minCount=%d (ok=%v), want 1", group+ProducerGroupSuffix, mc, ok)
+	}
+	// No separate submitter pod.
+	pods, _ := cs.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{})
+	if len(pods.Items) != 0 {
+		t.Errorf("producer is a member, not a spawned pod; found %d pods", len(pods.Items))
+	}
+}
+
+// Shared mode never creates an extra pod: a full gang (producer index 0 +
+// consumers) is N members, so the application runs exactly N times (not N+1 as
+// the old submitter-pod model did).
+func TestSharedGangNoSeparateSubmitterPod(t *testing.T) {
+	ns, group, job := "default", "qauto", "qauto-job"
+	par := int32(2)
+	cs := fake.NewSimpleClientset(&batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: job, Namespace: ns},
+		Spec:       batchv1.JobSpec{Parallelism: &par, Completions: &par}})
+	m := &webhook.Mutator{Clientset: cs}
+
+	m.Mutate(context.Background(), sharedQPUPod(ns, group, "qauto-0", job, "0")) // producer
+	m.Mutate(context.Background(), sharedQPUPod(ns, group, "qauto-1", job, "1")) // consumer
+
+	pods, _ := cs.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{})
+	if len(pods.Items) != 0 {
+		t.Errorf("shared mode must not create any pods (no submitter); found %d", len(pods.Items))
+	}
+	// Both groups exist with the right minCounts.
+	if mc, ok := mincount(t, cs, ns, group+ProducerGroupSuffix); !ok || mc != 1 {
+		t.Errorf("producer group minCount=%d (ok=%v), want 1", mc, ok)
+	}
+	if mc, ok := mincount(t, cs, ns, group); !ok || mc != 1 {
+		t.Errorf("consumer group minCount=%d (ok=%v), want N-1=1", mc, ok)
+	}
+}
+
+// ── independent mode (default) ──────────────────────────────────────────────────
+
+// A grouped quantum pod with no coordination annotation is INDEPENDENT (default):
+// it does its own real submit, is not gated, not faux, and triggers no group
+// split and no submitter pod.
+func TestIndependentGroupedQuantumIsStandalone(t *testing.T) {
+	ns, group, job := "default", "indep", "indep-job"
+	par := int32(3)
+	cs := fake.NewSimpleClientset(&batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: job, Namespace: ns},
+		Spec:       batchv1.JobSpec{Parallelism: &par, Completions: &par}})
+	m := &webhook.Mutator{Clientset: cs}
+
+	ops := m.Mutate(context.Background(), gangQPUPod(ns, group, "indep-0", job))
+
+	if hasGateOp(ops) {
+		t.Error("independent member must not be gated")
+	}
+	if _, ok := envOp(ops, FauxSubmitEnv); ok {
+		t.Error("independent member must not be faux")
+	}
+	if _, ok := mincount(t, cs, ns, group+ProducerGroupSuffix); ok {
+		t.Error("independent mode must not create a producer group")
+	}
+	pods, _ := cs.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{})
+	if len(pods.Items) != 0 {
+		t.Error("independent mode must not spawn a submitter pod")
 	}
 }
 
 // A standalone quantum pod (no group, no owner → group of one) does its own real
 // submit: interceptor staged, but no gating, no faux, and no separate submitter.
-func TestStandaloneQuantumIsRealNoSubmitter(t *testing.T) {
+func TestStandaloneQuantumIsReal(t *testing.T) {
 	ns := "default"
 	cs := fake.NewSimpleClientset()
 	m := &webhook.Mutator{Clientset: cs}
@@ -202,10 +267,29 @@ func TestStandaloneQuantumIsRealNoSubmitter(t *testing.T) {
 	}
 }
 
+// Even with coordination=shared, a group of one (Job parallelism 1) has no
+// consumers to coordinate, so it falls through to the standalone real-submit path.
+func TestSharedGroupOfOneIsStandalone(t *testing.T) {
+	ns, group, job := "default", "one", "one-job"
+	par := int32(1)
+	cs := fake.NewSimpleClientset(&batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{Name: job, Namespace: ns},
+		Spec:       batchv1.JobSpec{Parallelism: &par, Completions: &par}})
+	m := &webhook.Mutator{Clientset: cs}
+
+	ops := m.Mutate(context.Background(), sharedQPUPod(ns, group, "one-0", job, "0"))
+	if hasGateOp(ops) {
+		t.Error("shared group-of-one must not be gated")
+	}
+	if _, ok := mincount(t, cs, ns, group+ProducerGroupSuffix); ok {
+		t.Error("shared group-of-one must not create a producer group")
+	}
+}
+
 // ── faux-submit + dependency ────────────────────────────────────────────────────
 
-// envValueFrom returns the env var op with the given name, if present (covers
-// both single-EnvVar and []EnvVar op shapes).
+// envOp returns the env var op with the given name, if present (covers both
+// single-EnvVar and []EnvVar op shapes).
 func envOp(ops []spec.Op, name string) (corev1.EnvVar, bool) {
 	for _, op := range ops {
 		switch v := op.Value.(type) {
@@ -271,10 +355,10 @@ func unescapeJSONPointer(s string) string {
 	return out
 }
 
-// A quantum worker (no group-size of its own) is expressed as a general
-// Dependency: gated, stamped with depends-on-{kind,producer,gate}, and the
-// producer is the base group.
-func TestQuantumWorkerIsGeneralDependency(t *testing.T) {
+// A shared-mode consumer is expressed as a general Dependency: gated, stamped
+// with depends-on-{kind,producer,gate}, and the producer is the <group>-producer
+// group.
+func TestQuantumConsumerIsGeneralDependency(t *testing.T) {
 	ns, group, job := "default", "depq", "depq-job"
 	par := int32(3)
 	cs := fake.NewSimpleClientset(&batchv1.Job{
@@ -282,17 +366,17 @@ func TestQuantumWorkerIsGeneralDependency(t *testing.T) {
 		Spec:       batchv1.JobSpec{Parallelism: &par, Completions: &par}})
 	m := &webhook.Mutator{Clientset: cs}
 
-	ops := m.Mutate(context.Background(), gangQPUPod(ns, group, "depq-0", job))
+	ops := m.Mutate(context.Background(), sharedQPUPod(ns, group, "depq-1", job, "1"))
 
 	if !hasGateOp(ops) {
-		t.Errorf("worker not gated by the dependency (ops: %+v)", ops)
+		t.Errorf("consumer not gated by the dependency (ops: %+v)", ops)
 	}
 	ann := annotationOps(ops)
 	if ann[DependsOnKindAnnotation] != DependencyKindQuantumSubmit {
 		t.Errorf("depends-on-kind=%q, want %q", ann[DependsOnKindAnnotation], DependencyKindQuantumSubmit)
 	}
-	if ann[DependsOnProducerAnnotation] != group+SubmitterGroupSuffix {
-		t.Errorf("depends-on-producer=%q, want %q (the submitter group)", ann[DependsOnProducerAnnotation], group+SubmitterGroupSuffix)
+	if ann[DependsOnProducerAnnotation] != group+ProducerGroupSuffix {
+		t.Errorf("depends-on-producer=%q, want %q (the producer group)", ann[DependsOnProducerAnnotation], group+ProducerGroupSuffix)
 	}
 	if ann[DependsOnGateAnnotation] != QuantumGate {
 		t.Errorf("depends-on-gate=%q, want %q", ann[DependsOnGateAnnotation], QuantumGate)
@@ -316,11 +400,11 @@ func TestDependencyOfRoundTrip(t *testing.T) {
 	}
 }
 
-// The worker is staged with the SAME interceptor as the submitter (PYTHONPATH +
+// The consumer is staged with the SAME interceptor as the producer (PYTHONPATH +
 // FLUENCE_POD_UID), put into faux mode (FLUENCE_FAUX_SUBMIT=true), and handed the
 // existing task id via the FLUENCE_QUANTUM_JOB_ID downward-API env. One
 // mechanism, two modes — no separate ConfigMap shim. The user sets nothing.
-func TestQuantumWorkerStagedWithFauxSubmit(t *testing.T) {
+func TestQuantumConsumerStagedWithFauxSubmit(t *testing.T) {
 	ns, group, job := "default", "fauxq", "fauxq-job"
 	par := int32(2)
 	cs := fake.NewSimpleClientset(&batchv1.Job{
@@ -328,22 +412,22 @@ func TestQuantumWorkerStagedWithFauxSubmit(t *testing.T) {
 		Spec:       batchv1.JobSpec{Parallelism: &par, Completions: &par}})
 	m := &webhook.Mutator{Clientset: cs}
 
-	ops := m.Mutate(context.Background(), gangQPUPod(ns, group, "fauxq-0", job))
+	ops := m.Mutate(context.Background(), sharedQPUPod(ns, group, "fauxq-1", job, "1"))
 
-	// Same interceptor staging as the submitter (PYTHONPATH set on the worker).
+	// Same interceptor staging as the producer (PYTHONPATH set on the consumer).
 	if _, ok := envOp(ops, "PYTHONPATH"); !ok {
-		t.Errorf("worker not staged with the interceptor (no PYTHONPATH); ops: %+v", ops)
+		t.Errorf("consumer not staged with the interceptor (no PYTHONPATH); ops: %+v", ops)
 	}
 
 	// Faux mode selected.
 	if e, ok := envOp(ops, FauxSubmitEnv); !ok || e.Value != "true" {
-		t.Errorf("worker missing %s=true (got %+v, ok=%v)", FauxSubmitEnv, e, ok)
+		t.Errorf("consumer missing %s=true (got %+v, ok=%v)", FauxSubmitEnv, e, ok)
 	}
 
 	// Existing task id sourced from the annotation the ungating sidecar stamps.
 	e, ok := envOp(ops, QuantumJobIDEnv)
 	if !ok {
-		t.Fatalf("worker missing %s env", QuantumJobIDEnv)
+		t.Fatalf("consumer missing %s env", QuantumJobIDEnv)
 	}
 	if e.ValueFrom == nil || e.ValueFrom.FieldRef == nil ||
 		e.ValueFrom.FieldRef.FieldPath != "metadata.annotations['"+QuantumJobIDAnnotation+"']" {
@@ -379,9 +463,9 @@ func TestSidecarInheritsWorkloadSecretEnv(t *testing.T) {
 	pod := &corev1.Pod{
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
-				Name: "gang",
+				Name: "app",
 				Env: []corev1.EnvVar{
-					{Name: "GANG_ROLE", Value: "leader"}, // plain value: NOT copied
+					{Name: "PLAIN_VALUE", Value: "x"}, // plain value: NOT copied
 					{Name: "AWS_ACCESS_KEY_ID", ValueFrom: &corev1.EnvVarSource{
 						SecretKeyRef: &corev1.SecretKeySelector{
 							LocalObjectReference: corev1.LocalObjectReference{Name: "aws-braket-credentials"},
@@ -406,7 +490,7 @@ func TestSidecarInheritsWorkloadSecretEnv(t *testing.T) {
 		if e.Name == "AWS_ACCESS_KEY_ID" && e.ValueFrom != nil && e.ValueFrom.SecretKeyRef != nil {
 			gotSecret = true
 		}
-		if e.Name == "GANG_ROLE" {
+		if e.Name == "PLAIN_VALUE" {
 			gotPlain = true
 		}
 	}
@@ -414,35 +498,15 @@ func TestSidecarInheritsWorkloadSecretEnv(t *testing.T) {
 		t.Error("sidecar should inherit the workload's secret-sourced AWS creds")
 	}
 	if gotPlain {
-		t.Error("sidecar should NOT copy plain-value workload env like GANG_ROLE")
+		t.Error("sidecar should NOT copy plain-value workload env")
 	}
 }
 
-// A plain quantum workload pod (no role, owned by a Job of N>1) is gated as a
-// faux gang member AND triggers creation of the one-off submitter. The user
-// authors no submitter and no roles.
-func TestGangMemberTriggersSubmitter(t *testing.T) {
-	ns, group, job := "default", "qauto", "qauto-job"
-	par := int32(2)
-	cs := fake.NewSimpleClientset(&batchv1.Job{
-		ObjectMeta: metav1.ObjectMeta{Name: job, Namespace: ns},
-		Spec:       batchv1.JobSpec{Parallelism: &par, Completions: &par}})
-	m := &webhook.Mutator{Clientset: cs}
-
-	workload := gangQPUPod(ns, group, "qauto-0", job)
-	ops := m.Mutate(context.Background(), workload)
-
-	if !hasGateOp(ops) {
-		t.Error("gang member must be gated")
-	}
-	if _, ok := envOp(ops, FauxSubmitEnv); !ok {
-		t.Error("gang member must get FLUENCE_FAUX_SUBMIT")
-	}
-	sub, err := cs.CoreV1().Pods(ns).Get(context.Background(), group+SubmitterGroupSuffix, metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("submitter pod not created: %v", err)
-	}
-	if !spec.PodRequestsResource(sub, QuantumResource) {
-		t.Error("submitter must request the quantum resource (it runs the real submit)")
+// The producer member of a shared gang requests the quantum resource (it runs the
+// real submit). Sanity check that the helper builds a quantum pod.
+func TestSharedProducerRequestsQuantumResource(t *testing.T) {
+	p := sharedQPUPod("default", "g", "g-0", "g-job", "0")
+	if !spec.PodRequestsResource(p, QuantumResource) {
+		t.Error("producer must request the quantum resource (it runs the real submit)")
 	}
 }

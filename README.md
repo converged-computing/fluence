@@ -194,10 +194,10 @@ ceiling. Types come from the same config as the graph, so they can't drift.
 
 ### `sidecars/` — quantum coordination sidecars
 
-Vendor-specific sidecar containers injected by the webhook into leader pods
-of quantum workflow groups. Each sidecar discovers the QPU task submitted by
-the leader, polls the vendor queue, and ungates worker pods when the task
-reaches position==1.
+Vendor-specific sidecar containers injected by the webhook into the producer pod
+of a shared quantum workflow group. Each sidecar discovers the QPU task submitted
+by the producer, polls the vendor queue, and ungates the consumer pods when the
+task reaches position==1.
 
 ```console
 sidecars/
@@ -221,7 +221,7 @@ spec:
 ```
 
 Fluence creates the PodGroup, injects the sidecar, creates per-namespace
-RBAC, and gates all non-leader pods. See `sidecars/braket/design.md` for
+RBAC, and gates the consumer pods. See `sidecars/braket/design.md` for
 the full design including the SDK interceptor, queue position polling, and
 the two-queue problem motivation.
 
@@ -369,88 +369,90 @@ Submission is **not** done by the scheduler — the workload container holds the
 user's credentials and submits via qrmi-go. Fluence only schedules and hands off
 the backend. (When we control local quantum devices this will change.)
 
-### 3. Quantum workflow groups (leader + workers)
+### 3. Quantum workflow groups (producer + consumers)
 
-A quantum workflow group is one pod that **submits** quantum work (the leader)
-plus N pods that **wait** for the result (the workers). All pods share a group
-label; Fluence co-schedules them, gives the leader a sidecar that watches the
-vendor queue, and gates the workers so they consume no node resources during the
-(long, variable) QPU queue wait — releasing them only when the task reaches
-`queue_position == 1`.
-
-```yaml
-# Every pod in the group carries the same group label + schedulerName: fluence
-metadata:
-  labels:
-    fluence.flux-framework.org/group: my-qaoa-workflow
-spec:
-  schedulerName: fluence
-```
-
-#### How the leader is chosen — two mechanisms
-
-There are two ways Fluence decides which pod is the leader. They are mutually
-exclusive per group; pick the one that matches how your workload is built.
-
-**(a) Explicit role (recommended for leader/worker workflows).** Each pod
-declares its role with an annotation. This is **authoritative**: admission order
-is never consulted, and the same value is injected into the container as
-`FLUENCE_ROLE` so your application reads the exact role Fluence used — the two
-can never disagree.
+A quantum workflow group is a gang whose members share **one** quantum task:
+one pod **submits** the work (the producer) and N−1 pods **wait** for the result
+(the consumers). All pods share a group label and run the *same* image; Fluence
+co-schedules them, gives the producer a sidecar that watches the vendor queue, and
+gates the consumers so they consume no node resources during the (long, variable)
+QPU queue wait — releasing them only when the task reaches `queue_position == 1`.
 
 ```yaml
+# Every pod in the group carries the same group label + schedulerName: fluence,
+# and opts into shared coordination.
 metadata:
   labels:
     fluence.flux-framework.org/group: my-qaoa-workflow
   annotations:
-    fluence.flux-framework.org/role: leader     # or: worker
+    fluence.flux-framework.org/coordination: shared
+spec:
+  schedulerName: fluence
 ```
 
-Use this when the leader and workers are **different** (the leader submits the
-quantum task and runs the sidecar; workers process results). The leader gets the
-interceptor + sidecar; workers are gated. Because the decision is declared, it is
-race-free regardless of which pod the API server admits first. Your container can
-branch on `$FLUENCE_ROLE` (e.g. `leader` → submit; `worker` → wait).
+#### Coordination modes
 
-**(b) Admission order (default when no role annotation is present).** If pods
-carry the group label but **no** role annotation, the **first pod admitted**
-becomes the leader and every subsequent pod is a worker. This suits a
-*homogeneous* pod-template gang (Deployment/Job/StatefulSet) where every replica
-is byte-identical — any one of them can lead, so "first admitted" is a fine
-tiebreaker. It is **not** suitable for a heterogeneous leader/worker workflow:
-since admission order is nondeterministic, a worker pod could be admitted first
-and wrongly elected leader. Use mechanism (a) for that case.
+`fluence.flux-framework.org/coordination` selects how the gang is coordinated; it
+defaults to `independent`.
 
-> Rule of thumb: identical replicas → admission order is fine. Distinct
-> leader/worker pods → use the explicit `role` annotation.
+- **`shared`** — the gang shares ONE quantum task. Fluence promotes one member to
+  producer and gates the rest as consumers (see below). Use this for a coordinated
+  workflow where the classical post-processing should start together as the single
+  result lands.
+- **`independent`** (default) — every member does its own quantum work: its own
+  real submit, its own queue wait, no gating. N members run N tasks. This is the
+  honest default; Fluence never invents coordination you did not ask for, and
+  never dedups tasks meant to be distinct.
+
+#### How the producer is chosen
+
+In `shared` mode the producer is the member the Job controller stamps with
+`batch.kubernetes.io/job-completion-index: "0"` — so an **indexed Job** gives
+deterministic, race-free election from a single identical template (every pod has
+the same image and group label; only the index differs). This serves two contracts
+with no extra configuration:
+
+- an **explicit-role script** that branches on the completion index (index 0
+  submits; others wait and consume the result), and
+- an **identical script** where every pod calls submit — the producer's submit is
+  real, and each consumer's submit is transparently returned the producer's task
+  (the shared-result dedup), so the code need not branch at all.
+
+For loose pods with no completion index, the first pod admitted claims the producer
+slot; an indexed Job is recommended when you need determinism.
 
 #### What Fluence does
 
-Regardless of mechanism, the leader gets the sidecar and a PodGroup is created
-(`minCount: 1`); workers get a `quantum.braket/ready` scheduling gate and consume
-no node resources during the QPU queue wait. When the sidecar observes
-`queue_position == 1`, it patches the task ARN onto each worker's annotations and
-removes their gates atomically with setting the `fluence-quantum-classical`
-priority class so they reschedule promptly.
+In `shared` mode the producer gets the interceptor (real mode) + sidecar and its
+own group-of-one PodGroup `<group>-producer` (`minCount: 1`), so it schedules
+alone and runs the single real submit; it is never gated. The consumers join the
+`<group>` gang (`minCount: N−1`), get a `quantum.braket/ready` scheduling gate, and
+consume no node resources during the QPU queue wait. When the sidecar observes
+`queue_position == 1`, it stamps the producer's task id onto each consumer
+(surfaced as `FLUENCE_QUANTUM_JOB_ID`) and removes their gates atomically with
+setting the `fluence-quantum-classical` priority class so they reschedule promptly.
+The producer is one of the N members, so the application runs exactly N times —
+never N+1, and there is no separate submitter pod.
 
 Per-namespace RBAC (`fluence-sidecar` ServiceAccount/Role/RoleBinding) and the
-interceptor ConfigMap are created automatically by the webhook on first use — no
+interceptor staging are created automatically by the webhook on first use — no
 manual setup required.
 
 ```bash
-# Just apply your pods with the group label (+ optional role annotation) and
+# Apply your pods with the group label + coordination annotation +
 # schedulerName: fluence. RBAC is created for you.
 kubectl apply -f my-quantum-workflow.yaml
 ```
 
-#### A note on the homogeneous "all submit" case
+#### A note on the independent "all submit" case
 
-A group where *every* pod submits its own quantum task (no leader/worker split)
-is possible but rarely what you want: N independent submissions land in the
-vendor queue and run at uncoordinated times, so there is no coordination benefit
-from grouping them — you would just have N standalone quantum pods. For a single
-quantum submission, use a standalone pod (no group label, see §2). For a
-coordinated workflow, use the leader/worker form above with an explicit role.
+`coordination: independent` (the default) means *every* pod submits its own
+quantum task: N independent submissions land in the vendor queue and run at
+uncoordinated times. That is correct and sometimes exactly what you want (N
+distinct circuits), but it offers no coordination benefit from grouping — it is
+equivalent to N standalone quantum pods. For a single quantum submission, use a
+standalone pod (no group label, see §2). For a coordinated workflow that shares
+one result, use `coordination: shared` above.
 
 
 ### Notes

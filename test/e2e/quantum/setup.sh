@@ -9,9 +9,9 @@
 #
 # Also points the webhook-injected sidecar/stage image at the CI-loaded image:
 # the default sidecar image (ghcr.io/.../fluence-sidecar:latest) is not loaded in
-# kind, so the submitter's containers could not pull. The fluence-stage init is
+# kind, so the producer's containers could not pull. The fluence-stage init is
 # fail-soft (no python in this image -> it logs and exits 0), which is fine for
-# the structural assertions; the submitter still schedules and runs.
+# the structural assertions; the producer still schedules and runs.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE%/test/e2e/*}/test/e2e/lib.sh"
 IMAGE="${IMAGE:-vanessa/fluence:test}"

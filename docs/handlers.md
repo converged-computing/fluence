@@ -2,9 +2,9 @@
 
 Fluence's value is not creating gangs (Kubernetes 1.36 native gang scheduling
 already does that). It is **customizing the gang on the fly based on the
-resources a pod requests** — e.g. a quantum leader/worker workload becomes a
-size-1 leader gang plus a size-(N-1) worker gang, with the leader running a
-sidecar that ungates its workers when the quantum task is ready.
+resources a pod requests** — e.g. a shared quantum gang becomes a size-1
+producer gang plus a size-(N-1) consumer gang, with the producer running a
+sidecar that ungates its consumers when the quantum task is ready.
 
 ## Handlers
 
@@ -79,5 +79,5 @@ implementation can delegate — handlers do not call them directly.
 3. else 1, logged.
 
 This is a common default available to every gang; handler-specific annotations
-(quantum role, expected-workers, etc.) live in their handlers and are not
+(quantum coordination mode, completion index, etc.) live in their handlers and are not
 required by the core.
