@@ -60,5 +60,4 @@ spec:
               fieldPath: metadata.annotations['fluence.flux-framework.org/quantum-job-id']
       resources:
         requests:
-          cpu: "100m"
-          memory: "128Mi"
+          cpu: "1"

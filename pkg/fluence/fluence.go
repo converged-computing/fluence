@@ -77,13 +77,15 @@ type Fluence struct {
 	mu sync.Mutex
 	// placement maps a group key to its allocation (nodes, backend, jobids).
 	placement map[string]groupAlloc
-	// excludedNodes maps a group key to the set of node names that have been
-	// rejected for that group by other scheduler plugins (taints, affinity,
-	// volume topology that Fluxion's graph does not model). PostFilter adds the
-	// whole failed allocation's nodes here; PreFilter feeds them back as an RFC 31
-	// negated-hostlist constraint so the re-match is forced onto untried nodes.
-	// The set only grows for a group, guaranteeing the retry converges (finite
-	// node pool) and is cleared on teardown. Guarded by mu.
+	// excludedNodes maps a group key to the set of nodes that are GENUINELY
+	// INCOMPATIBLE with that group (PostFilter saw UnschedulableAndUnresolvable
+	// from another plugin: a taint, affinity, or constraint Fluxion's graph does
+	// not model). PreFilter feeds them back as an RFC 31 negated-hostlist
+	// constraint so the re-match is steered onto other nodes. Nodes that were
+	// merely BUSY are deliberately NOT recorded here (excluding them would turn
+	// transient contention into permanent group failure). The set only grows for a
+	// group, so the exclusion-driven re-match is finite, and it is cleared on
+	// teardown. Guarded by mu.
 	excludedNodes map[string]map[string]bool
 }
 
@@ -93,6 +95,41 @@ var (
 	_ fwk.PostFilterPlugin = (*Fluence)(nil)
 	_ fwk.PreBindPlugin    = (*Fluence)(nil)
 )
+
+// schedulableNodes returns only the nodes a normal pod could actually be placed
+// on, so the Fluxion graph never offers a node that Kubernetes will then reject
+// in Filter. Two kinds are dropped:
+//
+//   - cordoned nodes (spec.unschedulable), and
+//   - nodes carrying a NoSchedule/NoExecute taint (e.g. the control-plane's
+//     node-role.kubernetes.io/control-plane:NoSchedule).
+//
+// Without this, Fluxion can place a gang slot on the control-plane (it looks like
+// a valid virtual=false compute node to the graph), the pod is then rejected by
+// TaintToleration with UnschedulableAndUnresolvable, and PostFilter abandons the
+// whole allocation — on a small cluster that strands the gang permanently. We do
+// not attempt to honor specific tolerations here: gang workloads in this setup do
+// not tolerate node taints, so any NoSchedule/NoExecute taint means "not for us".
+func schedulableNodes(nodes []corev1.Node) []corev1.Node {
+	out := make([]corev1.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if n.Spec.Unschedulable {
+			continue
+		}
+		tainted := false
+		for _, t := range n.Spec.Taints {
+			if t.Effect == corev1.TaintEffectNoSchedule || t.Effect == corev1.TaintEffectNoExecute {
+				tainted = true
+				break
+			}
+		}
+		if tainted {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
 
 // New builds the plugin: discover cluster nodes, optionally inject quantum
 // resources, write the JGF graph, initialize the Fluxion matcher, and register
@@ -138,7 +175,7 @@ func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error
 		}
 	}
 
-	jgfBytes, err := cluster.BuildGraph(nodeList.Items, opts)
+	jgfBytes, err := cluster.BuildGraph(schedulableNodes(nodeList.Items), opts)
 	if err != nil {
 		return nil, fmt.Errorf("build resource graph: %w", err)
 	}
@@ -409,25 +446,33 @@ func (f *Fluence) Filter(
 }
 
 // PostFilter runs when a pod could not be scheduled after Filter — for a Fluence
-// group, this means the cached Fluxion allocation's nodes did not all survive
-// the other scheduler plugins' Filter checks (a taint, node affinity, or volume
-// topology constraint that Fluxion's resource graph does not model rejected one
-// or more of them). Without intervention the group would retry forever against
-// the same cached allocation while the Fluxion reservation leaked, because
-// PreFilter short-circuits on the cache and nothing else releases it on a
-// scheduling failure.
+// group, this means the cached Fluxion allocation's nodes did not all survive the
+// other scheduler plugins' Filter checks. Without intervention the group would
+// retry forever against the same cached allocation while the Fluxion reservation
+// leaked, because PreFilter short-circuits on the cache and nothing else releases
+// it on a scheduling failure.
 //
-// We react by abandoning the failed allocation: the ENTIRE cached node set is
-// added to the group's exclusion set, the Fluxion jobids are cancelled, and the
-// cached placement is deleted. The next PreFilter for the group re-matches with
-// an RFC 31 negated-hostlist constraint over the accumulated exclusion set, so
-// Fluxion is forced onto untried nodes. We exclude the whole set (not just the
-// individually-rejected nodes) deliberately: if the group as a whole could not
-// be admitted, a node that happened to survive this round carries no guarantee
-// for the next, and excluding the whole set makes each retry a strictly smaller,
-// monotonic search that converges — either to a feasible allocation on untried
-// nodes, or to a clean no-match (Unschedulable) once the graph is exhausted, at
-// which point the pod waits for a cluster-state change rather than busy-looping.
+// We always abandon the failed allocation here (cancel the Fluxion jobids, drop
+// the cached placement) so the next PreFilter re-matches fresh. The careful part
+// is WHICH nodes we then permanently exclude from the group's future matches,
+// because a group reaches PostFilter for two very different reasons and they must
+// be handled oppositely (see fwk.Code docs):
+//
+//   - UnschedulableAndUnresolvable: the node genuinely cannot host this pod and
+//     re-trying it is pointless (a taint the pod does not tolerate, node affinity
+//     mismatch, a constraint Fluxion's graph does not model). EXCLUDE it; the
+//     next PreFilter feeds the exclusion set back as an RFC 31 negated-hostlist
+//     constraint so Fluxion is steered onto other nodes.
+//
+//   - Unschedulable (plain): the node could host the pod, just not at this
+//     instant (it is momentarily full). This is TRANSIENT. Do NOT exclude it —
+//     excluding a merely-busy node converts ordinary contention into permanent
+//     group failure, and in a saturated cluster (a gang that needs the whole node
+//     set) it strands the gang forever even though it would fit once a node frees.
+//
+// So contention excludes nothing and the group recovers by waiting/retrying;
+// only durable incompatibility accumulates in excludedNodes (cleared on group
+// teardown), which keeps the exclusion-driven re-match finite and correct.
 func (f *Fluence) PostFilter(
 	ctx context.Context,
 	state fwk.CycleState,
@@ -444,12 +489,39 @@ func (f *Fluence) PostFilter(
 		f.mu.Unlock()
 		return nil, fwk.NewStatus(fwk.Unschedulable)
 	}
-	// Accumulate the whole failed allocation's nodes into the exclusion set.
+	// Exclude ONLY nodes that are genuinely incompatible with this pod, never
+	// nodes that were merely busy this cycle. The framework gives us a per-node
+	// status: UnschedulableAndUnresolvable means the node cannot host the pod and
+	// re-trying it is pointless (a taint the pod does not tolerate, node affinity
+	// mismatch, a constraint Fluxion's graph does not model) -> exclude it so the
+	// re-match is steered elsewhere. A plain Unschedulable means the node could
+	// host the pod but not right now (it is momentarily full) -> do NOT exclude
+	// it; it must stay eligible so the group can land there once capacity frees.
+	//
+	// This is the whole point: a group enters PostFilter for many reasons, and
+	// "the cluster is just full at this instant" is the common one. Permanently
+	// banning the busy nodes (the old whole-allocation exclusion) turned transient
+	// contention into permanent group failure — exactly backwards. Now contention
+	// excludes nothing; the group simply abandons this cycle's reservation and
+	// retries the same nodes when they free.
 	if f.excludedNodes[group] == nil {
 		f.excludedNodes[group] = map[string]bool{}
 	}
+	var incompatible, busy []string
 	for _, n := range alloc.place.Nodes {
-		f.excludedNodes[group][n] = true
+		var code fwk.Code
+		if filteredNodeStatusMap != nil {
+			if st := filteredNodeStatusMap.Get(n); st != nil {
+				code = st.Code()
+			}
+		}
+		if code == fwk.UnschedulableAndUnresolvable {
+			f.excludedNodes[group][n] = true
+			incompatible = append(incompatible, n)
+		} else {
+			// plain Unschedulable, Success, or unknown/nil -> transient, keep.
+			busy = append(busy, n)
+		}
 	}
 	excludedCount := len(f.excludedNodes[group])
 	jobids := alloc.jobids
@@ -460,14 +532,13 @@ func (f *Fluence) PostFilter(
 	// does not leak it while the group retries.
 	f.cancelJobids(jobids)
 
-	log.Printf("[fluence] group %s unschedulable: abandoning allocation (nodes %v, "+
-		"jobids %v); %d node(s) now excluded, will re-match on next cycle",
-		group, alloc.place.Nodes, jobids, excludedCount)
+	log.Printf("[fluence] group %s unschedulable: abandoning allocation (jobids %v); "+
+		"incompatible(excluded)=%v busy(retryable, NOT excluded)=%v; %d node(s) excluded total",
+		group, jobids, incompatible, busy, excludedCount)
 
 	// Returning Unschedulable (no nominated node) lets the pod be requeued; the
-	// next PreFilter re-matches with the enlarged exclusion set. We do not
-	// nominate a node — Fluxion, not PostFilter preemption, chooses the next
-	// placement.
+	// next PreFilter re-matches (with any incompatible nodes excluded, but busy
+	// nodes still in play). Fluxion, not PostFilter preemption, chooses placement.
 	return nil, fwk.NewStatus(fwk.Unschedulable)
 }
 

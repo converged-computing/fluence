@@ -146,6 +146,13 @@ spec:
             # Without these its PodGroup/GangScheduling plugin is inactive, pods
             # schedule with no gang semantics, and PodGroup status stays Pending.
             - --feature-gates=GenericWorkload=true,GangScheduling=true
+            # Re-attempt unschedulable pods more often than the 5m default. In the
+            # contention experiment a gang that loses the initial race for nodes is
+            # marked Unschedulable; this is how soon it is re-tried after capacity
+            # frees (the event-driven QueueingHint is best-effort; this is the
+            # backstop that bounds worst-case requeue latency). 30s keeps contended
+            # gangs draining promptly without thrashing the queue.
+            - --pod-max-in-unschedulable-pods-duration=30s
             - --v=4
           env:
             # Path to the resources config (e.g. quantum backends). Unset/empty

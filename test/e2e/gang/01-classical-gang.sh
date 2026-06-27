@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Classical gang scheduling: a PodGroup of 2 must be placed all-or-nothing on real nodes.
 set -euo pipefail
-HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE}/lib.sh"
+HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE%/test/e2e/*}/test/e2e/lib.sh"
 
 log "TEST 1: classical gang scheduling"
-kubectl apply -f examples/single-podgroup.yaml
+kubectl apply -f examples/test/e2e/gang/single-podgroup.yaml
 
 # All pods in the 'training' deployment must reach Running (scheduled + started).
 # Wait for the pod to EXIST before waiting for Ready — kubectl wait errors out

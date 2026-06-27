@@ -9,7 +9,7 @@
 # so a pod left over (terminating) from a previous test can never be mistaken for
 # this test's placement. It also ignores terminating pods when asserting.
 set -euo pipefail
-HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE}/lib.sh"
+HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE%/test/e2e/*}/test/e2e/lib.sh"
 
 NAME=pf-rematch
 SEL="app=${NAME}"

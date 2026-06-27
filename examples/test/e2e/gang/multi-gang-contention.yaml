@@ -18,7 +18,7 @@ spec:
         - name: w
           image: busybox
           command: ["sleep", "3600"]
-          resources: {requests: {cpu: "100m"}}
+          resources: {requests: {cpu: "1"}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -37,4 +37,4 @@ spec:
         - name: w
           image: busybox
           command: ["sleep", "3600"]
-          resources: {requests: {cpu: "100m"}}
+          resources: {requests: {cpu: "1"}}
