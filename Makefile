@@ -27,8 +27,8 @@ build: ## Build all binaries (scheduler needs flux-sched; helpers are pure Go)
 
 .PHONY: python
 python:
-	docker build -f python/Dockerfile -t ghcr.io/converged-computing/fluence-sidecar:latest ./python
-	docker push ghcr.io/converged-computing/fluence-sidecar:latest
+	docker build -f python/Dockerfile -t vanessa/fluence-sidecar:latest ./python
+	docker push vanessa/fluence-sidecar:latest
 	# kind load docker-image ghcr.io/converged-computing/fluence-sidecar:latest
 
 .PHONY: test

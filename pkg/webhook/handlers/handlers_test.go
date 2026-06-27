@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/converged-computing/fluence/pkg/placement"
@@ -75,6 +76,19 @@ func hasGateOp(ops []spec.Op) bool {
 					return true
 				}
 			}
+		}
+	}
+	return false
+}
+
+// hasDropQuantumResourceOp reports whether ops remove the Fluxion quantum
+// resource from a container's requests or limits (the consumer qpu strip).
+func hasDropQuantumResourceOp(ops []spec.Op) bool {
+	for _, op := range ops {
+		if op.Op == "remove" && strings.HasSuffix(op.Path, "qpu") &&
+			(strings.Contains(op.Path, "/resources/requests/") ||
+				strings.Contains(op.Path, "/resources/limits/")) {
+			return true
 		}
 	}
 	return false

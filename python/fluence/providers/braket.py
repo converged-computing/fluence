@@ -49,26 +49,13 @@ class BraketProvider(Provider):
             return False  # braket SDK not in this container — fail-soft
 
         original_run = AwsDevice.run
-        faux = os.environ.get("FLUENCE_FAUX_SUBMIT", "").lower() == "true"
 
         def patched_run(self, task_specification, *args, **kwargs):
-            # Two modes of the ONE interceptor:
-            #   faux (worker): the one-off submitter already submitted this task
-            #     before the worker was ungated, so submitting again would
-            #     duplicate it N times. Return a handle to the EXISTING task (by
-            #     ARN, handed over via FLUENCE_QUANTUM_JOB_ID) without submitting.
-            #   tag (submitter): stamp the pod-uid tag so the sidecar can find the
-            #     task in the queue, then submit for real.
-            if faux:
-                arn = os.environ.get("FLUENCE_QUANTUM_JOB_ID", "")
-                if arn:
-                    from braket.aws import AwsQuantumTask
-                    log(f"faux-submit: returning existing task {arn} "
-                        f"(no resubmission)")
-                    return AwsQuantumTask(arn=arn)
-                log("faux-submit: no job id; suppressing submit "
-                    "(worker consumes results by id)")
-                return None
+            # Tag the submission with the pod-uid so the sidecar can find this task
+            # in the queue. The interceptor is staged only on pods that actually
+            # submit (producers and standalone/independent pods); consumers are
+            # role-aware (FLUENCE_COORDINATION_ROLE=consumer) and never call run(),
+            # so there is no submit to intercept and no faux mode to select.
             if pod_uid:
                 tags = kwargs.get("tags", {})
                 tags[TAG_KEY] = pod_uid

@@ -138,8 +138,7 @@ spec:
       containers:
         - name: fluence
           image: vanessa/fluence:test
-          # Allows for kind load
-          imagePullPolicy: Always
+          imagePullPolicy: Always          
           command:
             - /bin/fluence
             - --config=/etc/fluence/scheduler-config.yaml
@@ -148,13 +147,6 @@ spec:
             # Without these its PodGroup/GangScheduling plugin is inactive, pods
             # schedule with no gang semantics, and PodGroup status stays Pending.
             - --feature-gates=GenericWorkload=true,GangScheduling=true
-            # Re-attempt unschedulable pods more often than the 5m default. In the
-            # contention experiment a gang that loses the initial race for nodes is
-            # marked Unschedulable; this is how soon it is re-tried after capacity
-            # frees (the event-driven QueueingHint is best-effort; this is the
-            # backstop that bounds worst-case requeue latency). 30s keeps contended
-            # gangs draining promptly without thrashing the queue.
-            - --pod-max-in-unschedulable-pods-duration=30s
             - --v=4
           env:
             # Path to the resources config (e.g. quantum backends). Unset/empty
@@ -194,19 +186,29 @@ spec:
       containers:
         - name: webhook
           image: vanessa/fluence:test
-          # Allows for kind load
           imagePullPolicy: Always
           command: ["/bin/fluence-webhook"]
+          # The webhook derives the FLUXION_* env contract (FLUXION_VENDOR,
+          # FLUXION_QRMI_TYPE, ...) from the resource graph's attribute keys, so
+          # it needs the same graph the scheduler and device plugin read. Without
+          # this it injects only FLUXION_BACKEND, and the sidecar can't route to
+          # a provider (which keys on qrmi_type).
           env:
-            # Use busybox as sidecar image in tests — avoids pulling the real
-            # sidecar image which is large and not cached in CI.
-            - name: FLUENCE_SIDECAR_IMAGE
-              value: "busybox:latest"
+            - name: FLUENCE_RESOURCES
+              value: /etc/fluence/resources.yaml
           ports:
             - containerPort: 8443
           readinessProbe:
             httpGet: {path: /healthz, port: 8443, scheme: HTTPS}
             initialDelaySeconds: 2
+          volumeMounts:
+            - name: config
+              mountPath: /etc/fluence
+      volumes:
+        - name: config
+          projected:
+            sources:
+              - configMap: {name: fluence-resources, optional: true}
 ---
 apiVersion: v1
 kind: Service
@@ -247,7 +249,6 @@ webhooks:
         - key: kubernetes.io/metadata.name
           operator: NotIn
           values: ["kube-system"]
----
 # fluence-sidecar.yaml
 #
 # RBAC and supporting resources for the Fluence quantum sidecar.

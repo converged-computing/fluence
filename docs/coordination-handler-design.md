@@ -6,10 +6,11 @@
 > pods to the quantum handler), and `pkg/fluence/fluence.go` (reconcile reaps the
 > `<group>-producer` PodGroup, never the producer pod — it is a real member).
 > Unit tests are in `pkg/webhook/handlers/quantum_test.go`; structural e2e in
-> `test/e2e/quantum/02–04`. Both shared-mode user contracts are served by the same
-> wiring: the explicit-role script (consumers never call submit; the faux
-> interceptor is unused) and the identical-script (every member calls submit; the
-> faux interceptor dedups consumers to the producer's cached task).
+> `test/e2e/quantum/02–04`. Coordination is **role-aware**: the webhook stamps
+> `FLUENCE_COORDINATION_ROLE` (producer/consumer) and hands consumers the
+> producer's task id (`FLUENCE_QUANTUM_JOB_ID`); the workload branches on the role
+> (producer submits, consumer fetches the shared result by id). No submit
+> interception, no faux flag — that earlier mechanism has been removed.
 
 ## Why this replaces the submitter-pod model
 
@@ -77,7 +78,7 @@ ask for, and never dedup tasks that were meant to be distinct.
   result), so this is not a Fluence deficiency; it is the physics of "N
   independent tasks," and it is the user's explicit choice. The only way to
   reclaim even the producer's node in either mode is a resumable `.result()`
-  (replay), which reuses the faux mechanism and is deliberately **out of scope
+  (replay), and is deliberately **out of scope
   for v1** (one idle node is cheap; replay imposes a replay-safe-code contract).
 
 ## Producer election
@@ -103,9 +104,9 @@ recommended workload and best-effort otherwise:
 | PodGroup | `<group>-producer`, `minCount=1` | `<group>`, `minCount=N−1` |
 | schedules | immediately, alone | atomically as a gang, **after ungate** |
 | gate | none | `quantum.braket/ready` + preempting priority |
-| interceptor | staged, **real (tag) mode** | staged, **faux mode** |
+| interceptor | staged (tags the real submit) | **not staged** (a consumer never submits) |
 | sidecar | yes — polls the task, ungates `<group>` at position==1 | no |
-| app run | full; its `.run()` is the one real submit | full; its `.run()` is a faux no-op returning the producer's task |
+| app run | full; submits the one real task | full; reads role=consumer and fetches the shared result by id (no submit) |
 
 `minCount=1` on the producer group is what removes the deadlock that forced a
 separate submitter: a single-member group schedules alone, so the producer runs
@@ -114,19 +115,19 @@ groups have independent minCounts; neither blocks the other. The consumer group
 keeps a real gang `minCount` (N−1), so **gang scheduling is preserved and
 demonstrable** (experiment requirement 1).
 
-The faux path is retained verbatim, but its meaning is now honest: it is the
-shared-result dedup. A consumer runs the same image and calls `.run()`; the faux
-interceptor returns the producer's existing task (handed over as
-`FLUENCE_QUANTUM_JOB_ID`, stamped by the sidecar at ungate) instead of
-submitting. One real task, N consumers, each app run once, in full.
+Coordination is role-aware rather than interception-based: the consumer is told
+`FLUENCE_COORDINATION_ROLE=consumer` and handed the producer's task id
+(`FLUENCE_QUANTUM_JOB_ID`, stamped by the sidecar at ungate), and the workload
+fetches the shared result by that id instead of submitting. One real task, N
+consumers, each app run once, in full — and no SDK submit-interception.
 
 ## Gate / ungate flow (shared mode)
 
 ```
 1. Producer (index 0) admitted -> own group-of-one, ungated, sidecar attached
    (FLUENCE_GANG_GROUP=<group>), interceptor in REAL mode.
-   Consumers (1..N-1) admitted -> group <group> (minCount N-1), GATED, faux mode,
-   depends-on producer=<group>-producer.
+   Consumers (1..N-1) admitted -> group <group> (minCount N-1), GATED,
+   role=consumer, depends-on producer=<group>-producer.
 
 2. Scheduler places the producer immediately (minCount=1). It runs the user app,
    .run() submits the ONE real task (tagged fluence-pod-uid).
@@ -138,8 +139,9 @@ submitting. One real task, N consumers, each app run once, in full.
      remove the quantum.braket/ready gate (priority already set at admission)
 
 5. Consumer group (now ungated, minCount N-1) gang-schedules atomically and
-   starts as the quantum result arrives. Each consumer's .run() is faux: returns
-   the producer's task; .result() returns the shared result; app post-processes.
+   starts as the quantum result arrives. Each consumer reads role=consumer and
+   fetches the producer's task by FLUENCE_QUANTUM_JOB_ID (.result() returns the
+   shared result); app post-processes. No consumer submits.
 ```
 
 `independent` mode skips all of this: each pod is its own group-of-one, ungated,
@@ -210,7 +212,7 @@ constants and helpers: `SubmitterAnnotation`, `GangGroupAnnotation`,
 `SubmitterGroupSuffix`, `SubmitterPodSuffix`, and the functions
 `mutateSubmitter` and `ensureSubmitterPod`. Everything else in the file
 (`resolveGroup`, `resolveGangSize`, `ownerReplicaSetN`, `countGroupPods`,
-`linkGroupOps`, the faux-submit section, the sidecar section) is reused unchanged.
+`linkGroupOps`, the role/job-id env section, the sidecar section) is reused unchanged.
 
 **Replace** `Mutate` with the coordination router plus two small role functions:
 
@@ -252,7 +254,8 @@ func (h *quantumHandler) mutateProducer(ctx context.Context, m webhook.MutatorAP
 	pg := group + ProducerGroupSuffix
 	m.EnsurePodGroup(ctx, pod.Namespace, pg, pod.Name, 1)
 	ops := linkGroupOps(pod, pg)
-	ops = append(ops, interceptorOps(pod)...) // real (tag) mode — no fauxSubmitEnvOps
+	ops = append(ops, interceptorOps(pod)...)           // tags the real submit
+	ops = append(ops, roleEnvOps(pod, RoleProducer)...) // FLUENCE_COORDINATION_ROLE=producer
 	sc := sidecarFor(m)
 	sc.EnsureRBAC(ctx, pod.Namespace)
 	// Tell the sidecar which consumer group (the base group) to list + ungate.
@@ -263,17 +266,17 @@ func (h *quantumHandler) mutateProducer(ctx context.Context, m webhook.MutatorAP
 }
 
 // mutateConsumer: a non-producer member. Joins the <group> consumer gang
-// (minCount N-1), is gated until the producer's task is ready, and runs the same
-// image with the interceptor in FAUX mode so its .run() returns the producer's
-// task instead of resubmitting (the shared-result dedup).
+// (minCount N-1), is gated until the producer's task is ready, and is told its
+// role (FLUENCE_COORDINATION_ROLE=consumer) + the producer's task id
+// (FLUENCE_QUANTUM_JOB_ID). A consumer fetches the shared result by id; it never
+// submits, so it gets neither the interceptor nor a faux flag.
 func (h *quantumHandler) mutateConsumer(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string, n int32) []spec.Op {
 	m.EnsurePodGroup(ctx, pod.Namespace, group, pod.Name, n-1)
 	ops := linkGroupOps(pod, group)
 	dep := Dependency{Kind: DependencyKindQuantumSubmit, Producer: group + ProducerGroupSuffix, Gate: QuantumGate}
 	ops = append(ops, dep.applyOps(pod)...) // gate + preempting priority + depends-on
-	ops = append(ops, interceptorOps(pod)...)
-	ops = append(ops, fauxSubmitEnvOps(pod)...)
-	log.Printf("[fluence-webhook] quantum consumer %s/%s — group %s minCount=%d, gated+faux",
+	ops = append(ops, consumerEnvOps(pod)...) // role=consumer + FLUENCE_QUANTUM_JOB_ID
+	log.Printf("[fluence-webhook] quantum consumer %s/%s — group %s minCount=%d, gated (role=consumer)",
 		pod.Namespace, pod.Name, group, n-1)
 	return ops
 }
@@ -322,7 +325,7 @@ submitter pod.
 
 ## Experiments
 
-Two requirements, both demonstrable on a kind cluster with the mock/faux path and
+Two requirements, both demonstrable on a kind cluster with the mock path and
 on a real cluster with Braket.
 
 ### Requirement 1 — Fluence still gang-schedules
@@ -373,8 +376,8 @@ traditional and independent rise ~linearly in N; shared stays ~flat at one node.
 ### Build/run notes
 
 - The producer/consumer split needs no new image: producers and consumers run the
-  same sampler image; faux vs real is selected by `FLUENCE_FAUX_SUBMIT` (set on
-  consumers by `fauxSubmitEnvOps`), exactly as today.
+  same role-aware sampler; the branch is `FLUENCE_COORDINATION_ROLE`
+  (producer submits; consumer fetches the shared result by `FLUENCE_QUANTUM_JOB_ID`).
 - Use an **indexed** Job (`completionMode: Indexed`, `parallelism == completions == N`)
   so producer election is deterministic (index 0) and `resolveGangSize` reads N
   from the owner. Stamp `fluence.flux-framework.org/coordination` in the pod

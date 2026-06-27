@@ -8,7 +8,7 @@
 #                         real member, so the app runs N times, never N+1.
 #   qgang-1 (index 1+)  -> CONSUMER: the "qgang" gang (minCount N-1=1), gated on
 #                         quantum.braket/ready + preempting priority, interceptor
-#                         in faux mode (its submit returns the producer's task).
+#                         told role=consumer; it fetches the producer's result by id.
 #
 # These are raw pods (not a Job) so the e2e can reference stable names; the
 # completion-index annotation is set manually to make producer election

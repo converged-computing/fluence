@@ -67,8 +67,8 @@ queue wait — which is worse than the original problem.
 
 The design combines four mechanisms:
 
-1. **SDK interceptor** — tags every QPU task with the pod UID (real mode), or
-   returns the producer's task instead of submitting (faux mode)
+1. **SDK interceptor** — tags every submitted QPU task with the pod UID so the
+   sidecar can find it (staged only on pods that submit)
 2. **Fluence webhook** — splits a shared quantum gang into one producer and N-1
    gated consumers; injects the sidecar into the producer
 3. **Sidecar controller** — discovers the QPU task, polls queue position,
@@ -95,7 +95,7 @@ mode every member does its own quantum work.
 |--------------|------------------------|--------------------------------------------------------------------------------|
 | **not gang** | group of 1 (nothing)   | inject provider interceptor + env; **sidecar only in observe-only mode if telemetry requested** (nothing to ungate) |
 | **gang** (independent) | gang-schedule only | every member is a standalone producer: interceptor + env, real submit, no gate |
-| **gang** (shared)      | —              | producer (index 0): interceptor + env + sidecar, real submit, not gated, group-of-one `<group>-producer`; consumers: gate + faux interceptor, gang `<group>` (minCount N-1) |
+| **gang** (shared)      | —              | producer (index 0): interceptor + env + sidecar, real submit, not gated, group-of-one `<group>-producer`, role=producer; consumers: gate + role=consumer + producer's task id, gang `<group>` (minCount N-1) |
 
 The crucial rule: **sidecar/interceptor injection is triggered by the quantum
 resource request, not the group label.** The group label only controls gang
@@ -186,9 +186,11 @@ submit. The handler therefore routes each quantum pod to one of three roles:
 - **consumer** (in `shared` mode, the other N-1 members): joins the `<group>`
   gang (minCount N-1), gets the `quantum.braket/ready` scheduling gate (entering
   `SchedulingGated` — invisible to Fluxion, consuming no resources — until the
-  producer's sidecar ungates it), and is staged with the interceptor in **faux**
-  mode so its submit returns the producer's task (handed over as
-  `FLUENCE_QUANTUM_JOB_ID` at ungate) instead of resubmitting.
+  producer's sidecar ungates it), and is told its role
+  (`FLUENCE_COORDINATION_ROLE=consumer`) and the producer's task id
+  (`FLUENCE_QUANTUM_JOB_ID`, stamped at ungate). A consumer does **not** submit —
+  it fetches the shared result by that id — so it gets neither the interceptor nor
+  any faux flag.
 
 Role is decided by the **completion index**, not resource request or admission
 order. In an indexed Job every pod is identical — same group label, same image,
@@ -201,11 +203,12 @@ groups carry independent minCounts (producer=1, consumers=N-1), which is what le
 the producer schedule and submit while the consumers stay gated — no deadlock, and
 no separate submitter pod.
 
-Shared mode serves two user contracts with the *same* wiring: an explicit-role
-script where consumers never call submit (the faux interceptor is simply unused),
-and an identical script where every member calls submit (the faux interceptor
-dedups the consumers to the producer's cached task). Fluence does not need to know
-which contract the user wrote.
+The workload is **role-aware**: every shared-mode pod is told its role positively
+via `FLUENCE_COORDINATION_ROLE` (the webhook's election is the single source of
+truth), and the application branches on it — the producer submits, a consumer
+fetches the shared result by `FLUENCE_QUANTUM_JOB_ID`. The same image plays both
+roles with one cheap branch; there is no submit-interception magic and no faux
+flag.
 
 ### 3.3 Interceptor and Model C delivery
 

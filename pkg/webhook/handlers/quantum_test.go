@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 
 // quantum_test.go — all tests for the quantum handler: the producer/consumer
 // shared-coordination split (no separate submitter pod), independent mode,
-// faux-submit, the sidecar wiring, the Dependency primitive, and the
+// the coordination role + job-id handoff, the sidecar wiring, the Dependency primitive, and the
 // standalone/observe paths. Shared fixtures (qpuPod, cpuPod, op helpers) live in
 // handlers_test.go.
 package handlers
@@ -99,10 +99,10 @@ func mincount(t *testing.T, cs *fake.Clientset, ns, group string) (int32, bool) 
 }
 
 // A shared-mode CONSUMER (completion index != 0, owned by Job parallelism=3) is
-// gated + faux, joins the <group> consumer gang at minCount N-1 (the split), and
-// gets NO sidecar (it is gated). No separate submitter pod is ever created — the
-// producer is one of the N members.
-func TestSharedConsumerGatedFauxAndSplit(t *testing.T) {
+// gated, told its role (FLUENCE_COORDINATION_ROLE=consumer), joins the <group>
+// consumer gang at minCount N-1 (the split), and gets NO sidecar (it is gated).
+// No separate submitter pod is ever created — the producer is one of the N members.
+func TestSharedConsumerGatedRoleAndSplit(t *testing.T) {
 	ns, group, job := "default", "qg", "qg-job"
 	par := int32(3)
 	cs := fake.NewSimpleClientset(&batchv1.Job{
@@ -118,8 +118,11 @@ func TestSharedConsumerGatedFauxAndSplit(t *testing.T) {
 	if hasSidecarOp(ops) {
 		t.Error("consumer (gated) must NOT get a sidecar")
 	}
-	if e, ok := envOp(ops, FauxSubmitEnv); !ok || e.Value != "true" {
-		t.Errorf("consumer must get %s=true", FauxSubmitEnv)
+	if !hasDropQuantumResourceOp(ops) {
+		t.Error("consumer (gated, never runs the QPU) must have its qpu resource stripped")
+	}
+	if e, ok := envOp(ops, CoordinationRoleEnv); !ok || e.Value != RoleConsumer {
+		t.Errorf("consumer must get %s=%s", CoordinationRoleEnv, RoleConsumer)
 	}
 	// Consumer gang is minCount N-1 (the producer/consumer split).
 	if mc, ok := mincount(t, cs, ns, group); !ok || mc != 2 {
@@ -133,8 +136,8 @@ func TestSharedConsumerGatedFauxAndSplit(t *testing.T) {
 }
 
 // The shared-mode PRODUCER (completion index 0) is wired as the real coordinator:
-// its own group-of-one <group>-producer at minCount 1, the real sidecar (not
-// faux), not gated, and told which consumer group to ungate via
+// its own group-of-one <group>-producer at minCount 1, the real sidecar, not
+// gated, role=producer, and told which consumer group to ungate via
 // FLUENCE_GANG_GROUP. It is one of the N members — no extra pod is created.
 func TestSharedProducerWiredAsRealSidecar(t *testing.T) {
 	ns, group, job := "default", "qg2", "qg2-job"
@@ -152,8 +155,14 @@ func TestSharedProducerWiredAsRealSidecar(t *testing.T) {
 	if hasGateOp(ops) {
 		t.Error("producer must NOT be gated")
 	}
-	if _, ok := envOp(ops, FauxSubmitEnv); ok {
-		t.Error("producer must NOT be in faux mode")
+	if hasDropQuantumResourceOp(ops) {
+		t.Error("producer must KEEP its qpu resource (it runs the real submit)")
+	}
+	if e, ok := envOp(ops, CoordinationRoleEnv); !ok || e.Value != RoleProducer {
+		t.Errorf("producer must get %s=%s", CoordinationRoleEnv, RoleProducer)
+	}
+	if _, ok := envOp(ops, QuantumJobIDEnv); ok {
+		t.Error("producer must NOT get FLUENCE_QUANTUM_JOB_ID (it submits its own task)")
 	}
 	// FLUENCE_GANG_GROUP (the consumer group to ungate) is on the sidecar.
 	var sidecar *corev1.Container
@@ -216,8 +225,8 @@ func TestSharedGangNoSeparateSubmitterPod(t *testing.T) {
 // ── independent mode (default) ──────────────────────────────────────────────────
 
 // A grouped quantum pod with no coordination annotation is INDEPENDENT (default):
-// it does its own real submit, is not gated, not faux, and triggers no group
-// split and no submitter pod.
+// it does its own real submit, is not gated, carries no coordination role, and
+// triggers no group split and no submitter pod.
 func TestIndependentGroupedQuantumIsStandalone(t *testing.T) {
 	ns, group, job := "default", "indep", "indep-job"
 	par := int32(3)
@@ -231,8 +240,8 @@ func TestIndependentGroupedQuantumIsStandalone(t *testing.T) {
 	if hasGateOp(ops) {
 		t.Error("independent member must not be gated")
 	}
-	if _, ok := envOp(ops, FauxSubmitEnv); ok {
-		t.Error("independent member must not be faux")
+	if _, ok := envOp(ops, CoordinationRoleEnv); ok {
+		t.Error("independent member must not get a coordination role env")
 	}
 	if _, ok := mincount(t, cs, ns, group+ProducerGroupSuffix); ok {
 		t.Error("independent mode must not create a producer group")
@@ -244,7 +253,7 @@ func TestIndependentGroupedQuantumIsStandalone(t *testing.T) {
 }
 
 // A standalone quantum pod (no group, no owner → group of one) does its own real
-// submit: interceptor staged, but no gating, no faux, and no separate submitter.
+// submit: interceptor staged, but no gating, no coordination role, no submitter.
 func TestStandaloneQuantumIsReal(t *testing.T) {
 	ns := "default"
 	cs := fake.NewSimpleClientset()
@@ -258,8 +267,8 @@ func TestStandaloneQuantumIsReal(t *testing.T) {
 	if hasGateOp(ops) {
 		t.Error("standalone quantum pod must not be gated")
 	}
-	if _, ok := envOp(ops, FauxSubmitEnv); ok {
-		t.Error("standalone quantum pod must not be faux")
+	if _, ok := envOp(ops, CoordinationRoleEnv); ok {
+		t.Error("standalone quantum pod must not get a coordination role env")
 	}
 	pods, _ := cs.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{})
 	if len(pods.Items) != 0 {
@@ -286,7 +295,7 @@ func TestSharedGroupOfOneIsStandalone(t *testing.T) {
 	}
 }
 
-// ── faux-submit + dependency ────────────────────────────────────────────────────
+// ── role + dependency ────────────────────────────────────────────────────
 
 // envOp returns the env var op with the given name, if present (covers both
 // single-EnvVar and []EnvVar op shapes).
@@ -400,31 +409,31 @@ func TestDependencyOfRoundTrip(t *testing.T) {
 	}
 }
 
-// The consumer is staged with the SAME interceptor as the producer (PYTHONPATH +
-// FLUENCE_POD_UID), put into faux mode (FLUENCE_FAUX_SUBMIT=true), and handed the
-// existing task id via the FLUENCE_QUANTUM_JOB_ID downward-API env. One
-// mechanism, two modes — no separate ConfigMap shim. The user sets nothing.
-func TestQuantumConsumerStagedWithFauxSubmit(t *testing.T) {
-	ns, group, job := "default", "fauxq", "fauxq-job"
+// The consumer is role-aware: it gets FLUENCE_COORDINATION_ROLE=consumer and the
+// producer's task id via the FLUENCE_QUANTUM_JOB_ID downward-API env, and it is
+// NOT staged with the interceptor (a consumer never submits, so it needs neither
+// the interceptor nor any faux flag). The user's script branches on the role.
+func TestQuantumConsumerStagedWithRole(t *testing.T) {
+	ns, group, job := "default", "roleq", "roleq-job"
 	par := int32(2)
 	cs := fake.NewSimpleClientset(&batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: job, Namespace: ns},
 		Spec:       batchv1.JobSpec{Parallelism: &par, Completions: &par}})
 	m := &webhook.Mutator{Clientset: cs}
 
-	ops := m.Mutate(context.Background(), sharedQPUPod(ns, group, "fauxq-1", job, "1"))
+	ops := m.Mutate(context.Background(), sharedQPUPod(ns, group, "roleq-1", job, "1"))
 
-	// Same interceptor staging as the producer (PYTHONPATH set on the consumer).
-	if _, ok := envOp(ops, "PYTHONPATH"); !ok {
-		t.Errorf("consumer not staged with the interceptor (no PYTHONPATH); ops: %+v", ops)
+	// Role surfaced to the container.
+	if e, ok := envOp(ops, CoordinationRoleEnv); !ok || e.Value != RoleConsumer {
+		t.Errorf("consumer missing %s=%s (got %+v, ok=%v)", CoordinationRoleEnv, RoleConsumer, e, ok)
 	}
 
-	// Faux mode selected.
-	if e, ok := envOp(ops, FauxSubmitEnv); !ok || e.Value != "true" {
-		t.Errorf("consumer missing %s=true (got %+v, ok=%v)", FauxSubmitEnv, e, ok)
+	// A consumer never submits, so it is NOT staged with the interceptor.
+	if _, ok := envOp(ops, "PYTHONPATH"); ok {
+		t.Error("consumer must NOT be staged with the interceptor (it does not submit)")
 	}
 
-	// Existing task id sourced from the annotation the ungating sidecar stamps.
+	// Producer's task id sourced from the annotation the ungating sidecar stamps.
 	e, ok := envOp(ops, QuantumJobIDEnv)
 	if !ok {
 		t.Fatalf("consumer missing %s env", QuantumJobIDEnv)
