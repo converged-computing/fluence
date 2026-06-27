@@ -24,22 +24,35 @@ func init() {
 // Quantum-specific policy. The webhook core knows NONE of these — they live only
 // here, in the quantum handler.
 //
-// Model (no leader/worker): a workload requesting the quantum resource (Job,
-// Deployment, or loose pods — the trigger is the resource, not the kind) becomes
-// a GANG of full size N: one PodGroup, every pod fully gated and raised to a
-// preempting priority, each staged with the interceptor in FAUX mode (the submit
-// is a no-op). Fluence ALSO creates a separate one-off SUBMITTER pod — a
-// group-of-one running the SAME application container plus the real sidecar —
-// which submits the quantum task for real, tags it, stamps the resulting job-id
-// onto the gang, and ungates the gang. There is no leader among the user's pods;
-// the submitter is the only submitting pod and Fluence owns it.
+// Model (producer/consumer split, no separate submitter pod). A quantum task's
+// circuit comes from user code, so the pod that defines a task must RUN to submit
+// it — submit and gate are mutually exclusive per pod. Gating therefore only
+// helps pods that do NOT submit. A quantum gang in CoordinationShared mode is
+// split, per pod, into two roles decided at admission:
+//
+//   - PRODUCER (one member, the indexed-Job completion index 0): its own
+//     group-of-one <group>-producer (minCount 1) so it schedules alone and runs
+//     the SINGLE real submit; staged with the interceptor in REAL (tag) mode and
+//     given the sidecar, which polls the task and ungates the consumers at
+//     position==1. NOT gated. The producer is one of the N members, so the
+//     application is run exactly N times — never N+1.
+//   - CONSUMERS (the other N-1 members): the <group> gang (minCount N-1), each
+//     gated on quantum.braket/ready + preempting priority, staged with the
+//     interceptor in FAUX mode so its submit returns the producer's task instead
+//     of resubmitting (the shared-result dedup). Ungated together when the
+//     producer's task is ready.
+//
+// In CoordinationIndependent mode (the default) there is no shared result to
+// coordinate: every member is its own standalone producer (real submit, no gate),
+// each owning its task and its own queue wait. A lone quantum pod (no group) is
+// always standalone.
 const (
 	// QuantumResource is the Fluxion resource a pod requests to ask Fluence to
 	// schedule quantum work. Requesting it is the sole trigger for this handler.
 	QuantumResource = "fluxion.flux-framework.org/qpu"
 
-	// QuantumGate holds a gang pod unscheduled until the submitter's task is
-	// ready (the submitter's sidecar removes it).
+	// QuantumGate holds a consumer pod unscheduled until the producer's task is
+	// ready (the producer's sidecar removes it).
 	QuantumGate = "quantum.braket/ready"
 
 	// ObserveLabel opts a STANDALONE quantum pod (a group of one) into
@@ -48,108 +61,157 @@ const (
 	ObserveLabel = "fluence.flux-framework.org/observe"
 
 	// DependencyKindQuantumSubmit is the readiness Kind for the quantum resource
-	// type: gang pods wait for a quantum submission to reach the device queue.
+	// type: consumer pods wait for a quantum submission to reach the device queue.
 	// First concrete instance of the general Dependency primitive (dependency.go).
 	DependencyKindQuantumSubmit = "quantum-submit"
 
-	// SubmitterAnnotation marks the Fluence-created submitter pod so its own
-	// admission is recognized (real sidecar, real submit, not gated) instead of
-	// being treated as another gang member.
-	SubmitterAnnotation = "fluence.flux-framework.org/submitter"
+	// CoordinationAnnotation selects how a quantum gang is coordinated. It is an
+	// open enum so future designs (e.g. index-paired "scatter") add a mode
+	// without changing the mechanism.
+	CoordinationAnnotation = "fluence.flux-framework.org/coordination"
 
-	// GangGroupAnnotation, set on the submitter at creation, names the gang group
-	// the submitter must ungate. Surfaced to its sidecar as FLUENCE_GANG_GROUP.
-	GangGroupAnnotation = "fluence.flux-framework.org/gang-group"
+	// CoordinationShared: one real task; the producer (index 0) submits and the
+	// other members are gated consumers that dedup to the producer's task. Serves
+	// BOTH the explicit-role contract (workers never call submit) and the
+	// identical-script contract (workers call submit; the faux interceptor returns
+	// the producer's cached task) — the handler is the same for both.
+	CoordinationShared = "shared"
 
-	// SubmitterGroupSuffix: the submitter is its own group-of-one named
-	// <group>-submitter (a distinct PodGroup, minCount 1, so it schedules alone
-	// and never deadlocks against the gated gang).
-	SubmitterGroupSuffix = "-submitter"
+	// CoordinationIndependent (default): every member does its own quantum work;
+	// no coordination, no gating. Never invent coordination the user did not ask
+	// for, and never dedup tasks meant to be distinct.
+	CoordinationIndependent = "independent"
 
-	// GangGroupEnv tells the submitter's sidecar which gang group label to list
+	// ProducerGroupSuffix names the producer's own group-of-one: <group>-producer
+	// (minCount 1) so it schedules alone and never deadlocks against the gated
+	// consumer gang.
+	ProducerGroupSuffix = "-producer"
+
+	// CompletionIndexAnnotation is the indexed-Job completion index the Job
+	// controller stamps on each pod; index "0" is the producer (deterministic
+	// election with no recorded state).
+	CompletionIndexAnnotation = "batch.kubernetes.io/job-completion-index"
+
+	// ProducerIndex is the completion index promoted to producer.
+	ProducerIndex = "0"
+
+	// GangGroupEnv tells the producer's sidecar which consumer group label to list
 	// and ungate when the task is ready.
 	GangGroupEnv = "FLUENCE_GANG_GROUP"
 )
 
-// quantumHandler creates, for a quantum workload, a fully-gated faux-submitting
-// gang plus a one-off real submitter (see the package-level model comment). It
-// is the only place in the webhook that knows about quantum resources, gates,
-// submitters, or observe semantics.
+// quantumHandler splits a shared quantum gang into a single producer (real
+// submit + sidecar) and N-1 gated faux consumers, or runs every member
+// standalone in independent mode (see the package-level model comment). It is the
+// only place in the webhook that knows about quantum resources, gates,
+// coordination, or observe semantics.
 type quantumHandler struct{}
 
 func (h *quantumHandler) Name() string { return "quantum" }
 
-// Applies to any pod requesting the quantum resource. Gang members run the same
-// image as the submitter and request it; the submitter (a copy) requests it; a
-// standalone quantum pod requests it. Nothing without the resource needs quantum
-// handling, so this is the single, unambiguous trigger.
+// Applies to any pod requesting the quantum resource. Producers, consumers, and
+// standalone quantum pods all request it; nothing without the resource needs
+// quantum handling, so this is the single, unambiguous trigger.
 func (h *quantumHandler) Applies(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod) bool {
 	return spec.PodRequestsResource(pod, QuantumResource)
 }
 
 func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod) []spec.Op {
-	// The Fluence-created submitter: real interceptor + real sidecar, its own
-	// group-of-one, NOT gated. Recognized by the marker set at creation.
-	if spec.Annotation(pod, SubmitterAnnotation) == "true" {
-		return h.mutateSubmitter(ctx, m, pod)
-	}
-
 	g := resolveGroup(pod)
-	observe := spec.Label(pod, ObserveLabel) == "true"
 	n := resolveGangSize(ctx, m, pod, g)
+	mode := coordinationMode(pod)
+	observe := spec.Label(pod, ObserveLabel) == "true"
 
-	// Standalone quantum pod (a group of one): it performs its own real submit.
-	// No gang, no gating, no faux, no separate submitter. The sidecar is added
-	// only for observe-only telemetry.
-	if g == "" || n <= 1 {
+	// No coordination: a standalone quantum pod, or an explicitly independent
+	// member. The REAL submit happens in THIS pod; the sidecar is added only for
+	// observe-only telemetry. (independent mode routes every member here -> N
+	// standalone producers, each owning its task and its own queue wait.)
+	if mode != CoordinationShared || g == "" || n <= 1 {
 		ops := interceptorOps(pod)
 		if observe {
 			sc := sidecarFor(m)
 			sc.EnsureRBAC(ctx, pod.Namespace)
 			ops = append(ops, sc.ContainerOps(pod, true, nil)...)
 		}
-		log.Printf("[fluence-webhook] quantum standalone %s/%s (observe=%v)", pod.Namespace, pod.Name, observe)
+		log.Printf("[fluence-webhook] quantum %s/%s mode=%s (standalone/independent, observe=%v)",
+			pod.Namespace, pod.Name, mode, observe)
 		return ops
 	}
 
-	// Gang member: full gang of N in one PodGroup, fully gated + preempting
-	// priority + faux interceptor. Fluence also ensures the one-off submitter
-	// (idempotent) that does the real submit and ungates this gang.
-	m.EnsurePodGroup(ctx, pod.Namespace, g, pod.Name, n)
-	ensureSubmitterPod(ctx, m, pod, g)
+	// shared mode: promote one member to producer; the rest are gated consumers.
+	if isProducer(ctx, m, pod, g) {
+		return h.mutateProducer(ctx, m, pod, g)
+	}
+	return h.mutateConsumer(ctx, m, pod, g, n)
+}
 
-	ops := linkGroupOps(pod, g)
-	// Express the wait as the GENERAL dependency primitive: this gang pod depends
-	// on the quantum submission produced by <group>-submitter, held by the quantum
-	// gate. applyOps gates the pod, raises priority, and stamps depends-on-*.
-	dep := Dependency{Kind: DependencyKindQuantumSubmit, Producer: g + SubmitterGroupSuffix, Gate: QuantumGate}
-	ops = append(ops, dep.applyOps(pod)...)
-	// Same interceptor as the submitter, but FAUX mode so the gang pod never
-	// resubmits; it receives the real task id via FLUENCE_QUANTUM_JOB_ID.
-	ops = append(ops, interceptorOps(pod)...)
-	ops = append(ops, fauxSubmitEnvOps(pod)...)
-	log.Printf("[fluence-webhook] quantum gang member %s/%s — group %s minCount=%d, gated+faux",
-		pod.Namespace, pod.Name, g, n)
+// mutateProducer wires the single producer member (indexed-Job completion index
+// 0): its own group-of-one <group>-producer (minCount 1) so it schedules alone
+// and runs the REAL submit, the interceptor in tag mode, RBAC, and the sidecar
+// told which consumer group to ungate (FLUENCE_GANG_GROUP). The producer is one
+// of the N members, so the application is NOT run an extra time. Never gated.
+func (h *quantumHandler) mutateProducer(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string) []spec.Op {
+	pg := group + ProducerGroupSuffix
+	m.EnsurePodGroup(ctx, pod.Namespace, pg, pod.Name, 1)
+	ops := linkGroupOps(pod, pg)
+	ops = append(ops, interceptorOps(pod)...) // real (tag) mode — no fauxSubmitEnvOps
+	sc := sidecarFor(m)
+	sc.EnsureRBAC(ctx, pod.Namespace)
+	extra := []corev1.EnvVar{{Name: GangGroupEnv, Value: group}}
+	ops = append(ops, sc.ContainerOps(pod, false, extra)...)
+	log.Printf("[fluence-webhook] quantum producer %s/%s — group %s (ungates consumers %q)",
+		pod.Namespace, pod.Name, pg, group)
 	return ops
 }
 
-// mutateSubmitter wires the Fluence-created submitter pod: its own PodGroup of
-// one, the real interceptor (tag mode), RBAC, and the sidecar container told
-// which gang group to ungate (FLUENCE_GANG_GROUP). The submitter is never gated.
-func (h *quantumHandler) mutateSubmitter(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod) []spec.Op {
-	sg := webhook.GroupName(pod) // the submitter's own group: <gang>-submitter
-	gang := spec.Annotation(pod, GangGroupAnnotation)
-	if sg != "" {
-		m.EnsurePodGroup(ctx, pod.Namespace, sg, pod.Name, 1)
-	}
-	sc := sidecarFor(m)
-	ops := sc.InterceptorOps(pod)
-	sc.EnsureRBAC(ctx, pod.Namespace)
-	extra := []corev1.EnvVar{{Name: GangGroupEnv, Value: gang}}
-	ops = append(ops, sc.ContainerOps(pod, false, extra)...)
-	log.Printf("[fluence-webhook] quantum submitter %s/%s — group %s (ungates gang %q)",
-		pod.Namespace, pod.Name, sg, gang)
+// mutateConsumer wires a non-producer member: it joins the <group> consumer gang
+// (minCount N-1), is gated until the producer's task is ready, and runs the same
+// image with the interceptor in FAUX mode so its submit returns the producer's
+// task (handed over as FLUENCE_QUANTUM_JOB_ID at ungate) instead of resubmitting.
+// In the explicit-role contract the consumer's script never calls submit, so the
+// faux interceptor is simply unused — harmless either way.
+func (h *quantumHandler) mutateConsumer(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string, n int32) []spec.Op {
+	m.EnsurePodGroup(ctx, pod.Namespace, group, pod.Name, n-1)
+	ops := linkGroupOps(pod, group)
+	// Express the wait as the GENERAL dependency primitive: this consumer depends
+	// on the quantum submission produced by <group>-producer, held by the quantum
+	// gate. applyOps gates the pod, raises priority, and stamps depends-on-*.
+	dep := Dependency{Kind: DependencyKindQuantumSubmit, Producer: group + ProducerGroupSuffix, Gate: QuantumGate}
+	ops = append(ops, dep.applyOps(pod)...)
+	ops = append(ops, interceptorOps(pod)...)
+	ops = append(ops, fauxSubmitEnvOps(pod)...)
+	log.Printf("[fluence-webhook] quantum consumer %s/%s — group %s minCount=%d, gated+faux",
+		pod.Namespace, pod.Name, group, n-1)
 	return ops
+}
+
+// coordinationMode reads the coordination annotation; default independent.
+func coordinationMode(pod *corev1.Pod) string {
+	if v := spec.Annotation(pod, CoordinationAnnotation); v != "" {
+		return v
+	}
+	return CoordinationIndependent
+}
+
+// isProducer decides whether THIS pod is the gang's single producer. Indexed Job
+// (recommended): completion index 0 is the producer — deterministic, race-free,
+// no recorded state. Otherwise: first arrival claims the producer slot by the
+// absence of the producer PodGroup (best-effort under concurrent admission;
+// prefer an indexed Job for determinism). Indexing a nil annotations map yields
+// ok=false, so the indexed branch is nil-safe.
+func isProducer(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string) bool {
+	if idx, ok := pod.Annotations[CompletionIndexAnnotation]; ok {
+		return idx == ProducerIndex
+	}
+	c := m.Client()
+	if c == nil {
+		return true // tests / no client: treat as producer
+	}
+	pg := group + ProducerGroupSuffix
+	if _, err := c.SchedulingV1alpha2().PodGroups(pod.Namespace).Get(ctx, pg, metav1.GetOptions{}); err == nil {
+		return false // already claimed by an earlier arrival
+	}
+	return true
 }
 
 // resolveGroup returns the gang group identity: the explicit group label, else
@@ -234,68 +296,7 @@ func countGroupPods(ctx context.Context, m webhook.MutatorAPI, namespace, group 
 	return int32(len(list.Items))
 }
 
-// SubmitterPodSuffix names the Fluence-created submitter for a group:
-// <group>-submitter. It also serves as the submitter's own PodGroup name.
-const SubmitterPodSuffix = SubmitterGroupSuffix
-
-// ensureSubmitterPod creates the one-off quantum submitter pod for a group
-// (idempotent create-if-absent — a client side-effect of admission, like
-// EnsurePodGroup/EnsureSidecarRBAC; NOT a separate controller). It is built from
-// the admitted gang pod so it runs the SAME application + credentials, is its own
-// group-of-one (<group>-submitter), is marked the submitter (so its admission
-// gets the real sidecar and is not gated), and records the gang group it must
-// ungate. An ownerReference to the gang's PodGroup cascades GC: when the gang
-// PodGroup is deleted (gang completed/deleted), the submitter is collected too.
-func ensureSubmitterPod(ctx context.Context, m webhook.MutatorAPI, gangPod *corev1.Pod, group string) {
-	c := m.Client()
-	if c == nil {
-		return
-	}
-	name := group + SubmitterGroupSuffix
-	if _, err := c.CoreV1().Pods(gangPod.Namespace).Get(ctx, name, metav1.GetOptions{}); err == nil {
-		return // already created (idempotent)
-	}
-	// Clean copy of the user's application: same containers (image, env, creds,
-	// the quantum resource request) and app volumes — none of the gang's gating
-	// or faux wiring.
-	src := gangPod.DeepCopy()
-	submitter := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: gangPod.Namespace,
-			Labels:    map[string]string{webhook.GroupLabel: name},
-			Annotations: map[string]string{
-				SubmitterAnnotation: "true",
-				GangGroupAnnotation: group,
-			},
-		},
-		Spec: corev1.PodSpec{
-			SchedulerName: webhook.SchedulerName,
-			RestartPolicy: corev1.RestartPolicyNever,
-			Containers:    src.Spec.Containers,
-			Volumes:       src.Spec.Volumes,
-		},
-	}
-	// Cascade GC: own the submitter by the gang's PodGroup (created moments ago by
-	// the caller). Best-effort — only set when the PodGroup UID is known (it is on
-	// a real cluster; the fake client in tests may leave it empty, in which case
-	// we skip the ref rather than emit an invalid one).
-	if pg, err := c.SchedulingV1alpha2().PodGroups(gangPod.Namespace).Get(ctx, group, metav1.GetOptions{}); err == nil && pg.UID != "" {
-		submitter.OwnerReferences = []metav1.OwnerReference{{
-			APIVersion: "scheduling.k8s.io/v1alpha2",
-			Kind:       "PodGroup",
-			Name:       group,
-			UID:        pg.UID,
-		}}
-	}
-	if _, err := c.CoreV1().Pods(gangPod.Namespace).Create(ctx, submitter, metav1.CreateOptions{}); err != nil {
-		log.Printf("[fluence-webhook] submitter pod %s/%s: %v", gangPod.Namespace, name, err)
-	} else {
-		log.Printf("[fluence-webhook] created submitter pod %s/%s for gang %s", gangPod.Namespace, name, group)
-	}
-}
-
-// linkGroupOps ensures the gang pod carries the group label (so the submitter's
+// linkGroupOps ensures the gang pod carries the group label (so the producer's
 // sidecar can list it) and is linked to the gang PodGroup via
 // spec.schedulingGroup.podGroupName. Idempotent.
 func linkGroupOps(pod *corev1.Pod, group string) []spec.Op {

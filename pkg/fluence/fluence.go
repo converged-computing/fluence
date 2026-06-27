@@ -828,18 +828,18 @@ func (f *Fluence) reconcileGroup(ctx context.Context, namespace, group string) {
 	log.Printf("fluence: reconciled completed gang %s/%s — deleted Fluence-created PodGroup, allocation freed",
 		namespace, group)
 
-	// Gang+submitter cleanup: the one-off quantum submitter pod and its
-	// group-of-one PodGroup (<group>-submitter) are not owned by the user's
-	// workload, so reap them alongside the gang. The submitter pod also carries
-	// an ownerReference to this gang PodGroup (so its deletion cascades via GC);
-	// this explicit delete is the backstop and also removes the submitter's own
-	// PodGroup. Skip when this group is itself a submitter group, to avoid
-	// recursing on <group>-submitter-submitter.
-	if !strings.HasSuffix(group, submitterGroupSuffix) {
-		sg := group + submitterGroupSuffix
-		_ = f.handle.ClientSet().SchedulingV1alpha2().PodGroups(namespace).Delete(ctx, sg, metav1.DeleteOptions{})
-		_ = f.handle.ClientSet().CoreV1().Pods(namespace).Delete(ctx, sg, metav1.DeleteOptions{})
-		log.Printf("fluence: reaped submitter %s/%s for gang %s", namespace, sg, group)
+	// Producer-group cleanup: in shared coordination the gang is split into the
+	// consumer group <group> (this group) and the producer's group-of-one
+	// <group>-producer (a Fluence-created PodGroup, minCount 1). The producer POD
+	// is a real member of the user's workload (indexed-Job index 0), so we must
+	// NOT delete it — only its Fluence-created PodGroup, as a backstop to free its
+	// allocation (its own reconcile pass also reaps it once the producer pod is
+	// terminal). Skip when this group is itself a producer group, to avoid
+	// recursing on <group>-producer-producer.
+	if !strings.HasSuffix(group, producerGroupSuffix) {
+		pg := group + producerGroupSuffix
+		_ = f.handle.ClientSet().SchedulingV1alpha2().PodGroups(namespace).Delete(ctx, pg, metav1.DeleteOptions{})
+		log.Printf("fluence: reaped producer PodGroup %s/%s for gang %s", namespace, pg, group)
 	}
 }
 
@@ -852,11 +852,11 @@ const reconcileGraceForEmpty = 2 * time.Minute
 // package (the scheduler must not depend on the webhook). Kept in sync with it.
 const webhookGroupLabel = "fluence.flux-framework.org/group"
 
-// submitterGroupSuffix mirrors handlers.SubmitterGroupSuffix: the one-off quantum
-// submitter for gang <g> is named <g>-submitter (both the pod and its PodGroup).
-// Duplicated here to avoid importing the webhook handlers package into the
-// scheduler plugin; keep the two in sync.
-const submitterGroupSuffix = "-submitter"
+// producerGroupSuffix mirrors handlers.ProducerGroupSuffix: in shared
+// coordination the producer (indexed-Job index 0) is its own group-of-one named
+// <g>-producer. Duplicated here to avoid importing the webhook handlers package
+// into the scheduler plugin; keep the two in sync.
+const producerGroupSuffix = "-producer"
 
 // onPodGroupDeleted frees the gang's allocation when its PodGroup is deleted.
 func (f *Fluence) onPodGroupDeleted(obj interface{}) {

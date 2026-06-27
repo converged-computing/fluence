@@ -26,6 +26,13 @@ type gangHandler struct{}
 func (h *gangHandler) Name() string { return "gang" }
 
 func (h *gangHandler) Applies(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod) bool {
+	// Classical gangs only. A pod that requests the quantum resource is gang-
+	// scheduled by the quantum handler, which owns the producer/consumer split and
+	// creates both the <group>-producer and <group> PodGroups itself; handling it
+	// here too would create a second, conflicting PodGroup for the group.
+	if spec.PodRequestsResource(pod, QuantumResource) {
+		return false
+	}
 	return webhook.GroupName(pod) != ""
 }
 

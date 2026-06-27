@@ -5,15 +5,15 @@
 Hybrid quantum-classical workflows submit work to two independent queues:
 the Kubernetes scheduler (classical compute) and a QPU vendor API (quantum
 execution). Classical pods waste node resources while waiting for QPU queue
-results. Fluence's coordination system thus gates classical worker pods until 
+results. Fluence's coordination system thus gates classical consumer pods until 
 the QPU task is one position from executing, then releases them with high 
 priority so they preempt lower-priority work and start immediately as the 
 QPU result arrives. Yes, it could be the case the one task in the queue before
-it takes a long time, but I think this is an improved approach than having worker
+it takes a long time, but I think this is an improved approach than having consumer
 pods running (and waiting) for a much longer queue. This only is important
-given that you have gangs, or leader worker designs where some leader is launching
-the quantum work and otherwise the workers would be waiting and doing nothing
-(and wasting resources).
+given that you have gangs, or producer/consumer designs where one member is
+launching the quantum work and otherwise the other members would be waiting and
+doing nothing (and wasting resources).
 
 ## 1. The Two-Queue Problem
 
@@ -67,11 +67,13 @@ queue wait — which is worse than the original problem.
 
 The design combines four mechanisms:
 
-1. **SDK interceptor** — tags every QPU task with the pod UID
-2. **Fluence webhook** — gates worker pods, injects sidecar into quantum pods
+1. **SDK interceptor** — tags every QPU task with the pod UID (real mode), or
+   returns the producer's task instead of submitting (faux mode)
+2. **Fluence webhook** — splits a shared quantum gang into one producer and N-1
+   gated consumers; injects the sidecar into the producer
 3. **Sidecar controller** — discovers the QPU task, polls queue position,
-   ungates workers when position==1
-4. **High-priority ungating** — workers preempt lower-priority work at the
+   ungates the consumers when position==1
+4. **High-priority ungating** — consumers preempt lower-priority work at the
    last responsible moment
 
 ### 3.0 When Fluence acts: the decision matrix
@@ -84,19 +86,26 @@ determine what Fluence does:
   work and there is a vendor backend behind it.
 - **G (gang?)** — does the pod carry `fluence.flux-framework.org/group`?
 
-|              | not quantum            | quantum                                                        |
-|--------------|------------------------|----------------------------------------------------------------|
-| **not gang** | group of 1 (nothing)   | inject provider interceptor + env; **sidecar only in observe-only mode if telemetry requested** (no workers to ungate) |
-| **gang**     | gang-schedule only     | leader: interceptor + env + sidecar (gates + ungates workers); workers: gate only |
+A third property applies only to quantum gangs: the **coordination mode**
+(`fluence.flux-framework.org/coordination`, default `independent`). In `shared`
+mode the gang produces ONE quantum task that all members share; in `independent`
+mode every member does its own quantum work.
+
+|              | not quantum            | quantum                                                                        |
+|--------------|------------------------|--------------------------------------------------------------------------------|
+| **not gang** | group of 1 (nothing)   | inject provider interceptor + env; **sidecar only in observe-only mode if telemetry requested** (nothing to ungate) |
+| **gang** (independent) | gang-schedule only | every member is a standalone producer: interceptor + env, real submit, no gate |
+| **gang** (shared)      | —              | producer (index 0): interceptor + env + sidecar, real submit, not gated, group-of-one `<group>-producer`; consumers: gate + faux interceptor, gang `<group>` (minCount N-1) |
 
 The crucial rule: **sidecar/interceptor injection is triggered by the quantum
 resource request, not the group label.** The group label only controls gang
-scheduling and worker gating. A group leader that requests no quantum resource
-(e.g. a classical pod that happens to set `BRAKET_DEVICE` itself) is just
-gang-scheduled — Fluence injects no sidecar, because there is no quantum work
-for it to coordinate. `BRAKET_DEVICE` (or any direct device selection by the
-user) is the signal that Fluence is *not* scheduling the quantum resource;
-`fluxion.flux-framework.org/qpu` is the signal that it is.
+scheduling and (in shared mode) the producer/consumer split. A grouped pod that
+requests no quantum resource (e.g. a classical pod that happens to set
+`BRAKET_DEVICE` itself) is just gang-scheduled — Fluence injects no sidecar,
+because there is no quantum work for it to coordinate. `BRAKET_DEVICE` (or any
+direct device selection by the user) is the signal that Fluence is *not*
+scheduling the quantum resource; `fluxion.flux-framework.org/qpu` is the signal
+that it is.
 
 ### 3.1 User interface
 
@@ -106,9 +115,18 @@ The user labels all pods in a workflow group with:
 metadata:
   labels:
     fluence.flux-framework.org/group: my-workflow
+  annotations:
+    # only for a quantum gang that shares ONE task across members:
+    fluence.flux-framework.org/coordination: shared
 spec:
   schedulerName: fluence
 ```
+
+`coordination` defaults to `independent` (every member does its own quantum
+work). Set it to `shared` when the members should share a single quantum task —
+then Fluence promotes one member (the indexed-Job completion index 0) to producer
+and gates the rest as consumers. The user authors no roles and no submitter pod;
+the split is derived from the completion index the Job controller already stamps.
 
 I initially started with having the user create a PodGroup object, and I found
 that annoying. I do not want to require a PodGroup object when an annotation is easier,
@@ -117,7 +135,7 @@ everything else automatically.
 
 The namespace distinction:
 - `fluence.flux-framework.org/*` — Fluence scheduler-plugin concerns
-  (group label, leader annotation, gate name)
+  (group label, coordination mode, gate name)
 - `fluxion.flux-framework.org/*` — Fluxion resource-graph concerns
   (extended resource types, backend attribute env vars)
 
@@ -140,31 +158,54 @@ The three handlers (`pkg/webhook/handlers/`):
 (backend + attributes) sourced from the annotations the scheduler writes in
 PreBind. Generic to all Fluxion resources.
 
-**`gang` (`gang.go`)** — applies when the pod carries the group label. Creates a
-Fluence-owned PodGroup (`minCount: 1`) on first admission, records that first
-pod as the admission-order leader, and stamps `spec.schedulingGroup.podGroupName`
-on every pod in the group so the scheduler gangs them. The user only ever sets
-the LABEL; the webhook translates it into the native field, so the user never
-creates a PodGroup or knows it exists. Knows nothing about quantum — a purely
-classical gang is fully handled here, with no sidecar.
+**`gang` (`gang.go`)** — applies when the pod carries the group label **and does
+not request the quantum resource** (a quantum pod is gang-scheduled by the quantum
+handler instead, which owns the producer/consumer split). Creates a Fluence-owned
+PodGroup on first admission and stamps `spec.schedulingGroup.podGroupName` on
+every pod in the group so the scheduler gangs them. The user only ever sets the
+LABEL; the webhook translates it into the native field, so the user never creates
+a PodGroup or knows it exists. Knows nothing about quantum — a purely classical
+gang is fully handled here, with no sidecar.
 
 **`quantum` (`quantum.go`)** — the only handler that knows about quantum
-resources, gates, and observe semantics. Applies to a pod in either role:
-- **submitter** (requests `fluxion.flux-framework.org/qpu`): a group leader, or
-  a standalone quantum pod. Always gets the interceptor staged (so its task is
-  tagged). Gets the **sidecar** only when there is coordination to do — it is a
-  group leader (workers to ungate) or observe-only telemetry is requested.
-- **worker** (a non-leader member of a group whose recorded leader is a quantum
-  pod): gets the `quantum.braket/ready` scheduling gate, entering
-  `SchedulingGated` state — invisible to Fluxion, consuming no resources — until
-  the leader's sidecar ungates it.
+resources, gates, coordination, and observe semantics. A quantum task's circuit
+comes from user code, so the pod that defines a task must RUN to submit it: submit
+and gate are mutually exclusive per pod, and gating only helps pods that do not
+submit. The handler therefore routes each quantum pod to one of three roles:
+- **standalone / independent** (a lone quantum pod, or any member of a gang in
+  the default `independent` mode): gets the interceptor staged (real mode) so its
+  own task is tagged, performs its own real submit, is never gated, and gets the
+  sidecar only when observe-only telemetry is requested. Independent mode means N
+  members run N tasks and hold N node-waits — honest physics, the user's explicit
+  default.
+- **producer** (in `shared` mode, the completion index 0 member): its own
+  group-of-one `<group>-producer` (minCount 1) so it schedules alone and runs the
+  SINGLE real submit; interceptor in real mode; gets the **sidecar**, told which
+  consumer group to ungate (`FLUENCE_GANG_GROUP`); never gated. The producer is
+  one of the N members, so the application runs exactly N times — never N+1.
+- **consumer** (in `shared` mode, the other N-1 members): joins the `<group>`
+  gang (minCount N-1), gets the `quantum.braket/ready` scheduling gate (entering
+  `SchedulingGated` — invisible to Fluxion, consuming no resources — until the
+  producer's sidecar ungates it), and is staged with the interceptor in **faux**
+  mode so its submit returns the producer's task (handed over as
+  `FLUENCE_QUANTUM_JOB_ID` at ungate) instead of resubmitting.
 
-Role is decided by **admission order**, not resource request. In a pod-template
-gang (Deployment/Job/StatefulSet) every pod is identical — same group label,
-every pod requests the quantum resource — so the leader is simply the first pod
-admitted (recorded on the PodGroup); every other pod is a worker, regardless of
-its own request. The gate holds workers at PreEnqueue, so the scheduler does not
-run PreFilter for them (and `groupPods` excludes gated pods) until ungated.
+Role is decided by the **completion index**, not resource request or admission
+order. In an indexed Job every pod is identical — same group label, same image,
+every pod requests the quantum resource — so the producer is simply the pod the
+Job controller stamps with `batch.kubernetes.io/job-completion-index: "0"`; every
+other index is a consumer. (For loose pods with no completion index, the first
+arrival claims the producer slot by the absence of the `<group>-producer`
+PodGroup; an indexed Job is recommended for deterministic election.) The two
+groups carry independent minCounts (producer=1, consumers=N-1), which is what lets
+the producer schedule and submit while the consumers stay gated — no deadlock, and
+no separate submitter pod.
+
+Shared mode serves two user contracts with the *same* wiring: an explicit-role
+script where consumers never call submit (the faux interceptor is simply unused),
+and an identical script where every member calls submit (the faux interceptor
+dedups the consumers to the producer's cached task). Fluence does not need to know
+which contract the user wrote.
 
 ### 3.3 Interceptor and Model C delivery
 
@@ -207,7 +248,11 @@ def patched_run(self, task_specification, *args, **kwargs):
 This is completely transparent to the user application — no code changes, no
 package install, no vendor SDK added to the user image (the hook patches
 whatever SDK the user already has).
-leader pod, sharing its AWS credentials and network namespace.
+
+### 3.4 Sidecar controller
+
+The sidecar runs as a container alongside the producer pod, sharing its AWS
+credentials and network namespace.
 
 ```console
 1. READ  FLUXION_ARN, FLUENCE_POD_UID from env
@@ -221,7 +266,7 @@ leader pod, sharing its AWS credentials and network namespace.
    On timeout: fall back to time-window heuristic (tasks submitted
    after pod start time on the same device).
 
-3. DISCOVER worker pods:
+3. DISCOVER consumer pods:
    List pods in namespace with fluence.flux-framework.org/group label
    matching this pod's group, having quantum.braket/ready gate present.
 
@@ -229,7 +274,7 @@ leader pod, sharing its AWS credentials and network namespace.
    Log position for experiment instrumentation.
 
 5. WHEN  is_ready_to_ungate(task)  (position == 1 OR state == RUNNING):
-   For each worker pod:
+   For each consumer pod:
      kubectl annotate pod <name> fluence.flux-framework.org/quantum-job-id=<job_id>
      kubectl patch pod <name> --type=json \
        -p='[{"op":"add","path":"/spec/priorityClassName",
@@ -240,7 +285,7 @@ leader pod, sharing its AWS credentials and network namespace.
 ```
 
 The priority class and gate removal are applied atomically in one patch.
-This ensures workers enter the scheduling queue with high priority
+This ensures consumers enter the scheduling queue with high priority
 immediately, without a window where they are ungated but low-priority.
 
 ### 3.5 Priority and preemption
@@ -250,10 +295,10 @@ by the sidecar at ungate time, not by the webhook at pod creation. Setting
 it at creation time causes an admission controller conflict (priority integer
 already defaulted to 0).
 
-When workers are ungated with high priority, Kubernetes preemption evicts
+When consumers are ungated with high priority, Kubernetes preemption evicts
 lower-priority pods to make room. Fluence's pod deletion informer catches
 these evictions, calls `Cancel(jobid)` in Fluxion, and frees the graph
-vertices so Fluxion can allocate them to the incoming high-priority workers.
+vertices so Fluxion can allocate them to the incoming high-priority consumers.
 
 ### 3.6 Classical allocation follows quantum execution order
 
@@ -298,7 +343,7 @@ Provider:
     find_my_task(pod_uid, ...)    # search by the fluence-pod-uid tag → opaque Task
     is_ready_to_ungate(task)      # decision primitive: position==1 OR running
     queue_position(task)          # optional richer telemetry; None if unavailable
-    job_id(task)                  # cross-vendor id handed to workers (NOT the ARN)
+    job_id(task)                  # cross-vendor id handed to consumers (NOT the ARN)
 ```
 
 Vendor-specific identifiers (a Braket task ARN, an IBM job id, a GCP operation
@@ -320,7 +365,7 @@ matching provider). Nothing else changes — no build script, no concatenation.
 
 #### Observe-only (telemetry) mode
 
-A quantum pod that is *not* a gang (a single quantum pod, no workers to ungate)
+A quantum pod that is *not* a gang (a single quantum pod, no consumers to ungate)
 gets the interceptor and env only — no sidecar — by default, so no surprise
 machinery is injected. Telemetry is opt-in via the label
 `fluence.flux-framework.org/observe: "true"`, surfaced to the sidecar as
@@ -345,7 +390,7 @@ singleton and gang runs.
 
 ### 5.1 Preemption disrupts lower-priority work
 
-At position==1, workers preempt running lower-priority pods. This work is
+At position==1, consumers preempt running lower-priority pods. This work is
 re-queued and eventually runs, but there is a disruption cost. A future
 design using a `MatchReserveAt(time_at, spec)` Fluxion primitive — where
 `time_at` is supplied by the QPU vendor via an ETA or task-start event —
@@ -364,7 +409,7 @@ heuristic (e.g. a time window) rather than the tag mechanism.
 
 ### 5.3 Single task per workflow
 
-The sidecar tracks one QPU task ARN per leader pod. Parameter-shift gradient
+The sidecar tracks one QPU task ARN per producer pod. Parameter-shift gradient
 estimation and other multi-circuit workflows require tracking a set of ARNs.
 See the scatter design issue for the proposed extension.
 
@@ -388,7 +433,7 @@ function to be exposed through the Go bindings with a `starttime` parameter.
 
 For workflows with N independent QPU tasks each paired with one classical
 pod, an index-based pairing mechanism (`fluence.flux-framework.org/index`)
-would allow the sidecar to ungate specific worker pods when their specific
+would allow the sidecar to ungate specific consumer pods when their specific
 task reaches position==1. See the open scatter design issue.
 
 ### 6.3 Vendor task-start events
@@ -401,7 +446,7 @@ precise ungating.
 ### 6.4 PostFilter topology-aware preemption
 
 A custom Fluence `PostFilter` plugin would ask Fluxion which graph vertices
-are blocking a high-priority worker pod, then target preemption at exactly
+are blocking a high-priority consumer pod, then target preemption at exactly
 those pods — rather than the default Kubernetes preemption which picks
 lowest-priority pods regardless of graph topology. This ensures preemption
 always produces a valid Fluxion allocation.
