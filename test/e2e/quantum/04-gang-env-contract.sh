@@ -1,61 +1,58 @@
 #!/usr/bin/env bash
-# Env-contract e2e: deploy a mock gang and verify the webhook injects the env the
-# real gang workload (gang.py) depends on — IN-CLUSTER, on the real pod specs,
-# with no Braket/AWS and WITHOUT requiring the pod to be scheduled. Guards the
-# runtime seam that, if broken, makes a gang schedule fine then hang (a leader
-# with no FLUENCE_ROLE defaults to worker -> no leader -> deadlock).
+# Env-contract e2e (gang + submitter): verify the webhook injects, at admission,
+# the env the runtime depends on — IN-CLUSTER, on the real pod specs, with no
+# Braket/AWS and WITHOUT requiring scheduling. Guards the seam that, if broken,
+# makes a gang schedule then hang or double-submit.
 #
-# This checks the SPEC layer only: the env references the webhook wires onto the
-# right container at admission. These are downward-API valueFrom refs (their
-# VALUES resolve later, at placement), but their PRESENCE is deterministic at
-# admission, so this test needs no scheduling, no qpu add-on, no logs — it cannot
-# flake on capacity. Injection paths verified in code:
-#   FLUENCE_ROLE              roleEnvOps        (quantum handler)  -> all workload containers
-#   FLUENCE_POD_UID, PYTHONPATH  InterceptorOps (core)            -> fluxion-resource containers
-#   FLUXION_BACKEND           fluxion handler   (InjectEnvOps)     -> fluxion-resource containers
-# The leader requests qpu (so it gets the full contract); the worker only needs
-# FLUENCE_ROLE (it requests no fluxion resource, by design).
+# Spec layer only (these are downward-API valueFrom refs whose VALUES resolve at
+# placement, but whose PRESENCE is deterministic at admission), so no scheduling,
+# no qpu capacity, no logs — it cannot flake on capacity. Contract:
+#   gang pod (faux):  FLUENCE_FAUX_SUBMIT, FLUENCE_QUANTUM_JOB_ID, PYTHONPATH, FLUXION_BACKEND
+#   submitter:        FLUENCE_GANG_GROUP on the sidecar (real submit, ungates the gang)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE%/test/e2e/*}/test/e2e/lib.sh"
 
-log "TEST 8: gang env contract (webhook injects what gang.py reads) — spec layer"
-kubectl apply -f examples/test/e2e/quantum/gang-env-mock.yaml
+GROUP=qgang
+SUBMITTER=${GROUP}-submitter
 
-# does container 'app' of pod $1 have an env entry named $2 ? (spec-level only)
+log "TEST 8: gang+submitter env contract — spec layer"
+kubectl apply -f examples/test/e2e/quantum/quantum-gang-pods.yaml
+
+# does container $2 of pod $1 have an env entry named $3 ? (spec-level only)
 has_env() {
-  kubectl get pod "$1" -o jsonpath="{.spec.containers[?(@.name=='app')].env[*].name}" \
-    2>/dev/null | tr ' ' '\n' | grep -qx "$2"
+  kubectl get pod "$1" -o jsonpath="{.spec.containers[?(@.name=='$2')].env[*].name}" \
+    2>/dev/null | tr ' ' '\n' | grep -qx "$3"
 }
 
-# the webhook mutates at admission; poll briefly for the spec to appear
-log "checking the webhook wired the contract onto the leader (qpu) container"
-for i in $(seq 1 15); do has_env gangenv-leader FLUENCE_ROLE && break; sleep 2; done
-
-for v in FLUENCE_ROLE FLUENCE_POD_UID PYTHONPATH FLUXION_BACKEND; do
-  has_env gangenv-leader "$v" \
-    || { kubectl get pod gangenv-leader -o yaml | sed -n '/containers:/,/status:/p'; \
-         fail "leader container missing env '$v' (webhook did not inject the contract)"; }
-  log "  leader has env: $v"
+log "checking the webhook wired the faux contract onto a gang pod"
+for i in $(seq 1 15); do has_env ${GROUP}-0 app FLUENCE_FAUX_SUBMIT && break; sleep 2; done
+for v in FLUENCE_FAUX_SUBMIT FLUENCE_QUANTUM_JOB_ID PYTHONPATH FLUXION_BACKEND; do
+  has_env ${GROUP}-0 app "$v" \
+    || { kubectl get pod ${GROUP}-0 -o yaml | sed -n '/containers:/,/status:/p'; \
+         fail "gang pod 'app' container missing env '$v'"; }
+  log "  gang pod has env: $v"
 done
 
-# the worker carries FLUENCE_ROLE so gang.py selects 'worker' by contract, not luck
-has_env gangenv-worker-0 FLUENCE_ROLE \
-  || fail "worker container missing FLUENCE_ROLE (gang.py would default to worker by luck)"
-log "  worker has env: FLUENCE_ROLE"
+# The submitter's sidecar must know which gang to ungate.
+log "checking the submitter sidecar has FLUENCE_GANG_GROUP=$GROUP"
+for i in $(seq 1 30); do kubectl get pod "$SUBMITTER" >/dev/null 2>&1 && break; sleep 2; done
+gg="$(kubectl get pod "$SUBMITTER" \
+  -o jsonpath="{.spec.containers[?(@.name=='fluence-sidecar')].env[?(@.name=='FLUENCE_GANG_GROUP')].value}" \
+  2>/dev/null || true)"
+[ "$gg" = "$GROUP" ] || fail "submitter sidecar FLUENCE_GANG_GROUP=$gg, want $GROUP"
+log "  submitter sidecar has FLUENCE_GANG_GROUP=$gg"
 
-# and the role VALUE on the spec is correct per pod (downward-API ref to the
-# role annotation, or a literal — either way the resolved fieldRef/value must
-# encode leader vs worker). Assert the annotation the ref reads is right.
-lr="$(kubectl get pod gangenv-leader  -o jsonpath='{.metadata.annotations.fluence\.flux-framework\.org/role}')"
-wr="$(kubectl get pod gangenv-worker-0 -o jsonpath='{.metadata.annotations.fluence\.flux-framework\.org/role}')"
-[ "$lr" = "leader" ] || fail "leader role annotation=$lr, want leader"
-[ "$wr" = "worker" ] || fail "worker role annotation=$wr, want worker"
-log "  role annotations correct (leader=$lr worker=$wr)"
+# And the submitter must NOT be in faux mode (it does the real submit).
+if has_env "$SUBMITTER" app FLUENCE_FAUX_SUBMIT; then
+  fail "submitter must NOT carry FLUENCE_FAUX_SUBMIT (it submits for real)"
+fi
+log "  submitter is not faux"
 
-log "PASS 8: webhook injects the gang env contract at admission"
+log "PASS 8: webhook injects the gang(faux) + submitter(real) env contract at admission"
 
-kubectl delete -f examples/test/e2e/quantum/gang-env-mock.yaml --wait=false || true
-for g in gangenv gangenv-workers; do
-  kubectl patch podgroup $g --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
+kubectl delete -f examples/test/e2e/quantum/quantum-gang-pods.yaml --wait=false || true
+kubectl delete pod "$SUBMITTER" --wait=false 2>/dev/null || true
+for g in "$GROUP" "$SUBMITTER"; do
+  kubectl patch podgroup "$g" --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
 done
-kubectl wait --for=delete pod -l app=gangenv --timeout=60s 2>/dev/null || true
+kubectl wait --for=delete pod -l app="$GROUP" --timeout=60s 2>/dev/null || true

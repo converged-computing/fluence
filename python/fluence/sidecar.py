@@ -1,18 +1,19 @@
 """
 fluence.sidecar — provider-agnostic quantum coordination sidecar main loop.
 
-Injected by the Fluence webhook into the quantum-submitting pod. Resolves its
-vendor at runtime from the backend annotation, discovers the task the user
-application submitted (tagged by the interceptor), polls readiness, and either
-ungates gated workers (gang mode) or just logs the queue-position series
-(observe-only mode).
+Injected by the Fluence webhook into the one-off SUBMITTER pod (gang + submitter
+model — there is no leader/worker split). Resolves its vendor at runtime from the
+backend annotation, discovers the task the user application submitted (tagged by
+the interceptor), polls readiness, and either ungates the gated GANG group (gang
+mode) or just logs the queue-position series (observe-only mode).
 
 Entry point: `fluence-sidecar` console script (see pyproject.toml) -> main().
 
 Environment (injected by the Fluence webhook):
   FLUENCE_POD_UID                 UID of this pod (matches interceptor tag)
   FLUENCE_NAMESPACE               Kubernetes namespace
-  FLUENCE_GATED_PODS              comma-separated gated worker names
+  FLUENCE_GANG_GROUP              group label of the gated gang to ungate
+  FLUENCE_GATED_PODS              optional explicit comma-separated gang pod names
   FLUENCE_OBSERVE                 "true" for observe-only telemetry mode
   FLUXION_BACKEND / FLUXION_VENDOR  scheduler-chosen backend / vendor
   FLUENCE_TASK_DISCOVERY_TIMEOUT  seconds to wait for discovery (default 300)
@@ -29,11 +30,6 @@ from fluence.providers import resolve_from_env
 from fluence.providers.base import log
 from fluence.ungate import ungate_pods, gated_pods_from_env, namespace_from_env, wait_for_gated_pods
 
-# MUST match handlers.WorkerGroupSuffix in the Go webhook. A quantum gang of size
-# N is split into the leader group <group> (size 1) and the worker group
-# <group>-workers (size N-1, all gated). The sidecar runs in the leader and
-# discovers/ungates workers in the WORKER group, not the leader's group.
-WORKER_GROUP_SUFFIX = "-workers"
 
 
 def _poll(provider, task, poll_interval, ungate):
@@ -58,25 +54,22 @@ def main():
     pod_uid = os.environ.get("FLUENCE_POD_UID", "")
     pod_name = os.environ.get("FLUENCE_POD_NAME", "")
     group = os.environ.get("FLUENCE_GROUP", "")
-    # Two-group quantum split: the leader (where this sidecar runs) is in
-    # <group>; the gated workers were moved to <group>-workers by the webhook.
-    # WORKER_GROUP_SUFFIX MUST match handlers.WorkerGroupSuffix in the Go webhook
-    # (pkg/webhook/handlers/quantum.go). The webhook also passes the base group
-    # via FLUENCE_WORKER_GROUP_BASE; prefer it, fall back to FLUENCE_GROUP.
-    worker_group_base = os.environ.get("FLUENCE_WORKER_GROUP_BASE", group)
-    worker_group = worker_group_base + WORKER_GROUP_SUFFIX if worker_group_base else ""
+    # Gang + submitter model: this sidecar runs in the one-off SUBMITTER pod
+    # (its own group-of-one, <gang>-submitter). The gated workload it must ungate
+    # is the GANG group, named by FLUENCE_GANG_GROUP (set by the webhook). There
+    # is no leader/worker split and no -workers subgroup.
+    gang_group = os.environ.get("FLUENCE_GANG_GROUP", "")
     backend = os.environ.get("FLUXION_BACKEND", "")
     observe = os.environ.get("FLUENCE_OBSERVE", "").lower() == "true"
     discovery_timeout = int(os.environ.get("FLUENCE_TASK_DISCOVERY_TIMEOUT", 300))
     poll_interval = int(os.environ.get("FLUENCE_POLL_INTERVAL", 30))
-    expected_workers = int(os.environ.get("FLUENCE_EXPECTED_WORKERS", 0))
     ungate_timeout = int(os.environ.get("FLUENCE_UNGATE_TIMEOUT", 120))
 
     namespace = namespace_from_env()
 
-    log("starting fluence quantum sidecar")
+    log("starting fluence quantum submitter sidecar")
     log(f"  pod_uid={pod_uid} namespace={namespace} group={group} "
-        f"backend={backend} observe={observe} expected_workers={expected_workers} worker_group={worker_group}")
+        f"gang_group={gang_group} backend={backend} observe={observe}")
 
     provider = resolve_from_env()
     if provider is None:
@@ -88,8 +81,9 @@ def main():
     if task is None:
         log("ERROR: could not discover quantum task")
         if not observe:
-            ungate_pods(wait_for_gated_pods(namespace, worker_group, expected_workers,
-                                            exclude=pod_name, timeout=ungate_timeout),
+            # Fail open: ungate the gang so it is not stranded forever.
+            ungate_pods(wait_for_gated_pods(namespace, gang_group, exclude=pod_name,
+                                            timeout=ungate_timeout),
                         "", namespace)
         sys.exit(1)
 
@@ -102,18 +96,17 @@ def main():
         log("observe-only run complete")
         return
 
-    # Wait until all expected gated workers are present (gang is submitted
-    # together), then ungate them. expected_workers is N-1, propagated by the
-    # webhook from the leader at admission; if unset we ungate whatever is found.
+    # Ungate the gang: discover the gated pods in the gang group and remove their
+    # gate, stamping the job-id so each can fetch results by id. The gang pods are
+    # created up front (Job/Deployment), so they are present by submit time.
     gated_pods = gated_pods_from_env() or wait_for_gated_pods(
-        namespace, worker_group, expected_workers, exclude=pod_name,
-        timeout=ungate_timeout)
-    log(f"ungating {len(gated_pods)} worker(s): {gated_pods}")
+        namespace, gang_group, exclude=pod_name, timeout=ungate_timeout)
+    log(f"ungating {len(gated_pods)} gang pod(s): {gated_pods}")
     n_ok = ungate_pods(gated_pods, job_id, namespace)
     if n_ok == len(gated_pods):
-        log(f"done — {n_ok} worker(s) ungated")
+        log(f"done — {n_ok} gang pod(s) ungated")
     else:
-        log(f"WARNING: ungated only {n_ok}/{len(gated_pods)} worker(s) — see errors above")
+        log(f"WARNING: ungated only {n_ok}/{len(gated_pods)} gang pod(s) — see errors above")
 
 
 if __name__ == "__main__":

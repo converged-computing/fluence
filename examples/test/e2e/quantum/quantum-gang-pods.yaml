@@ -1,0 +1,49 @@
+# Gang + submitter quantum workload for the e2e (no leader/worker).
+#
+# Two pods, identical, both requesting the quantum resource, in group "qgang".
+# The user authors NO roles and NO submitter — the webhook treats this as a gang
+# of full size N=2 (group-size makes N deterministic for raw pods, which have no
+# owning Job/Deployment to derive it from), gates every pod, and ADDITIONALLY
+# creates the one-off submitter pod "qgang-submitter" (its own group-of-one) that
+# runs the real submit and ungates the gang. busybox stands in for the quantum
+# app; the interceptor staging fails soft (no python), which is fine for the
+# structural assertions in 02/03/04.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qgang-0
+  labels:
+    app: qgang
+    fluence.flux-framework.org/group: qgang
+  annotations:
+    fluence.flux-framework.org/group-size: "2"
+spec:
+  schedulerName: fluence
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: busybox
+      command: ["sh", "-c", "echo gang member; sleep 600"]
+      resources:
+        requests: {fluxion.flux-framework.org/qpu: "1"}
+        limits:   {fluxion.flux-framework.org/qpu: "1"}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qgang-1
+  labels:
+    app: qgang
+    fluence.flux-framework.org/group: qgang
+  annotations:
+    fluence.flux-framework.org/group-size: "2"
+spec:
+  schedulerName: fluence
+  restartPolicy: Never
+  containers:
+    - name: app
+      image: busybox
+      command: ["sh", "-c", "echo gang member; sleep 600"]
+      resources:
+        requests: {fluxion.flux-framework.org/qpu: "1"}
+        limits:   {fluxion.flux-framework.org/qpu: "1"}

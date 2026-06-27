@@ -2,7 +2,7 @@
 # via resources (the fluence device plugin advertises fluxion.flux-framework.org/qpu
 # on every node, so NodeResourcesFit is satisfied). Fluence's PreFilter matches
 # the request against the resource graph and picks a backend, the webhook injects
-# QRMI_BACKEND (the allocated backend) automatically, and note we can add other
+# FLUXION_BACKEND (the allocated backend) automatically, and note we can add other
 # envars here in the future. I chose a webhook because I think this is going to
 # be a requirement, and the pod is immutable after creation. 
 # Then the container submits via qrmi-go (the separate qrmi-sampler image).

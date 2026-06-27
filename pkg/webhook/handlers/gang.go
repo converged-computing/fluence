@@ -17,7 +17,7 @@ func init() {
 }
 
 // gangHandler gang-schedules pods that carry the group label: it creates a
-// Fluence-owned PodGroup (first pod admitted becomes the recorded leader) and
+// Fluence-owned PodGroup and
 // links every pod to it via spec.schedulingGroup.podGroupName, which is the
 // field the scheduler gangs by. It knows nothing about quantum — a purely
 // classical gang is fully handled here, with no sidecar.
@@ -34,8 +34,8 @@ func (h *gangHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *cor
 	// Ensure the group's PodGroup exists with the resolved gang size, and link
 	// this pod to it. EnsurePodGroup is idempotent (no-ops if the PodGroup
 	// already exists — e.g. created by an earlier, more specific handler), so we
-	// call it unconditionally. The gang handler knows nothing about leaders or
-	// roles; that is a leader/worker concern handled by the quantum handler.
+	// call it unconditionally. The gang handler knows nothing about quantum or
+	// submitters; that is the quantum handler's concern.
 	// minCount = full gang size N (group-size annotation, else owner-derived);
 	// see resolveMinCount.
 	m.EnsurePodGroup(ctx, pod.Namespace, g, pod.Name, resolveMinCount(ctx, m, pod))
@@ -52,7 +52,7 @@ func (h *gangHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *cor
 //  3. otherwise default to 1, logged — never silently size a multi-pod gang to 1.
 //
 // The leader/worker (quantum) split is orthogonal and unchanged: it is driven by
-// RoleAnnotation / QuantumResource in the quantum handler. minCount is always the
+// QuantumResource in the quantum handler. minCount is always the
 // FULL gang N regardless of which pods get gated.
 func resolveMinCount(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod) int32 {
 	// 1. explicit override

@@ -136,19 +136,18 @@ func TestGangMinCountDefaultsToOne(t *testing.T) {
 	}
 }
 
-// Quantum distinction: a gang of full size N=4 that ALSO carries
-// expected-workers=3 (the N-1 workers the sidecar ungates) must still get
-// minCount=4 (the whole gang), NOT 3. minCount comes from group-size, not
-// expected-workers.
-func TestGangMinCountHonorsFullNWithQuantumSplit(t *testing.T) {
+// group-size is the authoritative gang minCount: a workload that sets it to N
+// gets minCount=N (the whole gang schedules atomically), regardless of any owner
+// replica count. In the gang+submitter model the full workload IS the gang —
+// there is no N-1 worker split.
+func TestGangMinCountHonorsGroupSize(t *testing.T) {
 	pod := cpuPod("fluence")
 	pod.Namespace = "default"
 	pod.Labels = map[string]string{webhook.GroupLabel: "q-gang"}
 	pod.Annotations = map[string]string{
-		webhook.GroupSizeAnnotation:       "4", // full N (leader + workers)
-		webhook.ExpectedWorkersAnnotation: "3", // N-1 workers to ungate
+		webhook.GroupSizeAnnotation: "4", // full gang size
 	}
 	if got := minCountOf(t, pod); got != 4 {
-		t.Errorf("quantum gang: minCount=%d, want 4 (full N, not N-1)", got)
+		t.Errorf("group-size gang: minCount=%d, want 4 (full N)", got)
 	}
 }

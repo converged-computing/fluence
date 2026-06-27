@@ -112,7 +112,6 @@ func main() {
 	mutator := &webhook.Mutator{
 		AttributeKeys: attrKeys,
 		Clientset:     client,
-		SidecarImage:  env("FLUENCE_SIDECAR_IMAGE", ""),
 	}
 	log.Printf("[fluence-webhook] env contract injected into fluxion pods: %v", mutator.EnvVarNames())
 

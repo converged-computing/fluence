@@ -35,19 +35,20 @@ type Sidecar interface {
 	ContainerOps(pod *corev1.Pod, observe bool, extraEnv []corev1.EnvVar) []spec.Op
 }
 
-// coreSidecar is the default Sidecar, delegating to the webhook core. It is the
-// shared, generic staging path; the quantum handler uses it as-is today and a
-// custom handler could wrap or replace it.
+// coreSidecar is the default Sidecar. It delegates to the quantum-owned sidecar
+// implementation (see sidecar_impl.go), which uses only the generic MutatorAPI
+// (Client, InjectedEnv). The webhook core no longer carries any sidecar logic; a
+// custom handler could supply its own Sidecar with a different container/image.
 type coreSidecar struct{ m webhook.MutatorAPI }
 
 func (s coreSidecar) EnsureRBAC(ctx context.Context, namespace string) {
-	s.m.EnsureSidecarRBAC(ctx, namespace)
+	ensureSidecarRBAC(ctx, s.m, namespace)
 }
 func (s coreSidecar) InterceptorOps(pod *corev1.Pod) []spec.Op {
-	return s.m.InterceptorOps(pod)
+	return interceptorOps(pod)
 }
 func (s coreSidecar) ContainerOps(pod *corev1.Pod, observe bool, extraEnv []corev1.EnvVar) []spec.Op {
-	return s.m.SidecarContainerOps(pod, observe, extraEnv)
+	return sidecarContainerOps(s.m, pod, observe, extraEnv)
 }
 
 // sidecarFor returns the Sidecar a handler should use. Centralized so the choice
