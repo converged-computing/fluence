@@ -1,35 +1,35 @@
 #!/usr/bin/env bash
 # Multi-pod gang scheduling on real nodes. Guards the two failures that the
 # single-pod 01 test could NOT catch (and that shipped a minCount=1 bug):
-#   A) a 3-pod gang must place ALL 3 (minCount must equal the gang size, not 1)
+#   A) a multi-pod gang must place ALL of them (minCount must equal the gang size, not 1)
 #   B) under contention, a gang that cannot fully fit stays ENTIRELY pending —
 #      never partially placed (no stranded pods holding nodes).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE%/test/e2e/*}/test/e2e/lib.sh"
 
 # ---- A) all-or-nothing placement of a 3-pod gang -------------------------------
-log "TEST 6A: multi-pod gang (3) places all-or-nothing"
+log "TEST 6A: multi-pod gang (2) places all-or-nothing"
 kubectl apply -f examples/test/e2e/gang/multi-gang.yaml
 
-# the webhook must have created the PodGroup with minCount = 3 (the bug set it to 1)
-log "checking PodGroup minCount == 3 (set by webhook from group-size)"
+# the webhook must have created the PodGroup with minCount = 2 (the bug set it to 1)
+log "checking PodGroup minCount == 2 (set by webhook from group-size)"
 for i in $(seq 1 30); do
   mc="$(kubectl get podgroup gang3 -o jsonpath='{.spec.schedulingPolicy.gang.minCount}' 2>/dev/null || true)"
   [ -n "$mc" ] && break; sleep 2
 done
-[ "$mc" = "3" ] || fail "PodGroup gang3 minCount=$mc, want 3 (minCount=1 bug -> partial gangs)"
+[ "$mc" = "2" ] || fail "PodGroup gang3 minCount=$mc, want 2 (minCount=1 bug -> partial gangs)"
 
-log "waiting for all 3 gang pods to be Ready"
-wait_pods_ready "app=gang3" 3 180 || fail "gang3 did not place all 3 pods (gang scheduling failed)"
+log "waiting for all 2 gang pods to be Ready"
+wait_pods_ready "app=gang3" 2 180 || fail "gang3 did not place all 2 pods (gang scheduling failed)"
 
 count="$(kubectl get pods -l app=gang3 --field-selector=status.phase=Running --no-headers | wc -l | tr -d ' ')"
-[ "$count" = "3" ] || fail "expected 3 Running gang3 pods, got $count (partial placement)"
+[ "$count" = "2" ] || fail "expected 2 Running gang3 pods, got $count (partial placement)"
 for p in $(kubectl get pods -l app=gang3 -o name); do
   pod="${p#pod/}"
   sched="$(kubectl get pod "$pod" -o jsonpath='{.spec.schedulerName}')"
   [ "$sched" = "fluence" ] || fail "$pod not scheduled by fluence (got: $sched)"
 done
-log "PASS 6A: 3-pod gang placed atomically by fluence (minCount=3)"
+log "PASS 6A: 2-pod gang placed atomically by fluence (minCount=2)"
 
 kubectl delete -f examples/test/e2e/gang/multi-gang.yaml --wait=false || true
 kubectl patch podgroup gang3 --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true

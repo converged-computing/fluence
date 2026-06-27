@@ -93,6 +93,7 @@ var (
 	_ fwk.PreFilterPlugin  = (*Fluence)(nil)
 	_ fwk.FilterPlugin     = (*Fluence)(nil)
 	_ fwk.PostFilterPlugin = (*Fluence)(nil)
+	_ fwk.ReservePlugin    = (*Fluence)(nil)
 	_ fwk.PreBindPlugin    = (*Fluence)(nil)
 )
 
@@ -560,12 +561,59 @@ func (f *Fluence) PreBindPreFlight(
 	return nil, fwk.NewStatus(fwk.Success)
 }
 
+// Reserve stamps the chosen backend (and matched attributes) onto the pod as
+// early as possible — at reservation, in the scheduling cycle — rather than in
+// PreBind. The webhook injects FLUXION_BACKEND (and FLUXION_<ATTR>) as a
+// downward-API env sourced from these annotations; downward-API env is resolved
+// by the kubelet when the container starts and is NOT updated afterward, so the
+// annotation must be present well before the container starts. PreBind runs in
+// the (asynchronous) binding cycle, milliseconds before Bind, which races the
+// kubelet — Reserve runs earlier and synchronously, giving the annotation time
+// to propagate so the value reliably surfaces in the container.
+func (f *Fluence) Reserve(
+	ctx context.Context,
+	state fwk.CycleState,
+	pod *corev1.Pod,
+	nodeName string,
+) *fwk.Status {
+	if err := f.stampBackend(ctx, pod); err != nil {
+		return fwk.AsStatus(fmt.Errorf("stamp backend annotations: %w", err))
+	}
+	return fwk.NewStatus(fwk.Success)
+}
+
+// Unreserve is a no-op: a stale backend annotation from a reservation that was
+// later rejected is harmless (it is overwritten on the next attempt and the
+// value is correct for the allocation that produced it), and clearing it would
+// cost an extra API call. Required to satisfy fwk.ReservePlugin.
+func (f *Fluence) Unreserve(ctx context.Context, state fwk.CycleState, pod *corev1.Pod, nodeName string) {
+}
+
+// stampBackend writes the allocated backend name and matched attributes onto the
+// pod (idempotent merge patch). No-op when there is no cached allocation or the
+// allocation carries no backend (classical, non-quantum gangs).
+func (f *Fluence) stampBackend(ctx context.Context, pod *corev1.Pod) error {
+	f.mu.Lock()
+	alloc, ok := f.placement[groupKey(pod)]
+	f.mu.Unlock()
+	if !ok || alloc.place.Backend == "" {
+		return nil
+	}
+	ann := map[string]string{placement.BackendAnnotation: alloc.place.Backend}
+	for k, v := range alloc.place.BackendAttributes {
+		ann[placement.AttributeAnnotationPrefix+k] = v
+	}
+	log.Printf("[fluence] group %s -> backend %q attrs %v (reserve-stamped, nodes %v)",
+		groupKey(pod), alloc.place.Backend, alloc.place.BackendAttributes, alloc.place.Nodes)
+	return f.patchPodAnnotations(ctx, pod.Namespace, pod.Name, ann)
+}
+
 // PreBind records, in the commit phase, the durable state for this group:
-//   - the Fluxion jobid onto the owning object (the PodGroup for a gang, else the
-//     pod) so the allocation can be cancelled when that object is deleted;
-//   - for a quantum group, the allocated backend onto the pod, which the webhook-
-//     injected downward-API env surfaces as QRMI_BACKEND (container env is
-//     immutable post-creation, so the value must travel via an annotation).
+// the Fluxion jobid onto the owning object (the PodGroup for a gang, else the
+// pod) so the allocation can be cancelled when that object is deleted. The
+// backend annotation is stamped earlier, in Reserve (see stampBackend), because
+// the webhook-injected downward-API env (FLUXION_BACKEND) must be present before
+// the container starts; PreBind is too late and races the kubelet.
 func (f *Fluence) PreBind(
 	ctx context.Context,
 	state fwk.CycleState,
@@ -582,20 +630,10 @@ func (f *Fluence) PreBind(
 	if err := f.recordJobIDs(ctx, pod, alloc.jobids); err != nil {
 		return fwk.AsStatus(fmt.Errorf("record jobids: %w", err))
 	}
-	if alloc.place.Backend != "" {
-		// Stamp the backend name and all matched attributes in one patch. The
-		// webhook injects a normalized env per annotation so the workload reads
-		// exactly what it matched (backend + region/qubits/...).
-		ann := map[string]string{placement.BackendAnnotation: alloc.place.Backend}
-		for k, v := range alloc.place.BackendAttributes {
-			ann[placement.AttributeAnnotationPrefix+k] = v
-		}
-		log.Printf("[fluence] group %s -> backend %q attrs %v (nodes %v, jobids %v)",
-			groupKey(pod), alloc.place.Backend, alloc.place.BackendAttributes,
-			alloc.place.Nodes, alloc.jobids)
-		if err := f.patchPodAnnotations(ctx, pod.Namespace, pod.Name, ann); err != nil {
-			return fwk.AsStatus(fmt.Errorf("stamp backend annotations: %w", err))
-		}
+	// Backstop: if Reserve was skipped for any reason, ensure the backend is
+	// stamped before bind anyway (idempotent).
+	if err := f.stampBackend(ctx, pod); err != nil {
+		return fwk.AsStatus(fmt.Errorf("stamp backend annotations: %w", err))
 	}
 	return fwk.NewStatus(fwk.Success)
 }
@@ -789,6 +827,20 @@ func (f *Fluence) reconcileGroup(ctx context.Context, namespace, group string) {
 	}
 	log.Printf("fluence: reconciled completed gang %s/%s — deleted Fluence-created PodGroup, allocation freed",
 		namespace, group)
+
+	// Gang+submitter cleanup: the one-off quantum submitter pod and its
+	// group-of-one PodGroup (<group>-submitter) are not owned by the user's
+	// workload, so reap them alongside the gang. The submitter pod also carries
+	// an ownerReference to this gang PodGroup (so its deletion cascades via GC);
+	// this explicit delete is the backstop and also removes the submitter's own
+	// PodGroup. Skip when this group is itself a submitter group, to avoid
+	// recursing on <group>-submitter-submitter.
+	if !strings.HasSuffix(group, submitterGroupSuffix) {
+		sg := group + submitterGroupSuffix
+		_ = f.handle.ClientSet().SchedulingV1alpha2().PodGroups(namespace).Delete(ctx, sg, metav1.DeleteOptions{})
+		_ = f.handle.ClientSet().CoreV1().Pods(namespace).Delete(ctx, sg, metav1.DeleteOptions{})
+		log.Printf("fluence: reaped submitter %s/%s for gang %s", namespace, sg, group)
+	}
 }
 
 // reconcileGraceForEmpty is how long a Fluence-created PodGroup with no live
@@ -799,6 +851,12 @@ const reconcileGraceForEmpty = 2 * time.Minute
 // webhookGroupLabel duplicates pkg/webhook.GroupLabel without importing that
 // package (the scheduler must not depend on the webhook). Kept in sync with it.
 const webhookGroupLabel = "fluence.flux-framework.org/group"
+
+// submitterGroupSuffix mirrors handlers.SubmitterGroupSuffix: the one-off quantum
+// submitter for gang <g> is named <g>-submitter (both the pod and its PodGroup).
+// Duplicated here to avoid importing the webhook handlers package into the
+// scheduler plugin; keep the two in sync.
+const submitterGroupSuffix = "-submitter"
 
 // onPodGroupDeleted frees the gang's allocation when its PodGroup is deleted.
 func (f *Fluence) onPodGroupDeleted(obj interface{}) {

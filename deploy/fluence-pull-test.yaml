@@ -67,7 +67,9 @@ rules:
   # the pod object, so grant it here.
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch", "patch", "update"]
+    # create/delete: the webhook creates the one-off quantum submitter pod
+    # (ensureSubmitterPod) and the scheduler reaps it during gang cleanup.
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
   # The webhook self-manages its TLS by patching its own config's caBundle.
   - apiGroups: ["admissionregistration.k8s.io"]
     resources: ["mutatingwebhookconfigurations"]

@@ -80,7 +80,7 @@ class Provider:
         raise NotImplementedError
 
     def is_ready_to_ungate(self, task: "Task") -> bool:
-        """True when workers should be ungated — queue position == 1 or the task
+        """True when the gang should be ungated — queue position == 1 or the task
         is already RUNNING/terminal. Always implementable."""
         raise NotImplementedError
 

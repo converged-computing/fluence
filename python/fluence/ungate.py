@@ -84,10 +84,10 @@ GROUP_LABEL = "fluence.flux-framework.org/group"
 def discover_gated_pods(namespace, group, exclude=""):
     """
     Find the names of pods in the same group that still carry the quantum
-    scheduling gate (i.e. the workers this sidecar's leader must ungate).
+    scheduling gate (i.e. the gang pods this submitter must ungate).
 
-    The leader's sidecar is created before the workers are admitted, so the gated
-    set cannot be known at admission time and must be discovered at runtime. We
+    The submitter is created alongside the gang, so the gated set is discovered
+    at runtime rather than known at admission. We
     list pods by the group label and keep those with the QUANTUM_GATE_NAME gate
     still present, excluding the leader pod itself.
     """
@@ -114,29 +114,22 @@ def discover_gated_pods(namespace, group, exclude=""):
     return names
 
 
-def wait_for_gated_pods(namespace, group, expected, exclude="", timeout=120,
-                        interval=3):
+def wait_for_gated_pods(namespace, group, exclude="", timeout=120, interval=3):
     """
-    Wait until at least `expected` gated workers have been discovered in the
-    group, or `timeout` seconds elapse. The gang is submitted together, so all
-    workers appear quickly; the timeout is a backstop against a crashed/never-
-    admitted worker so the sidecar never hangs. Returns the discovered list
-    (which may be short of `expected` if the timeout fired).
+    Wait until at least one gated gang pod is discovered in the group (the gang
+    is created up front, so its pods appear quickly), then return all currently
+    gated pods. The timeout is a backstop so the submitter never hangs if the
+    gang never appears. Returns the discovered list (possibly empty on timeout).
     """
     deadline = time.time() + timeout
     found = []
     while time.time() < deadline:
         found = discover_gated_pods(namespace, group, exclude=exclude)
-        if expected and len(found) >= expected:
-            log(f"all {expected} gated worker(s) present")
+        if found:
             return found
-        if not expected:
-            # No expected count known — return whatever is present now.
-            return found
-        log(f"waiting for gated workers: {len(found)}/{expected}")
+        log("waiting for gated gang pods to appear")
         time.sleep(interval)
-    log(f"WARNING: timed out waiting for gated workers "
-        f"({len(found)}/{expected}); ungating what is present")
+    log("WARNING: timed out waiting for gated gang pods; none found")
     return found
 
 

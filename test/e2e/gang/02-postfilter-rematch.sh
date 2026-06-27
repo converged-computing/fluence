@@ -22,6 +22,11 @@ kubectl delete podgroup "$NAME" --ignore-not-found >/dev/null 2>&1 || true
 kubectl patch podgroup "$NAME" --type=merge \
   -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
 kubectl wait --for=delete pod -l "$SEL" --timeout=60s >/dev/null 2>&1 || true
+# Defensive: a prior test's workload left running would occupy the only
+# untainted worker and make this test fail with a (correct) fluxion
+# allocate -1 for lack of capacity. Ensure none lingers.
+kubectl delete deployment training --ignore-not-found --wait=false >/dev/null 2>&1 || true
+kubectl wait --for=delete pod -l app=training --timeout=60s >/dev/null 2>&1 || true
 
 TAINTED="$(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' \
   -o jsonpath='{.items[0].metadata.name}')"

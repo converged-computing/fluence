@@ -44,7 +44,7 @@ wait_fluence_ready() {
 
 show_webhook() {
   pod=$1
-  echo "FAIL: QRMI_BACKEND mismatch"
+  echo "FAIL: FLUXION_BACKEND mismatch"
   kubectl get pod $pod -o jsonpath='{.spec.containers[0].env}'; echo
   kubectl get pod $pod -o jsonpath='{.metadata.annotations}'; echo
   kubectl -n kube-system logs deploy/fluence-webhook --tail=50

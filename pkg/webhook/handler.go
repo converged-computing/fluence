@@ -27,25 +27,16 @@ type MutatorAPI interface {
 
 	// EnsurePodGroup creates the group's PodGroup with the given gang minCount if
 	// it does not already exist (idempotent). Group identity is the opaque value
-	// of the group label. Leader election is NOT here — it is a leader/worker
-	// concern owned by the handlers that need it (see handlers/leader.go).
-	EnsurePodGroup(ctx context.Context, namespace, group, leaderPod string, minCount int32)
-
-	// Sidecar staging primitives. These remain on the core because the default
-	// Sidecar implementation (coreSidecar) delegates to them, but handlers do
-	// NOT use them directly — they go through the handlers.Sidecar interface,
-	// which is the customization seam. Kept here (not removed) so the concrete
-	// *Mutator continues to satisfy both this interface and coreSidecar's needs.
-	EnsureSidecarRBAC(ctx context.Context, namespace string)
-	InterceptorOps(pod *corev1.Pod) []spec.Op
-	SidecarContainerOps(pod *corev1.Pod, observe bool, extraEnv []corev1.EnvVar) []spec.Op
+	// of the group label. creatorPod is recorded only as the PodGroup's creator
+	// reference; the core ascribes no role semantics to it.
+	EnsurePodGroup(ctx context.Context, namespace, group, creatorPod string, minCount int32)
 }
 
 // Handler inspects a pod and, when it applies, contributes JSON patch ops. A pod
 // flows through every registered handler whose Applies returns true; their ops
 // are concatenated. Applies is fully general — it receives the pod and the
-// MutatorAPI, so a handler may consult cluster state (e.g. resolve a group's
-// leader) in deciding whether it applies.
+// MutatorAPI, so a handler may consult cluster state in deciding whether it
+// applies.
 type Handler interface {
 	Name() string
 	Applies(ctx context.Context, m MutatorAPI, pod *corev1.Pod) bool

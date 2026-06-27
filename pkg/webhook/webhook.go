@@ -1,11 +1,11 @@
 // Package webhook is fluence's mutating admission webhook.
 //
 // The core here is domain-agnostic plumbing: it owns the Mutator, the handler
-// dispatcher, per-namespace PodGroup/RBAC provisioning, the Model C package
-// staging (init container + shared volume on PYTHONPATH), the HTTP entrypoint,
-// and self-managed TLS. It knows nothing about quantum, Braket, gate names, or
-// observe labels — that policy lives entirely in the handlers (pkg/webhook/
-// handlers), which self-register via Register().
+// dispatcher, per-namespace PodGroup provisioning, the HTTP entrypoint, and
+// self-managed TLS. It knows nothing about quantum, Braket, gate names, sidecars,
+// RBAC, or interceptor staging — that policy and machinery lives entirely in the
+// handlers (pkg/webhook/handlers), which self-register via Register() and perform
+// their own create/edit side-effects through the generic MutatorAPI.
 //
 // The webhook self-manages TLS via a self-signed CA patched into the
 // MutatingWebhookConfiguration caBundle at startup.
@@ -32,9 +32,7 @@ import (
 
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
 	schedulingv1alpha2 "k8s.io/api/scheduling/v1alpha2"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
@@ -52,38 +50,12 @@ const (
 	// meaning to it (a handler decides what a group means).
 	GroupLabel = "fluence.flux-framework.org/group"
 
-	// RoleAnnotation, set by the workload on each pod, explicitly declares the
-	// pod's gang role ("leader" or "worker"). When present it is AUTHORITATIVE:
-	// the quantum handler gates workers and gives the leader the sidecar based
-	// on this value, instead of inferring the leader by admission order. The
-	// same value is injected into the container env as FLUENCE_ROLE so the
-	// application reads its role from the same source of truth Fluence used.
-	// When absent, role falls back to admission order (backwards compatible).
-	RoleAnnotation = "fluence.flux-framework.org/role"
-
-	// ExpectedWorkersAnnotation, set by the workload on the leader pod, tells the
-	// sidecar how many gated workers to wait for before ungating. The count is
-	// known at admission (the workload declares it) even though worker names are
-	// not, so it travels as a static sidecar env var. The core treats it as an
-	// opaque string and ascribes no meaning to it beyond propagation.
-	ExpectedWorkersAnnotation = "fluence.flux-framework.org/expected-workers"
-
-	// GroupSizeAnnotation is the FULL gang member count N (leader + workers),
-	// set by the workload on each pod. It drives the PodGroup gang minCount so the
-	// whole group schedules atomically. This is distinct from
-	// ExpectedWorkersAnnotation (N-1: the workers the sidecar ungates; the leader
-	// is not gated). For a classical gang with no leader/worker split, N = size.
+	// GroupSizeAnnotation is the gang member count N, set by the workload on each
+	// pod. It is the authoritative override for the PodGroup gang minCount when
+	// the size cannot (or should not) be derived from the owning controller — and
+	// for loose grouped pods where counting at admission is unreliable. The core
+	// treats it as an opaque integer string.
 	GroupSizeAnnotation = "fluence.flux-framework.org/group-size"
-
-	// Sidecar/staging infrastructure (generic — not quantum-specific).
-	SidecarImage          = "ghcr.io/converged-computing/fluence-sidecar:latest"
-	SidecarServiceAccount = "fluence-sidecar"
-
-	// StageVolumeName / StageMountPath: the shared emptyDir the init container
-	// stages the fluence Python package into, mounted into the user container and
-	// prepended to PYTHONPATH (Model C delivery).
-	StageVolumeName = "fluence-pkg"
-	StageMountPath  = "/opt/fluence-staged"
 )
 
 // ── Mutator ─────────────────────────────────────────────────────────────────────
@@ -91,30 +63,13 @@ const (
 type Mutator struct {
 	AttributeKeys []string
 	Clientset     kubernetes.Interface
-	SidecarImage  string
 }
 
 // compile-time check that *Mutator satisfies the handler capability interface.
 var _ MutatorAPI = (*Mutator)(nil)
 
-func (m *Mutator) sidecarImage() string {
-	if m.SidecarImage != "" {
-		return m.SidecarImage
-	}
-	return SidecarImage
-}
-
 // GroupName returns the value of GroupLabel on the pod, or "".
 func GroupName(pod *corev1.Pod) string { return spec.Label(pod, GroupLabel) }
-
-// Role returns the explicit gang role declared on the pod via RoleAnnotation
-// ("leader"/"worker"), or "" if unset (caller falls back to admission order).
-func Role(pod *corev1.Pod) string { return spec.Annotation(pod, RoleAnnotation) }
-
-func resourceQuantity(s string) *resource.Quantity {
-	q := resource.MustParse(s)
-	return &q
-}
 
 // ── MutatorAPI: capabilities exposed to handlers ────────────────────────────────
 
@@ -176,176 +131,6 @@ func (m *Mutator) EnsurePodGroup(ctx context.Context, namespace, group, leaderPo
 	} else {
 		log.Printf("[fluence-webhook] created PodGroup %s/%s (minCount=%d)", namespace, group, minCount)
 	}
-}
-
-// EnsureSidecarRBAC provisions the per-namespace ServiceAccount/Role/RoleBinding
-// the sidecar uses to patch pods and read PodGroups.
-func (m *Mutator) EnsureSidecarRBAC(ctx context.Context, namespace string) {
-	if m.Clientset == nil {
-		return
-	}
-	lbl := map[string]string{"app": "fluence-sidecar"}
-
-	if _, err := m.Clientset.CoreV1().ServiceAccounts(namespace).Get(ctx, SidecarServiceAccount, metav1.GetOptions{}); err != nil {
-		sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: SidecarServiceAccount, Namespace: namespace, Labels: lbl}}
-		if _, err := m.Clientset.CoreV1().ServiceAccounts(namespace).Create(ctx, sa, metav1.CreateOptions{}); err != nil {
-			log.Printf("[fluence-webhook] could not create ServiceAccount %s/%s: %v", namespace, SidecarServiceAccount, err)
-		}
-	}
-	if _, err := m.Clientset.RbacV1().Roles(namespace).Get(ctx, SidecarServiceAccount, metav1.GetOptions{}); err != nil {
-		role := &rbacv1.Role{
-			ObjectMeta: metav1.ObjectMeta{Name: SidecarServiceAccount, Namespace: namespace, Labels: lbl},
-			Rules: []rbacv1.PolicyRule{
-				{APIGroups: []string{""}, Resources: []string{"pods"}, Verbs: []string{"get", "list", "patch", "update"}},
-				{APIGroups: []string{"scheduling.k8s.io"}, Resources: []string{"podgroups"}, Verbs: []string{"get", "list"}},
-			},
-		}
-		if _, err := m.Clientset.RbacV1().Roles(namespace).Create(ctx, role, metav1.CreateOptions{}); err != nil {
-			log.Printf("[fluence-webhook] could not create Role %s/%s: %v", namespace, SidecarServiceAccount, err)
-		}
-	}
-	if _, err := m.Clientset.RbacV1().RoleBindings(namespace).Get(ctx, SidecarServiceAccount, metav1.GetOptions{}); err != nil {
-		rb := &rbacv1.RoleBinding{
-			ObjectMeta: metav1.ObjectMeta{Name: SidecarServiceAccount, Namespace: namespace, Labels: lbl},
-			Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: SidecarServiceAccount, Namespace: namespace}},
-			RoleRef:    rbacv1.RoleRef{APIGroup: "rbac.authorization.k8s.io", Kind: "Role", Name: SidecarServiceAccount},
-		}
-		if _, err := m.Clientset.RbacV1().RoleBindings(namespace).Create(ctx, rb, metav1.CreateOptions{}); err != nil {
-			log.Printf("[fluence-webhook] could not create RoleBinding %s/%s: %v", namespace, SidecarServiceAccount, err)
-		}
-	}
-}
-
-// InterceptorOps implements Model C delivery. It injects an init container (the
-// sidecar image) that stages the fluence Python package into a shared emptyDir,
-// mounts that volume into every Fluxion-resource container, and prepends it to
-// PYTHONPATH plus sets FLUENCE_POD_UID. Python auto-imports the staged
-// sitecustomize on startup, which runs the interceptor — no user code changes,
-// no PYTHONSTARTUP (which only fires interactively), no vendor SDK on our side.
-func (m *Mutator) InterceptorOps(pod *corev1.Pod) []spec.Op {
-	var ops []spec.Op
-
-	// Shared volume.
-	vol := corev1.Volume{Name: StageVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}
-	if len(pod.Spec.Volumes) == 0 {
-		ops = append(ops, spec.Op{Op: "add", Path: "/spec/volumes", Value: []corev1.Volume{vol}})
-	} else {
-		ops = append(ops, spec.Op{Op: "add", Path: "/spec/volumes/-", Value: vol})
-	}
-
-	// Init container that stages the package into the shared volume.
-	//
-	// Fail-soft: the interceptor is best-effort, so its delivery must be too. We
-	// wrap the stage command so a failure (bad image, missing python, package
-	// problem) leaves the shared volume empty and exits 0 rather than blocking
-	// the user's pod with Init:Error. An empty staged dir simply means the
-	// interceptor does not run — the user application is unaffected. (This also
-	// lets CI use a minimal placeholder sidecar image for placement-only tests.)
-	initc := corev1.Container{
-		Name:            "fluence-stage",
-		Image:           m.sidecarImage(),
-		ImagePullPolicy: corev1.PullAlways,
-		Command: []string{"sh", "-c",
-			fmt.Sprintf("python -m fluence.stage %s || echo '[fluence] staging skipped (interceptor unavailable)'", StageMountPath)},
-		VolumeMounts: []corev1.VolumeMount{{Name: StageVolumeName, MountPath: StageMountPath}},
-	}
-	if len(pod.Spec.InitContainers) == 0 {
-		ops = append(ops, spec.Op{Op: "add", Path: "/spec/initContainers", Value: []corev1.Container{initc}})
-	} else {
-		ops = append(ops, spec.Op{Op: "add", Path: "/spec/initContainers/-", Value: initc})
-	}
-
-	// Mount the staged volume + set PYTHONPATH and FLUENCE_POD_UID on each
-	// Fluxion-resource container.
-	mount := corev1.VolumeMount{Name: StageVolumeName, MountPath: StageMountPath, ReadOnly: true}
-	pythonpath := corev1.EnvVar{Name: "PYTHONPATH", Value: StageMountPath}
-	uid := spec.FieldEnv("FLUENCE_POD_UID", "metadata.uid")
-	for i, c := range pod.Spec.Containers {
-		if !spec.RequestsFluxionResource(c) {
-			continue
-		}
-		if len(c.VolumeMounts) == 0 {
-			ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/volumeMounts", i), Value: []corev1.VolumeMount{mount}})
-		} else {
-			ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/volumeMounts/-", i), Value: mount})
-		}
-		if !spec.HasEnv(c, "PYTHONPATH") {
-			if len(c.Env) == 0 {
-				ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/env", i), Value: []corev1.EnvVar{pythonpath}})
-				pod.Spec.Containers[i].Env = []corev1.EnvVar{pythonpath}
-			} else {
-				ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/env/-", i), Value: pythonpath})
-				pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env, pythonpath)
-			}
-		}
-		if !spec.HasEnv(c, "FLUENCE_POD_UID") {
-			ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/env/-", i), Value: uid})
-			pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env, uid)
-		}
-	}
-	return ops
-}
-
-// SidecarContainerOps adds the fluence-sidecar container and sets its
-// ServiceAccount. observe=true selects observe-only telemetry mode.
-func (m *Mutator) SidecarContainerOps(pod *corev1.Pod, observe bool, extraEnv []corev1.EnvVar) []spec.Op {
-	var ops []spec.Op
-	// The sidecar resolves its vendor provider at runtime from the backend the
-	// scheduler chose. It gets the same FLUXION_* contract as the workload
-	// containers (FLUXION_BACKEND + attribute vars like FLUXION_VENDOR), sourced
-	// via the downward API from the scheduler's annotations — so the values
-	// resolve once the scheduler writes them, after admission.
-	env := []corev1.EnvVar{
-		spec.FieldEnv("FLUENCE_POD_UID", "metadata.uid"),
-		spec.FieldEnv("FLUENCE_POD_NAME", "metadata.name"),
-		spec.FieldEnv("FLUENCE_NAMESPACE", "metadata.namespace"),
-		spec.FieldEnv("FLUENCE_GROUP", "metadata.labels['"+GroupLabel+"']"),
-	}
-	env = append(env, m.InjectedEnv()...)
-	if observe {
-		env = append(env, corev1.EnvVar{Name: "FLUENCE_OBSERVE", Value: "true"})
-	}
-	// Handler-supplied, domain-specific env (e.g. quantum's FLUENCE_EXPECTED_WORKERS
-	// and FLUENCE_WORKER_GROUP_BASE). The core does not know what these mean; the
-	// handler that owns the gang shape computes and passes them. Appended before
-	// the credential copy so workload creds still win on name collisions below.
-	env = append(env, extraEnv...)
-	// The sidecar talks to the same backend the workload does (e.g. to find the
-	// task and read its queue position), so it needs the same credentials. Copy
-	// the workload container's secret/configmap-sourced env onto the sidecar.
-	// This stays domain-agnostic: we don't know or name the provider's creds, we
-	// just propagate whatever the workload pulls from a secret/configMap (e.g.
-	// AWS_*, IBM tokens). Existing FLUENCE_/FLUXION_ names are not overwritten.
-	if len(pod.Spec.Containers) > 0 {
-		have := map[string]bool{}
-		for _, e := range env {
-			have[e.Name] = true
-		}
-		for _, e := range pod.Spec.Containers[0].Env {
-			if have[e.Name] || e.ValueFrom == nil {
-				continue
-			}
-			if e.ValueFrom.SecretKeyRef != nil || e.ValueFrom.ConfigMapKeyRef != nil {
-				env = append(env, e)
-			}
-		}
-	}
-	sidecar := corev1.Container{
-		Name: "fluence-sidecar", Image: m.sidecarImage(), ImagePullPolicy: corev1.PullAlways,
-		Env: env,
-		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
-			corev1.ResourceCPU: *resourceQuantity("100m"), corev1.ResourceMemory: *resourceQuantity("256Mi"),
-		}},
-	}
-	if len(pod.Spec.Containers) == 0 {
-		ops = append(ops, spec.Op{Op: "add", Path: "/spec/containers", Value: []corev1.Container{sidecar}})
-	} else {
-		ops = append(ops, spec.Op{Op: "add", Path: "/spec/containers/-", Value: sidecar})
-	}
-	if pod.Spec.ServiceAccountName == "" || pod.Spec.ServiceAccountName == "default" {
-		ops = append(ops, spec.Op{Op: "add", Path: "/spec/serviceAccountName", Value: SidecarServiceAccount})
-	}
-	return ops
 }
 
 // ── Dispatcher ──────────────────────────────────────────────────────────────────
