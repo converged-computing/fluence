@@ -11,11 +11,11 @@
 # queue position polling). Those require real AWS credentials and are covered
 # by sidecars/providers/braket/test/integration.sh which is run locally.
 set -euo pipefail
-HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE}/lib.sh"
+HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE%/test/e2e/*}/test/e2e/lib.sh"
 
 log "TEST 4: sidecar webhook — RBAC creation, gate injection, sidecar injection"
 
-kubectl apply -f examples/test/e2e/sidecar-mock-pods.yaml
+kubectl apply -f examples/test/e2e/quantum/sidecar-mock-pods.yaml
 
 # Give webhook time to process the leader pod admission
 sleep 3
@@ -85,4 +85,4 @@ log "      queue polling) is in sidecars/providers/braket/test/integration.sh"
 
 # Only clean up pods and PodGroup — RBAC is namespace infrastructure
 # that persists for future quantum workflows in this namespace
-kubectl delete -f examples/test/e2e/sidecar-mock-pods.yaml
+kubectl delete -f examples/test/e2e/quantum/sidecar-mock-pods.yaml

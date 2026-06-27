@@ -1,0 +1,109 @@
+# Reusable e2e workflow (workflow_call): shared setup (build image, kind, deploy
+# fluence base), then run ONE test suite — a directory under test/e2e/. The
+# suite's tests are DISCOVERED (every NN-*.sh, run in sorted order); adding a test
+# is just dropping a file in the directory, no workflow edit. If the suite needs
+# special preparation it provides a setup.sh in its directory, which is run before
+# the tests (the gang suite has none; the quantum suite installs the qpu add-on).
+name: e2e-suite
+on:
+  workflow_call:
+    inputs:
+      suite:
+        description: "test suite directory name under test/e2e/ (e.g. gang, quantum)"
+        required: true
+        type: string
+
+env:
+  IMAGE: vanessa/fluence:test
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build fluence image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create k8s Kind Cluster
+        uses: helm/kind-action@v1.10.0
+        with:
+          version: v0.32.0              # required for gang
+          node_image: kindest/node:v1.36.1
+          config: ./deploy/kind-config.yaml
+
+      - name: Free Disk Space (Ubuntu)
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL
+          sudo apt-get clean
+          df -h
+
+      - name: Load docker images
+        run: |
+          cluster=$(kind get clusters)
+          kind load --name "$cluster" docker-image ${{ env.IMAGE }}
+
+      - name: Deploy fluence (base)
+        run: |
+          kubectl apply -f deploy/fluence-test.yaml
+          kubectl rollout status -n kube-system deployment/fluence --timeout=180s
+          POD=""
+          for i in $(seq 1 60); do
+            POD=$(kubectl -n kube-system get pods -l app=fluence \
+              -o go-template='{{range .items}}{{if not .metadata.deletionTimestamp}}{{$name := .metadata.name}}{{range .status.conditions}}{{if and (eq .type "Ready") (eq .status "True")}}{{$name}}{{"\n"}}{{end}}{{end}}{{end}}{{end}}' 2>/dev/null | head -1 || true)
+            [ -n "$POD" ] && break
+            sleep 2
+          done
+          [ -n "$POD" ] || { echo "ERROR: no Ready non-terminating fluence pod"; kubectl -n kube-system get pods -l app=fluence -o wide; exit 1; }
+          echo "Using pod: $POD"
+          sleep 5
+          kubectl -n kube-system exec "$POD" -- /bin/bash -c "cat /tmp/fluence-graph-*.json" || true
+          kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{": cpu="}{.status.allocatable.cpu}{" mem="}{.status.allocatable.memory}{"\n"}{end}'
+
+      # Per-suite special setup, if the suite directory provides one.
+      - name: Suite setup (${{ inputs.suite }})
+        run: |
+          s="test/e2e/${{ inputs.suite }}/setup.sh"
+          if [ -f "$s" ]; then
+            echo "running $s"
+            bash "$s"
+          else
+            echo "no setup.sh for suite '${{ inputs.suite }}' — skipping"
+          fi
+
+      # Discover and run every NN-*.sh in the suite directory, in sorted order.
+      - name: Run suite (${{ inputs.suite }})
+        run: |
+          dir="test/e2e/${{ inputs.suite }}"
+          [ -d "$dir" ] || { echo "ERROR: no such suite dir: $dir"; exit 1; }
+          shopt -s nullglob
+          tests=("$dir"/[0-9]*.sh)
+          [ ${#tests[@]} -gt 0 ] || { echo "ERROR: no NN-*.sh tests in $dir"; exit 1; }
+          IFS=$'\n' tests=($(sort <<<"${tests[*]}")); unset IFS
+          echo "discovered ${#tests[@]} test(s) in $dir:"
+          printf '  %s\n' "${tests[@]}"
+          for t in "${tests[@]}"; do
+            echo "::group::$t"
+            bash "$t"
+            echo "::endgroup::"
+          done
+
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide
+          kubectl logs -n kube-system deployment/fluence || true
+          kubectl logs -n kube-system deployment/fluence-webhook || true

@@ -61,7 +61,6 @@ test-image-deploy: test-image
 .PHONY: test-deploy-recreate
 test-deploy-recreate: test-image-deploy
 	kubectl apply -f deploy/fluence-pull-test.yaml
-	kubectl apply -f deploy/device-plugin.yaml
 
 .PHONY: deploy
 deploy: ## Install RBAC + scheduler into kube-system

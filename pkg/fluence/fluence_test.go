@@ -354,10 +354,25 @@ func twoSpecs() []*jobspec.Jobspec {
 
 // --- PostFilter allocation reconciliation -----------------------------------
 
-// PostFilter must abandon a group's failed allocation: add the WHOLE cached node
-// set to the exclusion set, cancel the Fluxion jobids, and delete the cache, so
-// the next PreFilter re-matches onto untried nodes.
-func TestPostFilterAbandonsAndExcludesWholeNodeSet(t *testing.T) {
+// fakeNodeStatus is a minimal fwk.NodeToStatusReader for PostFilter tests: it
+// maps node name -> status code so a test can mark some nodes incompatible
+// (UnschedulableAndUnresolvable) and others merely busy (Unschedulable).
+type fakeNodeStatus map[string]fwk.Code
+
+func (s fakeNodeStatus) Get(node string) *fwk.Status {
+	if c, ok := s[node]; ok {
+		return fwk.NewStatus(c)
+	}
+	return nil
+}
+func (s fakeNodeStatus) NodesForStatusCode(fwk.NodeInfoLister, fwk.Code) ([]fwk.NodeInfo, error) {
+	return nil, nil
+}
+
+// PostFilter abandons the failed allocation (cancel jobids, drop cache) and
+// excludes ONLY genuinely-incompatible nodes (UnschedulableAndUnresolvable).
+// A node that was merely busy (plain Unschedulable) MUST stay eligible.
+func TestPostFilterExcludesOnlyIncompatibleNodes(t *testing.T) {
 	m := &fakeMatcher{}
 	f := newTestFluence(m)
 	key := "default/training"
@@ -367,53 +382,102 @@ func TestPostFilterAbandonsAndExcludesWholeNodeSet(t *testing.T) {
 	}
 	pod := groupedPod("default", "training-0", "training", nil)
 
-	_, status := f.PostFilter(context.Background(), nil, pod, nil)
-	if status == nil || status.Code() != fwk.Unschedulable {
-		t.Fatalf("expected Unschedulable status, got %v", status)
+	// node-a incompatible (taint); node-b busy; node-c survived Filter.
+	status := fakeNodeStatus{
+		"node-a": fwk.UnschedulableAndUnresolvable,
+		"node-b": fwk.Unschedulable,
+		"node-c": fwk.Success,
 	}
-	// cache cleared
+
+	_, st := f.PostFilter(context.Background(), nil, pod, status)
+	if st == nil || st.Code() != fwk.Unschedulable {
+		t.Fatalf("expected Unschedulable status, got %v", st)
+	}
 	if _, still := f.placement[key]; still {
 		t.Fatal("placement cache should be deleted after PostFilter")
 	}
-	// jobids cancelled
 	if len(m.cancelled) != 2 {
 		t.Fatalf("expected both jobids cancelled, got %v", m.cancelled)
 	}
-	// the WHOLE node set excluded
 	excl := f.excludedNodes[key]
-	for _, n := range []string{"node-a", "node-b", "node-c"} {
-		if !excl[n] {
-			t.Fatalf("expected %s excluded, set=%v", n, excl)
-		}
+	if !excl["node-a"] {
+		t.Fatalf("incompatible node-a should be excluded, set=%v", excl)
 	}
-	if len(excl) != 3 {
-		t.Fatalf("expected exactly 3 excluded nodes, got %v", excl)
+	if excl["node-b"] || excl["node-c"] {
+		t.Fatalf("busy/ok nodes must NOT be excluded (would strand a saturated gang), set=%v", excl)
+	}
+	if len(excl) != 1 {
+		t.Fatalf("expected exactly 1 excluded node, got %v", excl)
 	}
 }
 
-// Repeated failures accumulate monotonically: a second abandoned allocation adds
-// its nodes to the existing exclusion set (the set only grows -> convergence).
-func TestPostFilterAccumulatesAcrossAttempts(t *testing.T) {
+// A group blocked purely by contention (every node merely busy) excludes NOTHING
+// so it can retry the same nodes once they free — the saturated-cluster property.
+func TestPostFilterContentionExcludesNothing(t *testing.T) {
+	m := &fakeMatcher{}
+	f := newTestFluence(m)
+	key := "default/training"
+	f.placement[key] = groupAlloc{
+		place:  placement.Placement{Nodes: []string{"node-a", "node-b"}},
+		jobids: []uint64{1},
+	}
+	pod := groupedPod("default", "training-0", "training", nil)
+	status := fakeNodeStatus{"node-a": fwk.Unschedulable, "node-b": fwk.Unschedulable}
+
+	f.PostFilter(context.Background(), nil, pod, status)
+
+	if len(f.excludedNodes[key]) != 0 {
+		t.Fatalf("a purely-busy group must exclude no nodes, got %v", f.excludedNodes[key])
+	}
+	if _, still := f.placement[key]; still {
+		t.Fatal("placement cache should be deleted even when nothing is excluded")
+	}
+	if len(m.cancelled) != 1 {
+		t.Fatalf("expected the jobid cancelled, got %v", m.cancelled)
+	}
+}
+
+// A nil status map (e.g. all nodes filtered out upstream) must be safe and
+// exclude nothing rather than panic or ban the whole allocation.
+func TestPostFilterNilStatusMapExcludesNothing(t *testing.T) {
+	m := &fakeMatcher{}
+	f := newTestFluence(m)
+	key := "default/training"
+	f.placement[key] = groupAlloc{place: placement.Placement{Nodes: []string{"node-a", "node-b"}}, jobids: []uint64{7}}
+	pod := groupedPod("default", "training-0", "training", nil)
+
+	_, st := f.PostFilter(context.Background(), nil, pod, nil)
+	if st == nil || st.Code() != fwk.Unschedulable {
+		t.Fatalf("expected Unschedulable, got %v", st)
+	}
+	if len(f.excludedNodes[key]) != 0 {
+		t.Fatalf("nil status map must exclude nothing, got %v", f.excludedNodes[key])
+	}
+}
+
+// Incompatible nodes accumulate across attempts; busy ones never do.
+func TestPostFilterAccumulatesIncompatibleAcrossAttempts(t *testing.T) {
 	m := &fakeMatcher{}
 	f := newTestFluence(m)
 	key := "default/training"
 	pod := groupedPod("default", "training-0", "training", nil)
 
-	// attempt 1 fails on {a,b}
 	f.placement[key] = groupAlloc{place: placement.Placement{Nodes: []string{"node-a", "node-b"}}, jobids: []uint64{1}}
-	f.PostFilter(context.Background(), nil, pod, nil)
-	// attempt 2 (re-matched elsewhere) fails on {c,d}
+	f.PostFilter(context.Background(), nil, pod, fakeNodeStatus{"node-a": fwk.UnschedulableAndUnresolvable, "node-b": fwk.Unschedulable})
 	f.placement[key] = groupAlloc{place: placement.Placement{Nodes: []string{"node-c", "node-d"}}, jobids: []uint64{2}}
-	f.PostFilter(context.Background(), nil, pod, nil)
+	f.PostFilter(context.Background(), nil, pod, fakeNodeStatus{"node-c": fwk.UnschedulableAndUnresolvable, "node-d": fwk.Unschedulable})
 
 	excl := f.excludedNodes[key]
-	for _, n := range []string{"node-a", "node-b", "node-c", "node-d"} {
+	for _, n := range []string{"node-a", "node-c"} {
 		if !excl[n] {
-			t.Fatalf("expected %s in accumulated exclusion set, got %v", n, excl)
+			t.Fatalf("incompatible %s should accumulate, got %v", n, excl)
 		}
 	}
-	if len(excl) != 4 {
-		t.Fatalf("exclusion set should accumulate to 4, got %v", excl)
+	if excl["node-b"] || excl["node-d"] {
+		t.Fatalf("busy nodes must never accumulate, got %v", excl)
+	}
+	if len(excl) != 2 {
+		t.Fatalf("exclusion set should be the 2 incompatible nodes, got %v", excl)
 	}
 }
 
@@ -449,5 +513,43 @@ func TestCancelGroupClearsExclusions(t *testing.T) {
 
 	if _, still := f.excludedNodes[key]; still {
 		t.Fatal("exclusion set should be cleared on teardown")
+	}
+}
+
+// schedulableNodes must drop control-plane (NoSchedule taint), NoExecute-tainted,
+// and cordoned nodes, keeping only nodes a normal gang pod can actually land on.
+// This keeps the Fluxion graph from offering nodes Kubernetes will reject in
+// Filter (which, with whole-allocation PostFilter exclusion, strands the gang).
+func TestSchedulableNodesDropsTaintedAndCordoned(t *testing.T) {
+	node := func(name string, unsched bool, effects ...corev1.TaintEffect) corev1.Node {
+		n := corev1.Node{}
+		n.Name = name
+		n.Spec.Unschedulable = unsched
+		for _, e := range effects {
+			n.Spec.Taints = append(n.Spec.Taints, corev1.Taint{Key: "k", Effect: e})
+		}
+		return n
+	}
+	in := []corev1.Node{
+		node("worker-1", false),
+		node("worker-2", false),
+		node("control-plane", false, corev1.TaintEffectNoSchedule),
+		node("draining", false, corev1.TaintEffectNoExecute),
+		node("cordoned", true),
+		node("prefer-only", false, corev1.TaintEffectPreferNoSchedule), // soft taint: keep
+	}
+	got := schedulableNodes(in)
+	gotNames := map[string]bool{}
+	for _, n := range got {
+		gotNames[n.Name] = true
+	}
+	want := []string{"worker-1", "worker-2", "prefer-only"}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d schedulable nodes %v, got %d %v", len(want), want, len(got), gotNames)
+	}
+	for _, w := range want {
+		if !gotNames[w] {
+			t.Fatalf("expected %s kept, got set %v", w, gotNames)
+		}
 	}
 }

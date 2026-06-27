@@ -1,9 +1,9 @@
-# Requeue-on-capacity test for EventsToRegister.
+# Requeue-on-capacity + gang-atomicity test (test/e2e/gang/09).
 # gang-win: a 2-pod gang that runs a SHORT job and COMPLETES (pods -> Succeeded),
-#           freeing its nodes. Pod completion is the capacity-free event.
+#           freeing its nodes.
 # gang-wait: a 2-pod gang needing the same nodes; loses the initial race and sits
-#            Unschedulable. When gang-win completes, fluence's QueueingHint must
-#            wake gang-wait so it schedules and runs — with NO manual nudge.
+#            Unschedulable. When gang-win completes, gang-wait must be re-attempted
+#            (via the shortened unschedulable-recheck timeout) and place atomically.
 # On a 3-worker (~3-core) cluster the two 2-pod gangs (4 cores) cannot co-run.
 apiVersion: batch/v1
 kind: Job

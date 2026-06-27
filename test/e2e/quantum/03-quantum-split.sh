@@ -6,10 +6,10 @@
 # group, makes quantum gangs work. (The runtime ungate is covered by 04; here we
 # prove the group SPLIT the ungate path depends on.)
 set -euo pipefail
-HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE}/lib.sh"
+HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE%/test/e2e/*}/test/e2e/lib.sh"
 
 log "TEST 7: quantum two-group split (leader=1, workers=N-1)"
-kubectl apply -f examples/test/e2e/quantum-split-pods.yaml
+kubectl apply -f examples/test/e2e/quantum/quantum-split-pods.yaml
 
 # leader PodGroup <group> must exist with minCount 1
 log "checking leader group 'qsplit' minCount == 1"
@@ -47,7 +47,7 @@ base="$(kubectl get pod qsplit-leader -o jsonpath='{range .spec.containers[*]}{r
 [ -n "$base" ] || fail "leader sidecar missing FLUENCE_WORKER_GROUP_BASE (sidecar would look in the wrong group and never ungate)"
 
 log "PASS 7: quantum gang split into leader(1) + workers(N-1), relinked + gated"
-kubectl delete -f examples/test/e2e/quantum-split-pods.yaml --wait=false || true
+kubectl delete -f examples/test/e2e/quantum/quantum-split-pods.yaml --wait=false || true
 for g in qsplit qsplit-workers; do
   kubectl patch podgroup $g --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
 done

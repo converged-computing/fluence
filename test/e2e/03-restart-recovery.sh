@@ -9,7 +9,7 @@ ANN="fluence.flux-framework.org/backend"
 log "TEST 3: restart does not double-book an exclusive backend"
 
 # 1. Schedule the first qpu pod and capture its backend.
-kubectl apply -f examples/test/e2e/quantum-pod-mock.yaml
+kubectl apply -f examples/test/e2e/quantum/quantum-pod-mock.yaml
 wait_pod_phase sampler-mock "$NS" Running 120 || fail "sampler-mock did not reach Running"
 backend="$(kubectl get pod sampler-mock -n "$NS" -o jsonpath="{.metadata.annotations.${ANN//./\\.}}" 2>/dev/null || true)"
 [ -n "$backend" ] || fail "first pod has no backend annotation"
@@ -26,7 +26,7 @@ wait_pod_phase sampler-mock "$NS" Running 30 || fail "first pod not Running afte
 
 # 4. A second pod requesting the same exclusive qpu must NOT get the same backend.
 #    If recovery worked, the backend is occupied and the second pod stays Pending.
-kubectl apply -f examples/test/e2e/quantum-pod-mock-2.yaml
+kubectl apply -f examples/test/e2e/quantum/quantum-pod-mock-2.yaml
 if assert_stays_pending sampler-mock-2 "$NS" 45; then
   log "PASS: second qpu pod stayed Pending; backend '$backend' was not double-booked"
 else
@@ -38,5 +38,5 @@ else
   fi
 fi
 
-kubectl delete -f examples/test/e2e/quantum-pod-mock-2.yaml --wait=false || true
-kubectl delete -f examples/test/e2e/quantum-pod-mock.yaml --wait=false || true
+kubectl delete -f examples/test/e2e/quantum/quantum-pod-mock-2.yaml --wait=false || true
+kubectl delete -f examples/test/e2e/quantum/quantum-pod-mock.yaml --wait=false || true

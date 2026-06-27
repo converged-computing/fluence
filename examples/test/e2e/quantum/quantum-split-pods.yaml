@@ -12,7 +12,6 @@ metadata:
     fluence.flux-framework.org/group: qsplit
   annotations:
     fluence.flux-framework.org/role: leader
-    fluence.flux-framework.org/group-size: "3"
 spec:
   schedulerName: fluence
   restartPolicy: Never
@@ -29,7 +28,7 @@ kind: Pod
 metadata:
   name: qsplit-worker-0
   labels: {app: qsplit, fluence.flux-framework.org/group: qsplit}
-  annotations: {fluence.flux-framework.org/role: worker, fluence.flux-framework.org/group-size: "3"}
+  annotations: {fluence.flux-framework.org/role: worker, fluence.flux-framework.org/group-size: "2"}
 spec:
   schedulerName: fluence
   restartPolicy: Never
@@ -37,14 +36,14 @@ spec:
     - name: w
       image: busybox
       command: ["sh","-c","echo worker; sleep 30"]
-      resources: {requests: {cpu: "100m"}}
+      resources: {requests: {cpu: "1"}}
 ---
 apiVersion: v1
 kind: Pod
 metadata:
   name: qsplit-worker-1
   labels: {app: qsplit, fluence.flux-framework.org/group: qsplit}
-  annotations: {fluence.flux-framework.org/role: worker, fluence.flux-framework.org/group-size: "3"}
+  annotations: {fluence.flux-framework.org/role: worker}
 spec:
   schedulerName: fluence
   restartPolicy: Never
@@ -52,4 +51,4 @@ spec:
     - name: w
       image: busybox
       command: ["sh","-c","echo worker; sleep 30"]
-      resources: {requests: {cpu: "100m"}}
+      resources: {requests: {cpu: "1"}}

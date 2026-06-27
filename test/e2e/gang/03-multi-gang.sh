@@ -5,11 +5,11 @@
 #   B) under contention, a gang that cannot fully fit stays ENTIRELY pending —
 #      never partially placed (no stranded pods holding nodes).
 set -euo pipefail
-HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE}/lib.sh"
+HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE%/test/e2e/*}/test/e2e/lib.sh"
 
 # ---- A) all-or-nothing placement of a 3-pod gang -------------------------------
 log "TEST 6A: multi-pod gang (3) places all-or-nothing"
-kubectl apply -f examples/multi-gang.yaml
+kubectl apply -f examples/test/e2e/gang/multi-gang.yaml
 
 # the webhook must have created the PodGroup with minCount = 3 (the bug set it to 1)
 log "checking PodGroup minCount == 3 (set by webhook from group-size)"
@@ -31,13 +31,13 @@ for p in $(kubectl get pods -l app=gang3 -o name); do
 done
 log "PASS 6A: 3-pod gang placed atomically by fluence (minCount=3)"
 
-kubectl delete -f examples/multi-gang.yaml --wait=false || true
+kubectl delete -f examples/test/e2e/gang/multi-gang.yaml --wait=false || true
 kubectl patch podgroup gang3 --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
 kubectl wait --for=delete pod -l app=gang3 --timeout=60s 2>/dev/null || true
 
 # ---- B) contention: the gang that can't fully fit stays ENTIRELY pending --------
 log "TEST 6B: contention — a gang that cannot fully fit must NOT partially place"
-kubectl apply -f examples/multi-gang-contention.yaml
+kubectl apply -f examples/test/e2e/gang/multi-gang-contention.yaml
 
 # wait until the cluster settles. Three possible outcomes:
 #   - one gang fully Running, other fully Pending  -> contention; assert no partial
@@ -66,7 +66,7 @@ else
   log "PASS 6B: $loser stayed entirely pending — no partial placement under contention"
 fi
 
-kubectl delete -f examples/multi-gang-contention.yaml --wait=false || true
+kubectl delete -f examples/test/e2e/gang/multi-gang-contention.yaml --wait=false || true
 for g in gang-a gang-b; do
   kubectl patch podgroup $g --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
 done
