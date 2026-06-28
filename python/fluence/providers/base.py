@@ -79,6 +79,22 @@ class Provider:
         found or timeout. Returns an opaque Task or None."""
         raise NotImplementedError
 
+    def find_my_tasks(self, pod_uid: str, backend: str, timeout: int,
+                      n: int) -> "list[Task]":
+        """BATCH mode: the producer submitted N tasks, all tagged
+        TAG_KEY=<pod_uid>. Return them as a list. Order and identity are
+        irrelevant -- the gated workers come from one template and are
+        interchangeable, so each result is assigned to whichever worker is free
+        when it completes. No per-slot tag and no Job completion index are
+        required, so this works for ANY gang abstraction (indexed Job,
+        ReplicaSet/Deployment, StatefulSet, or loose label-grouped pods).
+
+        Vendors override this to list their tagged submissions. The default
+        raises, so a provider without batch support fails loudly rather than
+        silently stranding the gang."""
+        raise NotImplementedError(
+            f"{self.name} provider does not implement find_my_tasks (batch mode)")
+
     def is_ready_to_ungate(self, task: "Task") -> bool:
         """True when the gang should be ungated — queue position == 1 or the task
         is already RUNNING/terminal. Always implementable."""
