@@ -28,7 +28,8 @@ import time
 
 from fluence.providers import resolve_from_env
 from fluence.providers.base import log
-from fluence.ungate import ungate_pods, gated_pods_from_env, namespace_from_env, wait_for_gated_pods
+from fluence.ungate import (ungate_pods, gated_pods_from_env, namespace_from_env,
+                            wait_for_gated_pods, ungate_per_result)
 
 
 
@@ -76,6 +77,24 @@ def main():
         log("ERROR: could not resolve a quantum provider from the backend")
         sys.exit(1)
     log(f"resolved provider: {provider.name}")
+
+    # BATCH mode: the producer submitted N tasks (one per slot); release each
+    # gated consumer the moment ITS task completes, keyed by slot. Same gate
+    # primitive as shared, fired per-result instead of broadcast.
+    mode = os.environ.get("FLUENCE_COORDINATION_MODE", "shared")
+    if mode == "batch" and not observe:
+        gang_size = int(os.environ.get("FLUENCE_GANG_SIZE", "0"))
+        tasks = provider.find_my_tasks(pod_uid, backend, discovery_timeout, gang_size)
+        log(f"batch mode: discovered {len(tasks)} task(s) from {gang_size}-pod gang")
+        # No completion-index assumption: the workers are interchangeable, so just
+        # find the gated members and hand each a result as it completes.
+        gated = gated_pods_from_env() or wait_for_gated_pods(
+            namespace, gang_group, exclude=pod_name, timeout=ungate_timeout)
+        log(f"batch mode: {len(gated)} gated worker(s): {gated}")
+        n_ok = ungate_per_result(provider, tasks, gated, namespace,
+                                 poll_interval=poll_interval, timeout=ungate_timeout)
+        log(f"batch done — {n_ok} worker(s) released per-result")
+        return
 
     task = provider.find_my_task(pod_uid, backend, discovery_timeout)
     if task is None:

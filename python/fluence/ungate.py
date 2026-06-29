@@ -28,48 +28,93 @@ def kubectl(args):
     return result.stdout.strip()
 
 
-def ungate_pods(gated_pods, job_id, namespace):
+def ungate_one(pod_name, job_id, namespace):
+    """Ungate a SINGLE gated pod: stamp its (own) job-id annotation so it can
+    locate its quantum result, then remove the scheduling gate. Returns True on
+    a successful gate removal. See the priorityClassName note below.
+
+    priorityClassName is NOT set here -- it is immutable after pod creation, so
+    the webhook must set it at admission. Setting it in this patch made the whole
+    patch fail atomically, leaving the pod gated.
     """
-    For each gated worker pod:
-      1. Stamp the vendor-neutral job-id annotation so the worker can locate
-         the quantum result.
-      2. Remove the scheduling gate so the pod can be scheduled.
+    pod_name = (pod_name or "").strip()
+    if not pod_name:
+        return False
+    log(f"ungating pod: {pod_name}")
 
-    NOTE: priorityClassName is NOT set here — it is immutable after pod creation
-    (the API server forbids changing any spec field but image/tolerations/
-    activeDeadlineSeconds/terminationGracePeriodSeconds on an existing pod). If a
-    priority class is wanted on the classical gang, the webhook must set it at
-    admission, when the pod is created. Setting it in the ungate patch made the
-    whole patch fail atomically, so the gate was never removed and workers stayed
-    gated.
-    """
-    ok = 0
-    for pod_name in gated_pods:
-        pod_name = pod_name.strip()
-        if not pod_name:
-            continue
-        log(f"ungating pod: {pod_name}")
-
-        if job_id:
-            try:
-                kubectl(["annotate", "pod", pod_name, "-n", namespace,
-                         f"{JOB_ID_ANNOTATION}={job_id}", "--overwrite"])
-                log(f"  patched job id onto {pod_name}: {job_id}")
-            except RuntimeError as e:
-                log(f"  WARNING: could not annotate {pod_name}: {e}")
-        else:
-            log(f"  WARNING: no job id to patch onto {pod_name}")
-
-        patch = json.dumps([
-            {"op": "remove", "path": "/spec/schedulingGates/0"},
-        ])
+    if job_id:
         try:
-            kubectl(["patch", "pod", pod_name, "-n", namespace,
-                     "--type=json", f"-p={patch}"])
-            log(f"  removed gate from {pod_name}")
-            ok += 1
+            kubectl(["annotate", "pod", pod_name, "-n", namespace,
+                     f"{JOB_ID_ANNOTATION}={job_id}", "--overwrite"])
+            log(f"  patched job id onto {pod_name}: {job_id}")
         except RuntimeError as e:
-            log(f"  WARNING: could not patch {pod_name}: {e}")
+            log(f"  WARNING: could not annotate {pod_name}: {e}")
+    else:
+        log(f"  WARNING: no job id to patch onto {pod_name}")
+
+    patch = json.dumps([{"op": "remove", "path": "/spec/schedulingGates/0"}])
+    try:
+        kubectl(["patch", "pod", pod_name, "-n", namespace, "--type=json", f"-p={patch}"])
+        log(f"  removed gate from {pod_name}")
+        return True
+    except RuntimeError as e:
+        log(f"  WARNING: could not patch {pod_name}: {e}")
+        return False
+
+
+def ungate_pods(gated_pods, job_id, namespace):
+    """SHARED mode: one quantum result is shared by the whole gang, so broadcast
+    the same job_id to every gated pod and remove all gates together."""
+    return sum(1 for p in gated_pods if ungate_one(p, job_id, namespace))
+
+
+def ungate_per_result(provider, tasks, gated_pods, namespace, poll_interval=10,
+                      timeout=3600, _sleep=time.sleep):
+    """BATCH mode: the producer submitted N tasks; release each gated worker the
+    moment ANY task completes -- assigning that task's result to whichever worker
+    is still free.
+
+      tasks       : list of provider Tasks (the producer's N submissions)
+      gated_pods  : list of gated worker pod names (the gang minus the producer)
+
+    Workers come from one template and are interchangeable, so there is no slot
+    or completion-index mapping -- we never assume the gang is an indexed Job.
+    A worker is ungated with the job_id of whatever task finished, as it finishes.
+    Out-of-order completion is fine, and so is heterogeneous task duration: the
+    first result out wakes the first worker, and so on. We assign at most one task
+    per worker; any surplus tasks (e.g. the producer's own share) are left for the
+    producer. Returns the count of workers released.
+
+    This is the only K8s-side difference from shared mode: the same gate
+    primitive, fired per-result and matched to a free worker, instead of one
+    shared id broadcast to all.
+    """
+    pending = list(tasks)
+    free = [p for p in (gated_pods or []) if p]
+    ok = 0
+    deadline = time.time() + timeout
+    while pending and free and time.time() < deadline:
+        progressed = False
+        for task in list(pending):
+            if not free:
+                break
+            try:
+                if provider.is_ready_to_ungate(task):
+                    jid = provider.job_id(task)
+                    pod = free.pop(0)
+                    if ungate_one(pod, jid, namespace):
+                        ok += 1
+                    log(f"task ready (job_id={jid}) -> released worker {pod}")
+                    pending.remove(task)
+                    progressed = True
+            except Exception as e:  # noqa: BLE001 - keep polling the other tasks
+                log(f"poll error (will retry): {e}")
+        if free and pending and not progressed:
+            _sleep(poll_interval)
+    if free:
+        log(f"WARNING: {len(free)} worker(s) never received a result before timeout: {free}")
+    elif pending:
+        log(f"{len(pending)} task(s) not assigned to a worker (left for the producer)")
     return ok
 
 

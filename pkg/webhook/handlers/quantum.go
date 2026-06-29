@@ -81,6 +81,18 @@ const (
 	// for, and never dedup tasks meant to be distinct.
 	CoordinationIndependent = "independent"
 
+	// CoordinationBatch (brokered): one broker (index 0) submits ALL N tasks to
+	// the same vendor queue, recording slot i -> task id_i. Each worker is gated
+	// and ungated with ITS OWN id_i the moment task_i COMPLETES (per-result, not
+	// broadcast). The broker holds the only node during the long vendor wait;
+	// workers materialize just-in-time to post-process. This is the shared
+	// machinery generalized from one shared result to N per-slot results -- it
+	// trades a little worker-startup latency for a large node-time saving, since
+	// N-1 workers no longer squat nodes through the queue wait. Submitting from
+	// one pod (vs N) also lets the broker throttle to the vendor concurrency cap;
+	// results returning out of order is a non-issue (each keyed to its slot id).
+	CoordinationBatch = "batch"
+
 	// ProducerGroupSuffix names the producer's own group-of-one: <group>-producer
 	// (minCount 1) so it schedules alone and never deadlocks against the gated
 	// consumer gang.
@@ -125,7 +137,7 @@ func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *
 	// member. The REAL submit happens in THIS pod; the sidecar is added only for
 	// observe-only telemetry. (independent mode routes every member here -> N
 	// standalone producers, each owning its task and its own queue wait.)
-	if mode != CoordinationShared || g == "" || n <= 1 {
+	if (mode != CoordinationShared && mode != CoordinationBatch) || g == "" || n <= 1 {
 		ops := interceptorOps(pod)
 		if observe {
 			sc := sidecarFor(m)
@@ -137,11 +149,14 @@ func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *
 		return ops
 	}
 
-	// shared mode: promote one member to producer; the rest are gated consumers.
+	// shared / batch: same two roles. Promote one member to producer (index 0),
+	// the rest are gated consumers. The mode (shared|batch) rides along and
+	// decides the producer's submit fan-out and the sidecar's ungate strategy --
+	// it does NOT create new roles.
 	if isProducer(ctx, m, pod, g) {
-		return h.mutateProducer(ctx, m, pod, g)
+		return h.mutateProducer(ctx, m, pod, g, mode, n)
 	}
-	return h.mutateConsumer(ctx, m, pod, g, n)
+	return h.mutateConsumer(ctx, m, pod, g, n, mode)
 }
 
 // mutateProducer wires the single producer member (indexed-Job completion index
@@ -149,18 +164,28 @@ func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *
 // and runs the REAL submit, the interceptor in tag mode, RBAC, and the sidecar
 // told which consumer group to ungate (FLUENCE_GANG_GROUP). The producer is one
 // of the N members, so the application is NOT run an extra time. Never gated.
-func (h *quantumHandler) mutateProducer(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string) []spec.Op {
+func (h *quantumHandler) mutateProducer(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group, mode string, n int32) []spec.Op {
 	pg := group + ProducerGroupSuffix
 	m.EnsurePodGroup(ctx, pod.Namespace, pg, pod.Name, 1)
 	ops := linkGroupOps(pod, pg)
 	ops = append(ops, interceptorOps(pod)...)           // tag mode: the producer submits for real
 	ops = append(ops, roleEnvOps(pod, RoleProducer)...) // FLUENCE_COORDINATION_ROLE=producer
+	ops = append(ops, modeEnvOps(pod, mode)...)          // shared|batch: the producer's submit fan-out
+	// the producer's workload needs N (in batch it submits N tasks).
+	ops = append(ops, setContainerEnvOps(pod, corev1.EnvVar{Name: GangSizeEnv, Value: strconv.Itoa(int(n))})...)
 	sc := sidecarFor(m)
 	sc.EnsureRBAC(ctx, pod.Namespace)
-	extra := []corev1.EnvVar{{Name: GangGroupEnv, Value: group}}
+	// The sidecar needs the gang group (whom to ungate), the mode (broadcast one
+	// id vs release each consumer by its own per-slot result), and N (in batch,
+	// the number of tasks/slots to map).
+	extra := []corev1.EnvVar{
+		{Name: GangGroupEnv, Value: group},
+		{Name: CoordinationModeEnv, Value: mode},
+		{Name: GangSizeEnv, Value: strconv.Itoa(int(n))},
+	}
 	ops = append(ops, sc.ContainerOps(pod, false, extra)...)
-	log.Printf("[fluence-webhook] quantum producer %s/%s — group %s (ungates consumers %q)",
-		pod.Namespace, pod.Name, pg, group)
+	log.Printf("[fluence-webhook] quantum producer %s/%s — group %s, mode=%s, N=%d (ungates consumers %q)",
+		pod.Namespace, pod.Name, pg, mode, n, group)
 	return ops
 }
 
@@ -171,7 +196,7 @@ func (h *quantumHandler) mutateProducer(ctx context.Context, m webhook.MutatorAP
 // role-aware consumer reads those and fetches the shared result instead of
 // submitting — so the consumer never calls the vendor submit, and needs neither
 // the interceptor nor a faux flag.
-func (h *quantumHandler) mutateConsumer(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string, n int32) []spec.Op {
+func (h *quantumHandler) mutateConsumer(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string, n int32, mode string) []spec.Op {
 	m.EnsurePodGroup(ctx, pod.Namespace, group, pod.Name, n-1)
 	ops := linkGroupOps(pod, group)
 	// Express the wait as the GENERAL dependency primitive: this consumer depends
@@ -180,6 +205,7 @@ func (h *quantumHandler) mutateConsumer(ctx context.Context, m webhook.MutatorAP
 	dep := Dependency{Kind: DependencyKindQuantumSubmit, Producer: group + ProducerGroupSuffix, Gate: QuantumGate}
 	ops = append(ops, dep.applyOps(pod)...)
 	ops = append(ops, consumerEnvOps(pod)...)
+	ops = append(ops, modeEnvOps(pod, mode)...) // shared|batch: how the sidecar releases this consumer
 	// A gated consumer never runs the QPU task — it only fetches the producer's
 	// shared result — so it must not hold the Fluxion quantum resource. Leaving it
 	// would make Fluxion allocate a qpu per consumer, capping the gang at the
@@ -383,6 +409,16 @@ const (
 	RoleProducer        = "producer"
 	RoleConsumer        = "consumer"
 
+	// CoordinationModeEnv carries the coordination mode (shared|batch) to the
+	// workload and the sidecar. Roles are unchanged across modes -- the producer
+	// (index 0) always submits and runs the sidecar; consumers are always gated.
+	// Only WHAT the producer submits (one task vs N) and HOW the sidecar ungates
+	// (one shared id broadcast vs each consumer released by its own per-slot
+	// result) differ, and that is exactly what this mode selects.
+	CoordinationModeEnv = "FLUENCE_COORDINATION_MODE"
+	// GangSizeEnv tells the producer the gang size N (in batch it submits N).
+	GangSizeEnv = "FLUENCE_GANG_SIZE"
+
 	// QuantumJobIDAnnotation is the vendor-neutral task id the ungating sidecar
 	// stamps on each consumer (mirrors python/fluence/ungate.py JOB_ID_ANNOTATION),
 	// BEFORE removing the gate. Surfaced into FLUENCE_QUANTUM_JOB_ID via the
@@ -406,6 +442,11 @@ func consumerEnvOps(pod *corev1.Pod) []spec.Op {
 	ops := roleEnvOps(pod, RoleConsumer)
 	ops = append(ops, setContainerEnvOps(pod, spec.AnnotationEnv(QuantumJobIDEnv, QuantumJobIDAnnotation))...)
 	return ops
+}
+
+// modeEnvOps sets FLUENCE_COORDINATION_MODE=<mode> on each non-sidecar container.
+func modeEnvOps(pod *corev1.Pod, mode string) []spec.Op {
+	return setContainerEnvOps(pod, corev1.EnvVar{Name: CoordinationModeEnv, Value: mode})
 }
 
 // setContainerEnvOps appends env var e to every non-sidecar container that does
