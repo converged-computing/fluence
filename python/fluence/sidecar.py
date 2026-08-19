@@ -18,6 +18,8 @@ Environment (injected by the Fluence webhook):
   FLUXION_BACKEND / FLUXION_VENDOR  scheduler-chosen backend / vendor
   FLUENCE_TASK_DISCOVERY_TIMEOUT  seconds to wait for discovery (default 300)
   FLUENCE_POLL_INTERVAL           seconds between polls (default 30)
+  FLUENCE_UNGATE_POSITION         ungate at this queue position or closer
+                                  (default 1, next in line)
 """
 
 from __future__ import annotations
@@ -27,20 +29,24 @@ import sys
 import time
 
 from fluence.providers import resolve_from_env
-from fluence.providers.base import log
+from fluence.providers.base import log, ungate_position
 from fluence.ungate import ungate_pods, gated_pods_from_env, namespace_from_env, wait_for_gated_pods
 
 
 
-def _poll(provider, task, poll_interval, ungate):
+def _poll(provider, task, poll_interval, ungate, position=1):
+    """Poll until the task is ready or has failed. True when ready."""
     mode = "gang" if ungate else "observe-only"
-    log(f"{mode} mode: polling queue position")
+    log(f"{mode} mode: polling queue position, ungating at {position} or closer")
     last = object()
     while True:
         try:
-            if provider.is_ready_to_ungate(task):
+            if provider.task_failed(task):
+                log("ERROR: task reached a terminal state with no result")
+                return False
+            if provider.is_ready_to_ungate(task, position):
                 log(f"task ready (position={provider.queue_position(task)})")
-                return
+                return True
             pos = provider.queue_position(task)
             if pos != last:
                 log(f"queue position: {pos}")
@@ -64,6 +70,7 @@ def main():
     discovery_timeout = int(os.environ.get("FLUENCE_TASK_DISCOVERY_TIMEOUT", 300))
     poll_interval = int(os.environ.get("FLUENCE_POLL_INTERVAL", 30))
     ungate_timeout = int(os.environ.get("FLUENCE_UNGATE_TIMEOUT", 120))
+    ungate_at = ungate_position()
 
     namespace = namespace_from_env()
 
@@ -90,11 +97,22 @@ def main():
     job_id = provider.job_id(task)
     log(f"discovered task, job_id={job_id}")
 
-    _poll(provider, task, poll_interval, ungate=not observe)
+    ready = _poll(provider, task, poll_interval, ungate=not observe,
+                  position=ungate_at)
 
     if observe:
         log("observe-only run complete")
-        return
+        sys.exit(0 if ready else 1)
+
+    if not ready:
+        # fail open like a discovery failure does, so the gang is not stranded.
+        # The pods find no result and exit, and we exit non zero so it shows
+        log("ERROR: ungating anyway so the gang is not stranded, but the task "
+            "produced no result")
+        ungate_pods(gated_pods_from_env() or wait_for_gated_pods(
+            namespace, gang_group, exclude=pod_name, timeout=ungate_timeout),
+            job_id, namespace)
+        sys.exit(1)
 
     # Ungate the gang: discover the gated pods in the gang group and remove their
     # gate, stamping the job-id so each can fetch results by id. The gang pods are

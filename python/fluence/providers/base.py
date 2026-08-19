@@ -31,6 +31,26 @@ from datetime import datetime, timezone
 TAG_KEY = "fluence-pod-uid"
 
 
+def ungate_position(default=1):
+    """Queue position we ungate at. One means next in line."""
+    try:
+        return int(os.environ.get("FLUENCE_UNGATE_POSITION", default))
+    except ValueError:
+        return default
+
+
+def position_at_most(pos, threshold):
+    """True when the queue position is at or under threshold.
+
+    Braket reports anything over 2000 as the string >2000, so a position that
+    is not a number counts as far away.
+    """
+    try:
+        return int(pos) <= int(threshold)
+    except (TypeError, ValueError):
+        return False
+
+
 def log(msg: str) -> None:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     print(f"[fluence] {ts} {msg}", flush=True)
@@ -79,10 +99,20 @@ class Provider:
         found or timeout. Returns an opaque Task or None."""
         raise NotImplementedError
 
-    def is_ready_to_ungate(self, task: "Task") -> bool:
-        """True when the gang should be ungated — queue position == 1 or the task
-        is already RUNNING/terminal. Always implementable."""
+    def is_ready_to_ungate(self, task: "Task", position=None) -> bool:
+        """True when the gang should be ungated.
+
+        Either the queue position is at or under position, or the task already
+        left the queue and can still return a result. Ungating earlier gives
+        the gang time to start up, so raise position when it is slow.
+        """
         raise NotImplementedError
+
+    def task_failed(self, task: "Task") -> bool:
+        """True when the task ended with no result, so there is nothing to
+        fetch. Defaults to False for vendors that cannot tell.
+        """
+        return False
 
     def queue_position(self, task: "Task") -> "int | None":
         """Optional richer telemetry: integer queue position (1 == next), or None
