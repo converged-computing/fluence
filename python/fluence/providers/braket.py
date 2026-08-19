@@ -16,7 +16,15 @@ from __future__ import annotations
 import os
 import time
 
-from fluence.providers.base import Provider, Task, TAG_KEY, log, register
+from fluence.providers.base import (
+    Provider,
+    Task,
+    TAG_KEY,
+    log,
+    position_at_most,
+    register,
+    ungate_position,
+)
 
 
 class BraketTask(Task):
@@ -210,12 +218,22 @@ class BraketProvider(Provider):
         from braket.aws import AwsQuantumTask
         return AwsQuantumTask(arn=task.arn)
 
-    def is_ready_to_ungate(self, task: BraketTask) -> bool:
+    def is_ready_to_ungate(self, task: BraketTask, position=None) -> bool:
         t = self._aws_task(task)
-        if t.state() in ("RUNNING", "COMPLETED", "FAILED", "CANCELLED"):
+        # a task that left the queue reports no position, so this is how we
+        # notice we missed the window
+        if t.state() in ("RUNNING", "COMPLETED"):
             return True
+        if position is None:
+            position = ungate_position()
         try:
-            return str(t.queue_position().queue_position) == "1"
+            return position_at_most(t.queue_position().queue_position, position)
+        except Exception:
+            return False
+
+    def task_failed(self, task: BraketTask) -> bool:
+        try:
+            return self._aws_task(task).state() in ("FAILED", "CANCELLED")
         except Exception:
             return False
 
