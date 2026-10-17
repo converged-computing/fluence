@@ -1,4 +1,7 @@
-FROM ghcr.io/converged-computing/fluence-base:latest AS builder
+# The base carries flux-sched and Go. CI passes the base it built in the same
+# run, for the same architecture, so the two never drift.
+ARG BASE_IMAGE=ghcr.io/converged-computing/fluence-base:latest
+FROM ${BASE_IMAGE} AS builder
 
 WORKDIR /src
 COPY go.mod go.sum* ./

@@ -200,6 +200,9 @@ spec:
             # admission control is on by default. Set to off here to disable it
             - name: FLUENCE_ADMISSION
               value: "on"
+            # the image staged into quantum pods for the interceptor, built for amd64 and arm64
+            - name: FLUENCE_SIDECAR_IMAGE
+              value: ghcr.io/converged-computing/fluence-sidecar:latest
           ports:
             - containerPort: 8443
           readinessProbe:

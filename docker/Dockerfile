@@ -13,9 +13,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-yaml ninja-build cmake curl git wget ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-# Go toolchain
-RUN wget -q https://go.dev/dl/go1.26.0.linux-amd64.tar.gz \
- && tar -C /usr/local -xzf go1.26.0.linux-amd64.tar.gz && rm go1.26.0.linux-amd64.tar.gz
+# Go toolchain, for the architecture being built. buildx sets TARGETARCH
+# (amd64 or arm64) per platform. A plain docker build gets the host architecture.
+ARG TARGETARCH
+RUN arch="${TARGETARCH:-$(dpkg --print-architecture)}" \
+ && wget -q "https://go.dev/dl/go1.26.0.linux-${arch}.tar.gz" \
+ && tar -C /usr/local -xzf "go1.26.0.linux-${arch}.tar.gz" && rm "go1.26.0.linux-${arch}.tar.gz"
 ENV PATH=$PATH:/usr/local/go/bin
 
 RUN wget https://github.com/flux-framework/flux-sched/releases/download/v0.52.0/flux-sched-0.52.0.tar.gz && \
