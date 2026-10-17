@@ -9,8 +9,10 @@ LABEL org.opencontainers.image.description="Fluence quantum coordination sidecar
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-# kubectl for the ungate step.
-RUN curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+# kubectl for the ungate step, for the architecture being built
+ARG TARGETARCH
+RUN arch="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && curl -LO "https://dl.k8s.io/release/$(curl -Ls https://dl.k8s.io/release/stable.txt)/bin/linux/${arch}/kubectl" \
     && chmod +x kubectl && mv kubectl /usr/local/bin/
 
 WORKDIR /app
