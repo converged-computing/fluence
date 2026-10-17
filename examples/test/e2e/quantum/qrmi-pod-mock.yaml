@@ -1,0 +1,33 @@
+# CI mock for the QRMI/IBM standalone path (cf. examples/quantum-pod.yaml, which
+# runs the real qrmi-sampler). Requests the same fluxion.flux-framework.org/qpu
+# resource so fluence matches an IBM backend and the webhook injects
+# FLUXION_BACKEND + FLUXION_QRMI_TYPE, plus the writable handoff volume and
+# FLUENCE_HANDOFF_DIR.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: qrmi-sampler-mock
+  annotations:
+    fluence.flux-framework.org/require-qrmi_type: qiskit-runtime-service
+spec:
+  schedulerName: fluence
+  restartPolicy: Never
+  containers:
+    - name: sampler
+      image: busybox
+      command:
+        - sh
+        - -c
+        - |
+          echo "BACKEND=$FLUXION_BACKEND QRMI_TYPE=$FLUXION_QRMI_TYPE"
+          echo "HANDOFF_DIR=$FLUENCE_HANDOFF_DIR"
+          # Prove the handoff volume is mounted writable (the real interceptor
+          # writes the job id here for the sidecar).
+          echo '{"job_id":"mock-job-123","tier":"free"}' > "$FLUENCE_HANDOFF_DIR/task.json"
+          echo "HANDOFF_WROTE=$(cat $FLUENCE_HANDOFF_DIR/task.json)"
+          sleep 3600
+      resources:
+        requests:
+          fluxion.flux-framework.org/qpu: "1"
+        limits:
+          fluxion.flux-framework.org/qpu: "1"

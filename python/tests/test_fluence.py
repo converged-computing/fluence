@@ -12,22 +12,28 @@ import tempfile
 
 def test_braket_registered():
     from fluence.providers import all_providers
+
     assert "braket" in [p.name for p in all_providers()]
 
 
 def test_resolve_braket_by_vendor():
     from fluence.providers import resolve
+
     assert resolve({"vendor": "braket"}).name == "braket"
 
 
 def test_resolve_braket_by_arn_backend():
     from fluence.providers import resolve
-    p = resolve({"arn": "arn:aws:braket:us-east-1::device/quantum-simulator/amazon/sv1"})
+
+    p = resolve(
+        {"arn": "arn:aws:braket:us-east-1::device/quantum-simulator/amazon/sv1"}
+    )
     assert p is not None and p.name == "braket"
 
 
 def test_resolve_unknown_returns_none():
     from fluence.providers import resolve
+
     assert resolve({"vendor": "nope", "backend": "nope"}) is None
 
 
@@ -35,17 +41,20 @@ def test_interceptor_failsoft_without_sdk():
     # Importing the interceptor must not raise even though braket is absent.
     import importlib
     import fluence.interceptor
+
     importlib.reload(fluence.interceptor)  # re-run install(); must not raise
 
 
 def test_braket_install_interceptor_failsoft():
     from fluence.providers.braket import PROVIDER
+
     # No braket SDK installed -> returns False, never raises.
     assert PROVIDER.install_interceptor("uid") is False
 
 
 def test_job_id_is_arn():
     from fluence.providers.braket import PROVIDER, BraketTask
+
     arn = "arn:aws:braket:us-east-1::quantum-task/abc-123"
     assert PROVIDER.job_id(BraketTask(arn)) == arn
 
@@ -88,22 +97,26 @@ def test_staged_sitecustomize_runs_interceptor():
             "FLUENCE_POD_UID": "pod-xyz",
             "PYTHONPATH": staged + os.pathsep + fakesdk,
         }
-        out = subprocess.run([sys.executable, app], env=env,
-                             capture_output=True, text=True)
+        out = subprocess.run(
+            [sys.executable, app], env=env, capture_output=True, text=True
+        )
         assert "fluence-pod-uid" in out.stdout, out.stdout + out.stderr
         assert "pod-xyz" in out.stdout, out.stdout + out.stderr
-
 
 
 def test_braket_matches_by_qrmi_type_and_vendor():
     # The authoritative routing key is qrmi_type (braket-*), which holds even
     # when the hardware vendor is quera/rigetti/iqm rather than amazon.
     from fluence.providers import resolve
+
     assert resolve({"vendor": "amazon", "backend": "sv1"}).name == "braket"
     # aquila: vendor=quera but qrmi_type=braket-ahs must still route to braket.
-    assert resolve({"vendor": "quera", "backend": "aquila",
-                    "qrmi_type": "braket-ahs"}).name == "braket"
-
+    assert (
+        resolve(
+            {"vendor": "quera", "backend": "aquila", "qrmi_type": "braket-ahs"}
+        ).name
+        == "braket"
+    )
 
 
 def test_find_my_task_matches_tag_client_side():
@@ -116,23 +129,35 @@ def test_find_my_task_matches_tag_client_side():
     class FakeClient:
         def __init__(self):
             self.calls = 0
+
         def search_quantum_tasks(self, filters=None, maxResults=None, nextToken=None):
-            assert isinstance(filters, list)          # empty list is valid
+            assert isinstance(filters, list)  # empty list is valid
             # Two pages, to exercise nextToken paging.
             if nextToken is None:
-                return {"quantumTasks": [
-                    {"quantumTaskArn": "arn:other", "createdAt": "2026-01-01T00:00:00Z",
-                     "tags": {TAG_KEY: "someone-else"}},
-                ], "nextToken": "page2"}
-            return {"quantumTasks": [
-                {"quantumTaskArn": "arn:mine", "createdAt": "2026-01-02T00:00:00Z",
-                 "tags": {TAG_KEY: "me-123"}},
-            ]}  # no nextToken -> last page
+                return {
+                    "quantumTasks": [
+                        {
+                            "quantumTaskArn": "arn:other",
+                            "createdAt": "2026-01-01T00:00:00Z",
+                            "tags": {TAG_KEY: "someone-else"},
+                        },
+                    ],
+                    "nextToken": "page2",
+                }
+            return {
+                "quantumTasks": [
+                    {
+                        "quantumTaskArn": "arn:mine",
+                        "createdAt": "2026-01-02T00:00:00Z",
+                        "tags": {TAG_KEY: "me-123"},
+                    },
+                ]
+            }  # no nextToken -> last page
 
     p = BraketProvider()
     fake = FakeClient()
-    p._client = lambda backend: fake            # bypass real boto3 (legacy path)
-    p._region_client = lambda region: fake      # multi-region search uses this
+    p._client = lambda backend: fake  # bypass real boto3 (legacy path)
+    p._region_client = lambda region: fake  # multi-region search uses this
     task = p.find_my_task("me-123", "sv1", timeout=5)
     assert task is not None and task.arn == "arn:mine"
 

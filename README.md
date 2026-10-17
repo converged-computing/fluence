@@ -22,7 +22,7 @@ proven out first in
 ## How does it work?
 
 ```console
- resources.yaml --+ 
+ resources.yaml --+
    +--------------+-------------------------------+
    v              v                               v
 scheduler     device plugin                    webhook
@@ -194,9 +194,9 @@ ceiling. Types come from the same config as the graph, so they can't drift.
 
 ### `sidecars/` — quantum coordination sidecars
 
-Vendor-specific sidecar containers injected by the webhook into the producer pod
+Vendor-specific sidecar containers injected by the webhook into the scout pod
 of a shared quantum workflow group. Each sidecar discovers the QPU task submitted
-by the producer, polls the vendor queue, and ungates the consumer pods when the
+by the scout, polls the vendor queue, and ungates the worker pods when the
 task reaches position==1.
 
 ```console
@@ -221,7 +221,7 @@ spec:
 ```
 
 Fluence creates the PodGroup, injects the sidecar, creates per-namespace
-RBAC, and gates the consumer pods. See `sidecars/braket/design.md` for
+RBAC, and gates the worker pods. See `sidecars/braket/design.md` for
 the full design including the SDK interceptor, queue position polling, and
 the two-queue problem motivation.
 
@@ -242,8 +242,8 @@ workload reads these normalized names regardless of which backend it matched.
 - `cmd/deviceplugin` — the extended-resource DaemonSet.
 - `cmd/webhook` — the env-injection webhook.
 - `cmd/recovery-probe` — verifies allocation replay survives a graph rebuild
-  (what a restart does); see `make test-restore`. 
-  
+  (what a restart does); see `make test-restore`.
+
 Note that the recovery probe (and graph restore) was implemented but removed because the code in fluxion is only part of a PR branch, and I feel nervous about depending on it.
 
 ## Configuration
@@ -255,6 +255,29 @@ These are environment variables for fluence.
 | `FLUENCE_RESOURCES` | scheduler, device plugin, webhook | path to `resources.yaml`; absent = classical-only |
 | `FLUENCE_MATCH_POLICY` | scheduler | Fluxion match policy (default `first`) |
 | `FLUENCE_RESOURCE_CAPACITY` | device plugin | per-node ceiling per type (default 1000) |
+| `FLUENCE_ADMISSION` | webhook | `on` turns admission control on (default off) |
+| `FLUENCE_RESERVE_CORES` | webhook | cores held back from the admission budget (default 0) |
+| `FLUENCE_WORKER_TIMEOUT` | sidecar | seconds to hold for the worker group after ungating, 0 waits without limit (default 0) |
+| `FLUENCE_SESSION_HOLD_TIMEOUT` | scout container | seconds a scout's release waits for the worker group, 0 waits without limit (default 0) |
+
+## Admission control
+
+A quantum group costs money once it holds a backend, so with FLUENCE_ADMISSION=on
+the webhook only admits one that fits. It is off by default. This is the rule the flux-quantum jobtap plugin applies at submit.
+The cores the whole group will need, plus what is already promised to admitted
+groups that have not started, must fit in what is reachable. Reachable is the
+free cores plus the cores held by running pods that could be preempted, meaning
+pods that are unprotected and below the priority workers are ungated with.
+
+A group that does not fit is refused when its first pod is created, so kubectl
+apply fails or the owning Job records the reason. It is not left pending with a
+backend it cannot use. A standalone or independent quantum pod is a group of
+one. A shared gang is one group, scout and workers together, admitted once
+by whichever member arrives first and recorded on the gang PodGroup as
+fluence.flux-framework.org/admitted-cores. Every quantum pod is marked
+fluence.flux-framework.org/protected so it is never counted as preemptible, and
+a pod that arrives already marked is refused. The code is in
+pkg/webhook/admission.go.
 
 ## Observability
 
@@ -346,7 +369,13 @@ kubectl create secret generic ibm-quantum -n default \
 ```
 
 Run a single quantum pod — it just requests `fluxion.flux-framework.org/qpu`, with
-no hard-coded backend (the webhook + PreBind supply `FLUXION_BACKEND`):
+no hard-coded backend (the webhook + PreBind supply `FLUXION_BACKEND`). The
+example workload in examples/qrmi-workload does the QRMI side. It acquires a
+session on the backend fluence chose, runs a Bell circuit through the QRMI
+sampler, and releases the session. Without a Secret it prints what it would
+need and exits. The image is ghcr.io/converged-computing/fluence-qrmi-workload,
+built for amd64 and arm64, and examples/qrmi-pod.yaml runs it.
+examples/quantum-pod.yaml runs the older qrmi-sampler:
 
 ```bash
 kubectl apply -f examples/quantum-pod.yaml
@@ -369,13 +398,13 @@ Submission is **not** done by the scheduler — the workload container holds the
 user's credentials and submits via qrmi-go. Fluence only schedules and hands off
 the backend. (When we control local quantum devices this will change.)
 
-### 3. Quantum workflow groups (producer + consumers)
+### 3. Quantum workflow groups (scout + workers)
 
 A quantum workflow group is a gang whose members share **one** quantum task:
-one pod **submits** the work (the producer) and N−1 pods **wait** for the result
-(the consumers). All pods share a group label and run the *same* image; Fluence
-co-schedules them, gives the producer a sidecar that watches the vendor queue, and
-gates the consumers so they consume no node resources during the (long, variable)
+one pod **submits** the work (the scout) and N−1 pods **wait** for the result
+(the workers). All pods share a group label and run the *same* image; Fluence
+co-schedules them, gives the scout a sidecar that watches the vendor queue, and
+gates the workers so they consume no node resources during the (long, variable)
 QPU queue wait — releasing them only when the task reaches `queue_position == 1`.
 
 ```yaml
@@ -396,7 +425,7 @@ spec:
 defaults to `independent`.
 
 - **`shared`** — the gang shares ONE quantum task. Fluence promotes one member to
-  producer and gates the rest as consumers (see below). Use this for a coordinated
+  scout and gates the rest as workers (see below). Use this for a coordinated
   workflow where the classical post-processing should start together as the single
   result lands.
 - **`independent`** (default) — every member does its own quantum work: its own
@@ -404,9 +433,9 @@ defaults to `independent`.
   honest default; Fluence never invents coordination you did not ask for, and
   never dedups tasks meant to be distinct.
 
-#### How the producer is chosen
+#### How the scout is chosen
 
-In `shared` mode the producer is the member the Job controller stamps with
+In `shared` mode the scout is the member the Job controller stamps with
 `batch.kubernetes.io/job-completion-index: "0"` — so an **indexed Job** gives
 deterministic, race-free election from a single identical template (every pod has
 the same image and group label; only the index differs). This serves two contracts
@@ -414,24 +443,24 @@ with no extra configuration:
 
 - an **explicit-role script** that branches on the completion index (index 0
   submits; others wait and consume the result), and
-- an **identical script** where every pod calls submit — the producer's submit is
-  real, and each consumer's submit is transparently returned the producer's task
+- an **identical script** where every pod calls submit — the scout's submit is
+  real, and each worker's submit is transparently returned the scout's task
   (the shared-result dedup), so the code need not branch at all.
 
-For loose pods with no completion index, the first pod admitted claims the producer
+For loose pods with no completion index, the first pod admitted claims the scout
 slot; an indexed Job is recommended when you need determinism.
 
 #### What Fluence does
 
-In `shared` mode the producer gets the interceptor (real mode) + sidecar and its
-own group-of-one PodGroup `<group>-producer` (`minCount: 1`), so it schedules
-alone and runs the single real submit; it is never gated. The consumers join the
+In `shared` mode the scout gets the interceptor (real mode) + sidecar and its
+own group-of-one PodGroup `<group>-scout` (`minCount: 1`), so it schedules
+alone and runs the single real submit; it is never gated. The workers join the
 `<group>` gang (`minCount: N−1`), get a `quantum.braket/ready` scheduling gate, and
 consume no node resources during the QPU queue wait. When the sidecar observes
-`queue_position == 1`, it stamps the producer's task id onto each consumer
+`queue_position == 1`, it stamps the scout's task id onto each worker
 (surfaced as `FLUENCE_QUANTUM_JOB_ID`) and removes their gates atomically with
 setting the `fluence-quantum-classical` priority class so they reschedule promptly.
-The producer is one of the N members, so the application runs exactly N times —
+The scout is one of the N members, so the application runs exactly N times —
 never N+1, and there is no separate submitter pod.
 
 Per-namespace RBAC (`fluence-sidecar` ServiceAccount/Role/RoleBinding) and the
@@ -464,7 +493,7 @@ one result, use `coordination: shared` above.
 
 ## License
 
-Distributed under the MIT license; all contributions must be made under it. 
+Distributed under the MIT license; all contributions must be made under it.
 
 See [LICENSE](LICENSE), [COPYRIGHT](COPYRIGHT), and [NOTICE](NOTICE).
 

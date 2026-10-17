@@ -6,7 +6,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 )
 
-// Dependency is Fluence's GENERAL "this set of pods must wait for a producer to
+// Dependency is Fluence's GENERAL "this set of pods must wait for a scout to
 // be ready" primitive. It is deliberately NOT quantum-specific: quantum is the
 // first resource type to use it (a gang waits for a quantum submission to reach
 // the device queue), but the same primitive applies to any resource type whose
@@ -19,26 +19,26 @@ import (
 // (in its reconcile loop):
 //
 //   - Kind:     what KIND of readiness this is (the resource type's name). The
-//     producer side knows how to satisfy this kind; the consumer side
+//     scout side knows how to satisfy this kind; the worker side
 //     only knows it must wait. Quantum's kind is "quantum-submit".
-//   - Producer: the identity of the thing that will signal ready. For quantum it
+//   - Scout: the identity of the thing that will signal ready. For quantum it
 //     is the submitter's (base) group; generally it is whatever the
 //     kind's handler records as the satisfier.
-//   - Gate:     the scheduling gate held on the dependent (consumer) pods until
-//     the producer signals ready. Removing the gate is the "ungate"
-//     and is performed by whatever observes the producer's readiness
+//   - Gate:     the scheduling gate held on the dependent (worker) pods until
+//     the scout signals ready. Removing the gate is the "ungate"
+//     and is performed by whatever observes the scout's readiness
 //     (the quantum sidecar for kind=quantum-submit; the scheduler's
 //     reconcile loop for kinds whose readiness is in-cluster, e.g.
 //     "another gang is Running").
 //
-// The webhook PRODUCES a Dependency (gates the consumers, stamps the
+// The webhook PRODUCES a Dependency (gates the workers, stamps the
 // annotations); REMOVING the gate is owned by the observer best placed to see
-// the producer's readiness. That split — declare here, observe elsewhere — is
+// the scout's readiness. That split — declare here, observe elsewhere — is
 // what keeps the primitive general: a new resource type adds a Kind and an
 // observer and reuses the gating/annotation machinery unchanged.
 type Dependency struct {
 	Kind     string // resource-type readiness kind, e.g. "quantum-submit"
-	Producer string // identity of the readiness producer (e.g. the base group)
+	Scout string // identity of the readiness scout (e.g. the base group)
 	Gate     string // scheduling gate held on dependents until ready
 }
 
@@ -47,10 +47,10 @@ type Dependency struct {
 const (
 	// DependsOnKindAnnotation names the readiness kind the dependent waits for.
 	DependsOnKindAnnotation = "fluence.flux-framework.org/depends-on-kind"
-	// DependsOnProducerAnnotation names the producer expected to signal ready.
-	DependsOnProducerAnnotation = "fluence.flux-framework.org/depends-on-producer"
+	// DependsOnScoutAnnotation names the scout expected to signal ready.
+	DependsOnScoutAnnotation = "fluence.flux-framework.org/depends-on-scout"
 	// DependsOnGateAnnotation records which scheduling gate encodes the wait, so
-	// an observer knows exactly which gate to remove when the producer is ready.
+	// an observer knows exactly which gate to remove when the scout is ready.
 	DependsOnGateAnnotation = "fluence.flux-framework.org/depends-on-gate"
 )
 
@@ -62,7 +62,7 @@ const (
 func (d Dependency) applyOps(pod *corev1.Pod) []spec.Op {
 	ops := gateWithName(pod, d.Gate)
 	ops = append(ops, annotateOp(pod, DependsOnKindAnnotation, d.Kind)...)
-	ops = append(ops, annotateOp(pod, DependsOnProducerAnnotation, d.Producer)...)
+	ops = append(ops, annotateOp(pod, DependsOnScoutAnnotation, d.Scout)...)
 	ops = append(ops, annotateOp(pod, DependsOnGateAnnotation, d.Gate)...)
 	return ops
 }
@@ -77,7 +77,7 @@ func DependencyOf(pod *corev1.Pod) (Dependency, bool) {
 	}
 	return Dependency{
 		Kind:     kind,
-		Producer: spec.Annotation(pod, DependsOnProducerAnnotation),
+		Scout: spec.Annotation(pod, DependsOnScoutAnnotation),
 		Gate:     spec.Annotation(pod, DependsOnGateAnnotation),
 	}, true
 }

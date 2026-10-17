@@ -24,4 +24,4 @@ from fluence.providers.base import (  # noqa: F401
 
 # Import provider modules so they self-register. Add new providers here.
 from fluence.providers import braket  # noqa: F401,E402
-# from fluence.providers import ibm   # noqa: F401  (when implemented)
+from fluence.providers import qrmi  # noqa: F401,E402

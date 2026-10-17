@@ -82,7 +82,7 @@ func hasGateOp(ops []spec.Op) bool {
 }
 
 // hasDropQuantumResourceOp reports whether ops remove the Fluxion quantum
-// resource from a container's requests or limits (the consumer qpu strip).
+// resource from a container's requests or limits (the worker qpu strip).
 func hasDropQuantumResourceOp(ops []spec.Op) bool {
 	for _, op := range ops {
 		if op.Op == "remove" && strings.HasSuffix(op.Path, "qpu") &&

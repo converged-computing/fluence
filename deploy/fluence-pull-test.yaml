@@ -141,7 +141,7 @@ spec:
       containers:
         - name: fluence
           image: vanessa/fluence:test
-          imagePullPolicy: Always          
+          imagePullPolicy: Always
           command:
             - /bin/fluence
             - --config=/etc/fluence/scheduler-config.yaml

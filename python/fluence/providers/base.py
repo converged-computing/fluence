@@ -24,7 +24,6 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 
-
 # Shared convention between every interceptor hook and every find_my_task.
 # The interceptor stamps this tag key with the pod UID; the sidecar searches
 # for it. Changing it is a coordinated change across all providers.
@@ -123,8 +122,13 @@ class Provider:
         """Stable, vendor-neutral identifier handed to workers at ungate time."""
         raise NotImplementedError
 
+    # ── registry ────────────────────────────────────────────────────────────────────
 
-# ── registry ────────────────────────────────────────────────────────────────────
+    def session_id(self, task: "Task") -> "str | None":
+        """The session the task runs in, when the vendor has one. Workers are
+        handed it so they can submit into the same session."""
+        return None
+
 
 _REGISTRY: "list[Provider]" = []
 
@@ -163,5 +167,5 @@ def resolve_from_env() -> "Provider | None":
     attrs = {}
     for k, v in os.environ.items():
         if k.startswith("FLUXION_"):
-            attrs[k[len("FLUXION_"):].lower()] = v
+            attrs[k[len("FLUXION_") :].lower()] = v
     return resolve(attrs)

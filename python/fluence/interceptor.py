@@ -26,12 +26,16 @@ def install() -> None:
     for provider in all_providers():
         try:
             if provider.install_interceptor(pod_uid):
-                print(f"[fluence] interceptor installed for provider "
-                      f"{provider.name!r} (pod_uid={pod_uid})", flush=True)
+                print(
+                    f"[fluence] interceptor installed for provider "
+                    f"{provider.name!r} (pod_uid={pod_uid})",
+                    flush=True,
+                )
         except Exception as e:
             # A provider's hook must never break the user app.
-            print(f"[fluence] interceptor for {provider.name!r} skipped: {e}",
-                  flush=True)
+            print(
+                f"[fluence] interceptor for {provider.name!r} skipped: {e}", flush=True
+            )
 
 
 # Install on import.

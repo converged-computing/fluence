@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -109,10 +110,20 @@ func main() {
 			log.Printf("no resources config at %s (%v); injecting FLUXION_BACKEND only", path, rerr)
 		}
 	}
-	mutator := &webhook.Mutator{
-		AttributeKeys: attrKeys,
-		Clientset:     client,
+	// admission control is off unless FLUENCE_ADMISSION=on, and
+	// FLUENCE_RESERVE_CORES is held back from its budget
+	admission := env("FLUENCE_ADMISSION", "off") == "on"
+	reserve, err := strconv.Atoi(env("FLUENCE_RESERVE_CORES", "0"))
+	if err != nil || reserve < 0 {
+		log.Fatalf("FLUENCE_RESERVE_CORES must be a non-negative integer, got %q", os.Getenv("FLUENCE_RESERVE_CORES"))
 	}
+	mutator := &webhook.Mutator{
+		AttributeKeys:    attrKeys,
+		Clientset:        client,
+		AdmissionControl: admission,
+		ReserveCores:     reserve,
+	}
+	log.Printf("[fluence-webhook] admission control on=%v reserve_cores=%d", admission, reserve)
 	log.Printf("[fluence-webhook] env contract injected into fluxion pods: %v", mutator.EnvVarNames())
 
 	mux := http.NewServeMux()

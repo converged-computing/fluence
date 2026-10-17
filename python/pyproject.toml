@@ -20,8 +20,8 @@ dependencies = []
 
 [project.optional-dependencies]
 braket = ["amazon-braket-sdk", "boto3"]
-# ibm = ["qiskit-ibm-runtime"]
-all = ["amazon-braket-sdk", "boto3"]
+qrmi = ["qrmi[ibm]"]
+all = ["amazon-braket-sdk", "boto3", "qrmi[ibm]"]
 
 [project.scripts]
 fluence-sidecar = "fluence.sidecar:main"

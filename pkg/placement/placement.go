@@ -175,6 +175,10 @@ func podResources(p *corev1.Pod) map[string]int {
 	return counts
 }
 
+// PodCores is the whole core request of a pod as the graph counts it, cpu
+// rounded up to cores and never less than one. Admission control uses it.
+func PodCores(p *corev1.Pod) int { return podResources(p)["core"] }
+
 // splitResources separates a pod's resource counts into the compute resources
 // (core/memory/gpu, satisfied by a virtual=false node) and the virtual device
 // resources (everything requested via the fluxion prefix, satisfied by a

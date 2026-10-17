@@ -1,15 +1,15 @@
-# Coordination handlers: producer/consumer gang split (no separate submitter)
+# Coordination handlers: scout/worker gang split (no separate submitter)
 
 > **Status: implemented.** This design is live in `pkg/webhook/handlers/quantum.go`
-> (the coordination router + `mutateProducer`/`mutateConsumer`/`coordinationMode`/
-> `isProducer`), `pkg/webhook/handlers/gang.go` (classical gangs defer quantum
+> (the coordination router + `mutateScout`/`mutateWorker`/`coordinationMode`/
+> `isScout`), `pkg/webhook/handlers/gang.go` (classical gangs defer quantum
 > pods to the quantum handler), and `pkg/fluence/fluence.go` (reconcile reaps the
-> `<group>-producer` PodGroup, never the producer pod — it is a real member).
+> `<group>-scout` PodGroup, never the scout pod — it is a real member).
 > Unit tests are in `pkg/webhook/handlers/quantum_test.go`; structural e2e in
 > `test/e2e/quantum/02–04`. Coordination is **role-aware**: the webhook stamps
-> `FLUENCE_COORDINATION_ROLE` (producer/consumer) and hands consumers the
-> producer's task id (`FLUENCE_QUANTUM_JOB_ID`); the workload branches on the role
-> (producer submits, consumer fetches the shared result by id). No submit
+> `FLUENCE_COORDINATION_ROLE` (scout/worker) and hands workers the
+> scout's task id (`FLUENCE_QUANTUM_JOB_ID`); the workload branches on the role
+> (scout submits, worker fetches the shared result by id). No submit
 > interception, no faux flag — that earlier mechanism has been removed.
 
 ## Why this replaces the submitter-pod model
@@ -20,11 +20,11 @@ application image to do the real submit, then ungates a gang of N faux-submittin
 members. That works, but it runs the user's application **N+1 times** for an
 N-gang: once in the submitter (a full run whose post-processing nobody consumes)
 plus once in each of the N members. The redundant run is not an implementation
-wart — it is a symptom of modeling quantum work as a producer/consumer split
+wart — it is a symptom of modeling quantum work as a scout/worker split
 while pretending one image plays both roles, selected at runtime by a faux flag.
 
 This design keeps the split (it is correct) but removes the separate pod: the
-**producer is one of the N members**, promoted at admission, so the application
+**scout is one of the N members**, promoted at admission, so the application
 runs exactly **N times** — the needed number — with exactly **one real submit**.
 
 The core thesis is unchanged: Fluence is a generic gang scheduler (native gangs
@@ -41,10 +41,10 @@ pods that consume a result someone else produced.
 
 That partitions a quantum gang into two kinds, decided per pod:
 
-- **producer** — runs its code, submits its own task, holds a node through the
+- **scout** — runs its code, submits its own task, holds a node through the
   queue wait. Not gateable, ever.
-- **consumer** — never submits; reads the producer's result. Fully gateable until
-  that result is ready.
+- **worker** — does not submit its own task. It reads the scout's result, or
+  submits into the scout's session. Fully gateable until that result is ready.
 
 ## Coordination modes (user-facing contract)
 
@@ -60,8 +60,8 @@ metadata:
 
 | mode | meaning | who submits | gating | app runs | real submits |
 |------|---------|-------------|--------|----------|--------------|
-| `independent` (default) | N pods each do their own quantum work | every pod | none possible (all are producers) | N | N |
-| `shared` | one task; N pods consume the result | producer only | consumers gated until task ready | N | 1 |
+| `independent` (default) | N pods each do their own quantum work | every pod | none possible (all are scouts) | N | N |
+| `shared` | one task; N pods consume the result | scout only | workers gated until task ready | N | 1 |
 
 `coordination` is an open enum so future designs (e.g. `scatter` — index-paired
 task↔pod, §6.2 of the quantum doc) slot in as new modes without changing the
@@ -70,78 +70,78 @@ ask for, and never dedup tasks that were meant to be distinct.
 
 ### What each mode does to resources, honestly
 
-- **shared**: the producer (1 node) holds its node through the queue wait;
-  consumers (N−1) consume **zero** node resources while gated, then start at
+- **shared**: the scout (1 node) holds its node through the queue wait;
+  workers (N−1) consume **zero** node resources while gated, then start at
   position==1. Idle cost during the wait ≈ 1 node, vs N for a traditional gang.
-- **independent**: every pod is a producer, so every pod holds its node through
+- **independent**: every pod is a scout, so every pod holds its node through
   its own queue wait — N nodes idle. There is nothing to coordinate (no shared
   result), so this is not a Fluence deficiency; it is the physics of "N
   independent tasks," and it is the user's explicit choice. The only way to
-  reclaim even the producer's node in either mode is a resumable `.result()`
+  reclaim even the scout's node in either mode is a resumable `.result()`
   (replay), and is deliberately **out of scope
   for v1** (one idle node is cheap; replay imposes a replay-safe-code contract).
 
-## Producer election
+## Scout election
 
-Exactly one member must be the producer. Election is deterministic for the
+Exactly one member must be the scout. Election is deterministic for the
 recommended workload and best-effort otherwise:
 
 - **Indexed Job (recommended):** the pod carries
-  `batch.kubernetes.io/job-completion-index`. **Index `0` is the producer**;
-  every other index is a consumer. Deterministic, race-free, no recorded state —
+  `batch.kubernetes.io/job-completion-index`. **Index `0` is the scout**;
+  every other index is a worker. Deterministic, race-free, no recorded state —
   the controller already stamped the index, and identical templates yield
   differentiated behavior purely from it. This is why an indexed Job is the right
   shape and is what the experiments use.
 - **Non-indexed gang (Deployment / raw grouped pods):** first arrival claims the
-  producer slot by creating the producer PodGroup (create-if-absent); later pods
-  find it present and become consumers. Best-effort (racy under simultaneous
+  scout slot by creating the scout PodGroup (create-if-absent); later pods
+  find it present and become workers. Best-effort (racy under simultaneous
   admission); documented, with indexed Job recommended for determinism.
 
 ## The two-group split
 
-| | producer (index 0) | consumers (indices 1..N−1) |
+| | scout (index 0) | workers (indices 1..N−1) |
 |---|---|---|
-| PodGroup | `<group>-producer`, `minCount=1` | `<group>`, `minCount=N−1` |
+| PodGroup | `<group>-scout`, `minCount=1` | `<group>`, `minCount=N−1` |
 | schedules | immediately, alone | atomically as a gang, **after ungate** |
 | gate | none | `quantum.braket/ready` + preempting priority |
-| interceptor | staged (tags the real submit) | **not staged** (a consumer never submits) |
+| interceptor | staged (tags the real submit) | **not staged** (a worker's submits go into the scout session) |
 | sidecar | yes — polls the task, ungates `<group>` at position==1 | no |
-| app run | full; submits the one real task | full; reads role=consumer and fetches the shared result by id (no submit) |
+| app run | full; submits the one real task | full; reads role=worker and fetches the shared result by id, or submits into the scout session |
 
-`minCount=1` on the producer group is what removes the deadlock that forced a
-separate submitter: a single-member group schedules alone, so the producer runs
-during the wait while the `minCount=N−1` consumer group sits gated. The two
-groups have independent minCounts; neither blocks the other. The consumer group
+`minCount=1` on the scout group is what removes the deadlock that forced a
+separate submitter: a single-member group schedules alone, so the scout runs
+during the wait while the `minCount=N−1` worker group sits gated. The two
+groups have independent minCounts; neither blocks the other. The worker group
 keeps a real gang `minCount` (N−1), so **gang scheduling is preserved and
 demonstrable** (experiment requirement 1).
 
-Coordination is role-aware rather than interception-based: the consumer is told
-`FLUENCE_COORDINATION_ROLE=consumer` and handed the producer's task id
+Coordination is role-aware rather than interception-based: the worker is told
+`FLUENCE_COORDINATION_ROLE=worker` and handed the scout's task id
 (`FLUENCE_QUANTUM_JOB_ID`, stamped by the sidecar at ungate), and the workload
 fetches the shared result by that id instead of submitting. One real task, N
-consumers, each app run once, in full — and no SDK submit-interception.
+workers, each app run once, in full — and no SDK submit-interception.
 
 ## Gate / ungate flow (shared mode)
 
 ```
-1. Producer (index 0) admitted -> own group-of-one, ungated, sidecar attached
+1. Scout (index 0) admitted -> own group-of-one, ungated, sidecar attached
    (FLUENCE_GANG_GROUP=<group>), interceptor in REAL mode.
-   Consumers (1..N-1) admitted -> group <group> (minCount N-1), GATED,
-   role=consumer, depends-on producer=<group>-producer.
+   Workers (1..N-1) admitted -> group <group> (minCount N-1), GATED,
+   role=worker, depends-on scout=<group>-scout.
 
-2. Scheduler places the producer immediately (minCount=1). It runs the user app,
+2. Scheduler places the scout immediately (minCount=1). It runs the user app,
    .run() submits the ONE real task (tagged fluence-pod-uid).
 
-3. Producer sidecar discovers the task by tag, polls queue position.
+3. Scout sidecar discovers the task by tag, polls queue position.
 
 4. At position==1 (or RUNNING): for each gated pod in <group>:
      annotate fluence.flux-framework.org/quantum-job-id=<task id>
      remove the quantum.braket/ready gate (priority already set at admission)
 
-5. Consumer group (now ungated, minCount N-1) gang-schedules atomically and
-   starts as the quantum result arrives. Each consumer reads role=consumer and
-   fetches the producer's task by FLUENCE_QUANTUM_JOB_ID (.result() returns the
-   shared result); app post-processes. No consumer submits.
+5. Worker group (now ungated, minCount N-1) gang-schedules atomically and
+   starts as the quantum result arrives. Each worker reads role=worker and
+   fetches the scout's task by FLUENCE_QUANTUM_JOB_ID (.result() returns the
+   shared result); app post-processes. No worker submits.
 ```
 
 `independent` mode skips all of this: each pod is its own group-of-one, ungated,
@@ -160,14 +160,14 @@ handler, `dependency.go`, `sidecar.go`, and the Python interceptor/sidecar are
 
 The gang handler currently calls `EnsurePodGroup` unconditionally and relies on
 idempotency to coexist with the quantum handler. With the two-group split the
-quantum handler owns *both* quantum PodGroups (and the producer's group differs
+quantum handler owns *both* quantum PodGroups (and the scout's group differs
 from its admission-time label), so the gang handler must not also gang quantum
 pods. Make it skip them:
 
 ```go
 func (h *gangHandler) Applies(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod) bool {
 	// Classical gangs only. A pod that requests the quantum resource is gang-
-	// scheduled by the quantum handler (which owns the producer/consumer split);
+	// scheduled by the quantum handler (which owns the scout/worker split);
 	// handling it here too would create a second, conflicting PodGroup.
 	if spec.PodRequestsResource(pod, QuantumResource) {
 		return false
@@ -185,29 +185,29 @@ const (
 	// CoordinationAnnotation selects how a quantum gang is coordinated. Open enum
 	// so new designs (e.g. "scatter") add a mode without changing the mechanism.
 	CoordinationAnnotation = "fluence.flux-framework.org/coordination"
-	// CoordinationShared: one real task; the producer (index 0) submits, the
-	// other members are gated consumers that dedup to the producer's task.
+	// CoordinationShared: one real task; the scout (index 0) submits, the
+	// other members are gated workers that dedup to the scout's task.
 	CoordinationShared = "shared"
 	// CoordinationIndependent (default): every member does its own quantum work;
 	// no coordination, no gating, each holds its node through its own queue wait.
 	CoordinationIndependent = "independent"
 
-	// ProducerGroupSuffix names the producer's own group-of-one: <group>-producer
+	// ScoutGroupSuffix names the scout's own group-of-one: <group>-scout
 	// (minCount 1) so it schedules alone and never deadlocks against the gated
-	// consumer gang.
-	ProducerGroupSuffix = "-producer"
+	// worker gang.
+	ScoutGroupSuffix = "-scout"
 
 	// CompletionIndexAnnotation is the indexed-Job completion index the Job
-	// controller stamps on each pod; index "0" is the producer (deterministic
+	// controller stamps on each pod; index "0" is the scout (deterministic
 	// election, no recorded state).
 	CompletionIndexAnnotation = "batch.kubernetes.io/job-completion-index"
-	// ProducerIndex is the completion index promoted to producer.
-	ProducerIndex = "0"
+	// ScoutIndex is the completion index promoted to scout.
+	ScoutIndex = "0"
 )
 ```
 
-Keep `GangGroupEnv` (`FLUENCE_GANG_GROUP`) — it now tells the **producer's**
-sidecar which consumer group to ungate. **Delete** the separate-submitter
+Keep `GangGroupEnv` (`FLUENCE_GANG_GROUP`) — it now tells the **scout's**
+sidecar which worker group to ungate. **Delete** the separate-submitter
 constants and helpers: `SubmitterAnnotation`, `GangGroupAnnotation`,
 `SubmitterGroupSuffix`, `SubmitterPodSuffix`, and the functions
 `mutateSubmitter` and `ensureSubmitterPod`. Everything else in the file
@@ -226,7 +226,7 @@ func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *
 	// No coordination: a standalone quantum pod, or an explicitly independent
 	// member. The REAL submit happens in THIS pod; sidecar only for observe-only
 	// telemetry. (independent mode routes every member here -> N standalone
-	// producers, each owning its task and its own queue wait.)
+	// scouts, each owning its task and its own queue wait.)
 	if mode != CoordinationShared || g == "" || n <= 1 {
 		ops := interceptorOps(pod)
 		if observe {
@@ -239,44 +239,44 @@ func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *
 		return ops
 	}
 
-	// shared mode: promote one member to producer; the rest are gated consumers.
-	if isProducer(ctx, m, pod, g) {
-		return h.mutateProducer(ctx, m, pod, g)
+	// shared mode: promote one member to scout; the rest are gated workers.
+	if isScout(ctx, m, pod, g) {
+		return h.mutateScout(ctx, m, pod, g)
 	}
-	return h.mutateConsumer(ctx, m, pod, g, n)
+	return h.mutateWorker(ctx, m, pod, g, n)
 }
 
-// mutateProducer: index-0 member. Its own group-of-one (minCount 1) so it
+// mutateScout: index-0 member. Its own group-of-one (minCount 1) so it
 // schedules alone and runs the REAL submit; sidecar polls the task and ungates
-// the consumer group. NOT gated, no faux. The producer is one of the N members,
+// the worker group. NOT gated, no faux. The scout is one of the N members,
 // so the application is NOT run an extra time.
-func (h *quantumHandler) mutateProducer(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string) []spec.Op {
-	pg := group + ProducerGroupSuffix
+func (h *quantumHandler) mutateScout(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string) []spec.Op {
+	pg := group + ScoutGroupSuffix
 	m.EnsurePodGroup(ctx, pod.Namespace, pg, pod.Name, 1)
 	ops := linkGroupOps(pod, pg)
 	ops = append(ops, interceptorOps(pod)...)           // tags the real submit
-	ops = append(ops, roleEnvOps(pod, RoleProducer)...) // FLUENCE_COORDINATION_ROLE=producer
+	ops = append(ops, roleEnvOps(pod, RoleScout)...) // FLUENCE_COORDINATION_ROLE=scout
 	sc := sidecarFor(m)
 	sc.EnsureRBAC(ctx, pod.Namespace)
-	// Tell the sidecar which consumer group (the base group) to list + ungate.
+	// Tell the sidecar which worker group (the base group) to list + ungate.
 	ops = append(ops, sc.ContainerOps(pod, false, []corev1.EnvVar{{Name: GangGroupEnv, Value: group}})...)
-	log.Printf("[fluence-webhook] quantum producer %s/%s — group %s (ungates %q)",
+	log.Printf("[fluence-webhook] quantum scout %s/%s — group %s (ungates %q)",
 		pod.Namespace, pod.Name, pg, group)
 	return ops
 }
 
-// mutateConsumer: a non-producer member. Joins the <group> consumer gang
-// (minCount N-1), is gated until the producer's task is ready, and is told its
-// role (FLUENCE_COORDINATION_ROLE=consumer) + the producer's task id
-// (FLUENCE_QUANTUM_JOB_ID). A consumer fetches the shared result by id; it never
+// mutateWorker: a non-scout member. Joins the <group> worker gang
+// (minCount N-1), is gated until the scout's task is ready, and is told its
+// role (FLUENCE_COORDINATION_ROLE=worker) + the scout's task id
+// (FLUENCE_QUANTUM_JOB_ID). A worker fetches the shared result by id; it never
 // submits, so it gets neither the interceptor nor a faux flag.
-func (h *quantumHandler) mutateConsumer(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string, n int32) []spec.Op {
+func (h *quantumHandler) mutateWorker(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string, n int32) []spec.Op {
 	m.EnsurePodGroup(ctx, pod.Namespace, group, pod.Name, n-1)
 	ops := linkGroupOps(pod, group)
-	dep := Dependency{Kind: DependencyKindQuantumSubmit, Producer: group + ProducerGroupSuffix, Gate: QuantumGate}
+	dep := Dependency{Kind: DependencyKindQuantumSubmit, Scout: group + ScoutGroupSuffix, Gate: QuantumGate}
 	ops = append(ops, dep.applyOps(pod)...) // gate + preempting priority + depends-on
-	ops = append(ops, consumerEnvOps(pod)...) // role=consumer + FLUENCE_QUANTUM_JOB_ID
-	log.Printf("[fluence-webhook] quantum consumer %s/%s — group %s minCount=%d, gated (role=consumer)",
+	ops = append(ops, workerEnvOps(pod)...) // role=worker + FLUENCE_QUANTUM_JOB_ID
+	log.Printf("[fluence-webhook] quantum worker %s/%s — group %s minCount=%d, gated (role=worker)",
 		pod.Namespace, pod.Name, group, n-1)
 	return ops
 }
@@ -289,19 +289,19 @@ func coordinationMode(pod *corev1.Pod) string {
 	return CoordinationIndependent
 }
 
-// isProducer decides whether THIS pod is the gang's single producer. Indexed Job
-// (recommended): completion index 0 is the producer — deterministic, race-free.
-// Otherwise: first arrival claims the producer slot by the absence of the
-// producer PodGroup (best-effort; prefer an indexed Job).
-func isProducer(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string) bool {
+// isScout decides whether THIS pod is the gang's single scout. Indexed Job
+// (recommended): completion index 0 is the scout — deterministic, race-free.
+// Otherwise: first arrival claims the scout slot by the absence of the
+// scout PodGroup (best-effort; prefer an indexed Job).
+func isScout(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string) bool {
 	if idx, ok := pod.Annotations[CompletionIndexAnnotation]; ok {
-		return idx == ProducerIndex
+		return idx == ScoutIndex
 	}
 	c := m.Client()
 	if c == nil {
-		return true // tests / no client: treat as producer
+		return true // tests / no client: treat as scout
 	}
-	pg := group + ProducerGroupSuffix
+	pg := group + ScoutGroupSuffix
 	if _, err := c.SchedulingV1alpha2().PodGroups(pod.Namespace).Get(ctx, pg, metav1.GetOptions{}); err == nil {
 		return false // already claimed by an earlier arrival
 	}
@@ -314,11 +314,11 @@ nil-safe in Go (indexing a nil map yields the zero value, `ok=false`).
 
 ### Sidecar (Python) — no change
 
-The producer's sidecar already resolves the vendor at runtime from
+The scout's sidecar already resolves the vendor at runtime from
 `FLUXION_BACKEND`, discovers the task by the `fluence-pod-uid` tag, polls queue
-position, and ungates the group named by `FLUENCE_GANG_GROUP` (now the consumer
-group) at position==1, stamping `quantum-job-id` on each consumer before removing
-its gate. That is exactly the existing flow with the producer in place of the
+position, and ungates the group named by `FLUENCE_GANG_GROUP` (now the worker
+group) at position==1, stamping `quantum-job-id` on each worker before removing
+its gate. That is exactly the existing flow with the scout in place of the
 submitter pod.
 
 ---
@@ -335,11 +335,11 @@ Unchanged classical-gang coverage plus a shared-mode assertion:
 - **Classical gang (regression):** keep `test/e2e/gang/*`. A `minCount=N` classical
   PodGroup schedules all-or-nothing. This proves the generic gang machinery is
   intact (the change only adds a quantum-pod deferral to `gang.Applies`).
-- **Shared consumer gang (new assertion):** submit a `coordination: shared`
-  indexed Job of N. Assert: exactly one `<job>-producer` PodGroup (minCount 1) and
-  one `<job>` PodGroup (minCount N−1); the producer runs while the N−1 consumers
+- **Shared worker gang (new assertion):** submit a `coordination: shared`
+  indexed Job of N. Assert: exactly one `<job>-scout` PodGroup (minCount 1) and
+  one `<job>` PodGroup (minCount N−1); the scout runs while the N−1 workers
   are `SchedulingGated`; after ungate the N−1 schedule **together** (gang), not
-  one-by-one. This proves gang scheduling still holds for the consumer group.
+  one-by-one. This proves gang scheduling still holds for the worker group.
 
 ### Requirement 2 — Both modes work and shared beats a traditional gang
 
@@ -351,7 +351,7 @@ Three arms, same N, same workload (the QAOA sampler), same backend:
 | arm | how | expected node-seconds during queue wait | correctness |
 |-----|-----|------------------------------------------|-------------|
 | **traditional gang** (baseline) | N pods all running, each waits the full queue (no Fluence coordination — e.g. a plain native gang, or `independent` with N=N) | ≈ **N × T_queue** | N pods each run; if they each submit, N real tasks |
-| **shared** (new) | `coordination: shared` indexed Job, N pods | ≈ **1 × T_queue** (producer only; consumers gated) | **1** real task; all N pods produce the **same** result; app runs N times, never N+1 |
+| **shared** (new) | `coordination: shared` indexed Job, N pods | ≈ **1 × T_queue** (scout only; workers gated) | **1** real task; all N pods produce the **same** result; app runs N times, never N+1 |
 | **independent** (new) | `coordination: independent` indexed Job, N pods | ≈ **N × T_queue** (no coordination possible) | N distinct tasks/results; correct and the user's explicit choice (reported as the honest baseline, **not** claimed as an improvement) |
 
 Headline comparison is **shared vs traditional**: same observable result to the N
@@ -362,7 +362,7 @@ pods, but shared idles ~1 node through the queue wait instead of N, saving
 Instrumentation (reuse the Experiment 2 harness):
 - per-pod `TIMING` lines → derive each pod's gated interval vs running interval;
   sum running-but-pre-result node-seconds per arm.
-- producer's sidecar logs queue position over time → T_queue.
+- scout's sidecar logs queue position over time → T_queue.
 - assert real-submit count: shared = 1 (one tagged task on the backend),
   independent/traditional = N (count tagged tasks).
 - assert shared correctness: all N pods log the **same** task id / result hash.
@@ -375,11 +375,11 @@ traditional and independent rise ~linearly in N; shared stays ~flat at one node.
 
 ### Build/run notes
 
-- The producer/consumer split needs no new image: producers and consumers run the
+- The scout/worker split needs no new image: scouts and workers run the
   same role-aware sampler; the branch is `FLUENCE_COORDINATION_ROLE`
-  (producer submits; consumer fetches the shared result by `FLUENCE_QUANTUM_JOB_ID`).
+  (scout submits; worker fetches the shared result by `FLUENCE_QUANTUM_JOB_ID`).
 - Use an **indexed** Job (`completionMode: Indexed`, `parallelism == completions == N`)
-  so producer election is deterministic (index 0) and `resolveGangSize` reads N
+  so scout election is deterministic (index 0) and `resolveGangSize` reads N
   from the owner. Stamp `fluence.flux-framework.org/coordination` in the pod
   template's annotations.
 - kind/mock runs exercise the structural assertions (groups, gating, ungate

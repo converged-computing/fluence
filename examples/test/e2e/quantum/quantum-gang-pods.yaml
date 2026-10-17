@@ -1,17 +1,17 @@
-# Shared-coordination quantum gang for the e2e (producer/consumer, no submitter).
+# Shared-coordination quantum gang for the e2e (scout/worker, no submitter).
 #
 # Two identical pods, both requesting the quantum resource, in group "qgang" with
 # coordination=shared. The user authors NO roles and NO submitter pod. The webhook
 # splits the gang by completion index:
-#   qgang-0 (index 0)  -> PRODUCER: its own group-of-one "qgang-producer"
+#   qgang-0 (index 0)  -> SCOUT: its own group-of-one "qgang-scout"
 #                         (minCount 1), real submit, sidecar, NOT gated. It is a
 #                         real member, so the app runs N times, never N+1.
-#   qgang-1 (index 1+)  -> CONSUMER: the "qgang" gang (minCount N-1=1), gated on
+#   qgang-1 (index 1+)  -> WORKER: the "qgang" gang (minCount N-1=1), gated on
 #                         quantum.braket/ready + preempting priority, interceptor
-#                         told role=consumer; it fetches the producer's result by id.
+#                         told role=worker; it fetches the scout's result by id.
 #
 # These are raw pods (not a Job) so the e2e can reference stable names; the
-# completion-index annotation is set manually to make producer election
+# completion-index annotation is set manually to make scout election
 # deterministic (a real workload uses an indexed Job, which the controller stamps
 # with batch.kubernetes.io/job-completion-index automatically). group-size makes N
 # deterministic for raw pods, which have no owning Job to derive it from. busybox
@@ -27,7 +27,7 @@ metadata:
   annotations:
     fluence.flux-framework.org/group-size: "2"
     fluence.flux-framework.org/coordination: shared
-    batch.kubernetes.io/job-completion-index: "0"   # -> producer
+    batch.kubernetes.io/job-completion-index: "0"   # -> scout
 spec:
   schedulerName: fluence
   restartPolicy: Never
@@ -49,7 +49,7 @@ metadata:
   annotations:
     fluence.flux-framework.org/group-size: "2"
     fluence.flux-framework.org/coordination: shared
-    batch.kubernetes.io/job-completion-index: "1"   # -> consumer
+    batch.kubernetes.io/job-completion-index: "1"   # -> worker
 spec:
   schedulerName: fluence
   restartPolicy: Never

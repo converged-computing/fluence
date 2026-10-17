@@ -1,9 +1,3 @@
-/*
-Copyright 2024 Lawrence Livermore National Security, LLC
- (c.f. AUTHORS, NOTICE.LLNS, COPYING)
-SPDX-License-Identifier: Apache-2.0
-*/
-
 // Registry behavior: dispatch order comes from the active handler list (not a
 // per-handler Order), and the list both selects and orders handlers.
 package handlers

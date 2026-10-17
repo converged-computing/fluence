@@ -40,9 +40,11 @@ def _region_from_arn(arn: str) -> str:
     # generic AWS_DEFAULT_REGION. A QPU like IQM Emerald lives in eu-north-1,
     # while the pod's AWS_DEFAULT_REGION is often us-east-1 — searching the wrong
     # region means the task is never found and workers never ungate.
-    return (region
-            or os.environ.get("FLUXION_REGION")
-            or os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
+    return (
+        region
+        or os.environ.get("FLUXION_REGION")
+        or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+    )
 
 
 class BraketProvider(Provider):
@@ -59,11 +61,8 @@ class BraketProvider(Provider):
         original_run = AwsDevice.run
 
         def patched_run(self, task_specification, *args, **kwargs):
-            # Tag the submission with the pod-uid so the sidecar can find this task
-            # in the queue. The interceptor is staged only on pods that actually
-            # submit (producers and standalone/independent pods); consumers are
-            # role-aware (FLUENCE_COORDINATION_ROLE=consumer) and never call run(),
-            # so there is no submit to intercept and no faux mode to select.
+            # tag the task with the pod uid so the sidecar can find it. Only
+            # scouts and standalone pods are staged with this
             if pod_uid:
                 tags = kwargs.get("tags", {})
                 tags[TAG_KEY] = pod_uid
@@ -84,9 +83,9 @@ class BraketProvider(Provider):
         if qrmi.startswith("braket"):
             return True
         # Fallbacks for graphs that don't set qrmi_type: vendor or backend/arn.
-        vendor  = (attrs.get("vendor") or "").lower()
+        vendor = (attrs.get("vendor") or "").lower()
         backend = (attrs.get("backend") or "").lower()
-        arn     = (attrs.get("arn") or "").lower()
+        arn = (attrs.get("arn") or "").lower()
         if vendor in ("braket", "amazon", "aws"):
             return True
         return "braket" in backend or arn.startswith("arn:aws:braket")
@@ -96,14 +95,22 @@ class BraketProvider(Provider):
         can be stubbed in tests (find_my_task builds one client per candidate
         region through this method rather than calling boto3 directly)."""
         import boto3
+
         return boto3.client("braket", region_name=region)
 
     def _client(self, backend: str):
-        region = (_region_from_arn(backend) if backend.startswith("arn:")
-                  else (os.environ.get("FLUXION_REGION")
-                        or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")))
-        log(f"[braket] using region {region} for task search "
-            f"(backend={backend!r} FLUXION_REGION={os.environ.get('FLUXION_REGION')!r})")
+        region = (
+            _region_from_arn(backend)
+            if backend.startswith("arn:")
+            else (
+                os.environ.get("FLUXION_REGION")
+                or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+            )
+        )
+        log(
+            f"[braket] using region {region} for task search "
+            f"(backend={backend!r} FLUXION_REGION={os.environ.get('FLUXION_REGION')!r})"
+        )
         return self._region_client(region)
 
     def _candidate_regions(self, backend: str):
@@ -122,14 +129,22 @@ class BraketProvider(Provider):
             all_regions = [r.strip() for r in override.split(",") if r.strip()]
         else:
             # The fixed set of regions Amazon Braket operates in.
-            all_regions = ["us-east-1", "us-west-1", "us-west-2", "eu-west-2", "eu-north-1"]
+            all_regions = [
+                "us-east-1",
+                "us-west-1",
+                "us-west-2",
+                "eu-west-2",
+                "eu-north-1",
+            ]
         preferred = []
         if backend.startswith("arn:aws:braket"):
             r = _region_from_arn(backend)
             if r:
                 preferred.append(r)
-        for r in (os.environ.get("FLUXION_REGION"),
-                  os.environ.get("AWS_DEFAULT_REGION")):
+        for r in (
+            os.environ.get("FLUXION_REGION"),
+            os.environ.get("AWS_DEFAULT_REGION"),
+        ):
             if r and r not in preferred:
                 preferred.append(r)
         # preferred first, then any remaining regions (keep only ones in the
@@ -140,8 +155,10 @@ class BraketProvider(Provider):
 
     def find_my_task(self, pod_uid, backend, timeout):
         regions = self._candidate_regions(backend)
-        log(f"[braket] searching for task tagged {TAG_KEY}={pod_uid} "
-            f"across regions {regions}")
+        log(
+            f"[braket] searching for task tagged {TAG_KEY}={pod_uid} "
+            f"across regions {regions}"
+        )
         deadline = time.time() + timeout
         # SearchQuantumTasks has NO tags filter and is REGION-SCOPED: a task only
         # shows up in the region it was created in. We don't reliably know that
@@ -151,10 +168,13 @@ class BraketProvider(Provider):
         device_arn = backend if backend.startswith("arn:aws:braket") else None
         filters = []
         if device_arn:
-            filters = [{"name": "deviceArn", "operator": "EQUAL",
-                        "values": [device_arn]}]
+            filters = [
+                {"name": "deviceArn", "operator": "EQUAL", "values": [device_arn]}
+            ]
         clients = {}
-        denied = set()  # regions that returned AccessDenied — skip them after the first hit
+        denied = (
+            set()
+        )  # regions that returned AccessDenied — skip them after the first hit
         while time.time() < deadline:
             for region in regions:
                 if region in denied:
@@ -178,7 +198,9 @@ class BraketProvider(Provider):
                             if TAG_KEY in tags:
                                 seen_tagged += 1
                             if tags.get(TAG_KEY) == pod_uid:
-                                if match is None or str(t.get("createdAt", "")) > str(match.get("createdAt", "")):
+                                if match is None or str(t.get("createdAt", "")) > str(
+                                    match.get("createdAt", "")
+                                ):
                                     match = t
                         next_token = resp.get("nextToken")
                         if not next_token:
@@ -191,22 +213,32 @@ class BraketProvider(Provider):
                     # carried OUR tag key at all? Distinguishes "task not here yet"
                     # from "task here but tag not landing".
                     if seen:
-                        log(f"[braket] {region}: {seen} task(s) seen, "
-                            f"{seen_tagged} with a {TAG_KEY} tag, none matching {pod_uid}")
+                        log(
+                            f"[braket] {region}: {seen} task(s) seen, "
+                            f"{seen_tagged} with a {TAG_KEY} tag, none matching {pod_uid}"
+                        )
                 except Exception as e:
                     msg = str(e)
-                    if "AccessDenied" in msg or "not authorized" in msg or "explicit deny" in msg:
+                    if (
+                        "AccessDenied" in msg
+                        or "not authorized" in msg
+                        or "explicit deny" in msg
+                    ):
                         # This account can't search Braket in this region (e.g. a
                         # service control policy denies it). Skip it from now on
                         # instead of erroring every poll cycle.
                         denied.add(region)
-                        log(f"[braket] region {region} not accessible "
-                            f"(access denied) — skipping it for the rest of this search")
+                        log(
+                            f"[braket] region {region} not accessible "
+                            f"(access denied) — skipping it for the rest of this search"
+                        )
                     else:
                         log(f"[braket] search error in {region} (will retry): {e}")
             if len(denied) == len(regions):
-                log("[braket] ERROR: every candidate region was access-denied — "
-                    "set FLUENCE_BRAKET_REGIONS to a region this account can search")
+                log(
+                    "[braket] ERROR: every candidate region was access-denied — "
+                    "set FLUENCE_BRAKET_REGIONS to a region this account can search"
+                )
                 return None
             time.sleep(10)
         log("[braket] task discovery timed out")
@@ -214,8 +246,10 @@ class BraketProvider(Provider):
 
     def _aws_task(self, task: BraketTask):
         import asyncio
+
         asyncio.set_event_loop(asyncio.new_event_loop())
         from braket.aws import AwsQuantumTask
+
         return AwsQuantumTask(arn=task.arn)
 
     def is_ready_to_ungate(self, task: BraketTask, position=None) -> bool:

@@ -1,9 +1,3 @@
-/*
-Copyright 2024 Lawrence Livermore National Security, LLC
- (c.f. AUTHORS, NOTICE.LLNS, COPYING)
-SPDX-License-Identifier: Apache-2.0
-*/
-
 // Tests for gang PodGroup minCount: the whole gang (full N) must schedule
 // atomically. Regression guard for the bug where every PodGroup was created
 // with minCount=1, so a multi-pod gang was "satisfied" by a single pod and the

@@ -3,8 +3,8 @@
 Fluence's value is not creating gangs (Kubernetes 1.36 native gang scheduling
 already does that). It is **customizing the gang on the fly based on the
 resources a pod requests** — e.g. a shared quantum gang becomes a size-1
-producer gang plus a size-(N-1) consumer gang, with the producer running a
-sidecar that ungates its consumers when the quantum task is ready.
+scout gang plus a size-(N-1) worker gang, with the scout running a
+sidecar that ungates its workers when the quantum task is ready.
 
 ## Handlers
 

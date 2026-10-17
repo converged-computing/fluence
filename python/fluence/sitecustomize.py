@@ -9,4 +9,5 @@ try:
     import fluence.interceptor  # noqa: F401  (import side-effect installs hooks)
 except Exception as _e:  # pragma: no cover
     import sys
+
     print(f"[fluence] interceptor skipped: {_e}", file=sys.stderr, flush=True)

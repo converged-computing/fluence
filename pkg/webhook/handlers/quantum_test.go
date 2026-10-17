@@ -1,10 +1,4 @@
-/*
-Copyright 2024 Lawrence Livermore National Security, LLC
- (c.f. AUTHORS, NOTICE.LLNS, COPYING)
-SPDX-License-Identifier: Apache-2.0
-*/
-
-// quantum_test.go — all tests for the quantum handler: the producer/consumer
+// quantum_test.go — all tests for the quantum handler: the scout/worker
 // shared-coordination split (no separate submitter pod), independent mode,
 // the coordination role + job-id handoff, the sidecar wiring, the Dependency primitive, and the
 // standalone/observe paths. Shared fixtures (qpuPod, cpuPod, op helpers) live in
@@ -57,11 +51,11 @@ func TestObserveLabelInjectsSidecar(t *testing.T) {
 	}
 }
 
-// ── shared coordination: producer / consumer split ──────────────────────────────
+// ── shared coordination: scout / worker split ──────────────────────────────
 
 // sharedQPUPod is a quantum workload pod (requests the resource) in a group,
 // owned by a Job of parallelism N, with coordination=shared and a completion
-// index. Index "0" is the producer; any other index is a consumer. This is the
+// index. Index "0" is the scout; any other index is a worker. This is the
 // real shape: an indexed Job whose identical template yields differentiated
 // roles purely from the completion index.
 func sharedQPUPod(ns, group, name, job, index string) *corev1.Pod {
@@ -98,11 +92,11 @@ func mincount(t *testing.T, cs *fake.Clientset, ns, group string) (int32, bool) 
 	return pg.Spec.SchedulingPolicy.Gang.MinCount, true
 }
 
-// A shared-mode CONSUMER (completion index != 0, owned by Job parallelism=3) is
-// gated, told its role (FLUENCE_COORDINATION_ROLE=consumer), joins the <group>
-// consumer gang at minCount N-1 (the split), and gets NO sidecar (it is gated).
-// No separate submitter pod is ever created — the producer is one of the N members.
-func TestSharedConsumerGatedRoleAndSplit(t *testing.T) {
+// A shared-mode WORKER (completion index != 0, owned by Job parallelism=3) is
+// gated, told its role (FLUENCE_COORDINATION_ROLE=worker), joins the <group>
+// worker gang at minCount N-1 (the split), and gets NO sidecar (it is gated).
+// No separate submitter pod is ever created — the scout is one of the N members.
+func TestSharedWorkerGatedRoleAndSplit(t *testing.T) {
 	ns, group, job := "default", "qg", "qg-job"
 	par := int32(3)
 	cs := fake.NewSimpleClientset(&batchv1.Job{
@@ -113,20 +107,20 @@ func TestSharedConsumerGatedRoleAndSplit(t *testing.T) {
 	ops := m.Mutate(context.Background(), sharedQPUPod(ns, group, "qg-1", job, "1"))
 
 	if !hasGateOp(ops) {
-		t.Error("consumer must be gated")
+		t.Error("worker must be gated")
 	}
 	if hasSidecarOp(ops) {
-		t.Error("consumer (gated) must NOT get a sidecar")
+		t.Error("worker (gated) must NOT get a sidecar")
 	}
 	if !hasDropQuantumResourceOp(ops) {
-		t.Error("consumer (gated, never runs the QPU) must have its qpu resource stripped")
+		t.Error("worker (gated, uses the scout session) must have its qpu resource stripped")
 	}
-	if e, ok := envOp(ops, CoordinationRoleEnv); !ok || e.Value != RoleConsumer {
-		t.Errorf("consumer must get %s=%s", CoordinationRoleEnv, RoleConsumer)
+	if e, ok := envOp(ops, CoordinationRoleEnv); !ok || e.Value != RoleWorker {
+		t.Errorf("worker must get %s=%s", CoordinationRoleEnv, RoleWorker)
 	}
-	// Consumer gang is minCount N-1 (the producer/consumer split).
+	// Worker gang is minCount N-1 (the scout/worker split).
 	if mc, ok := mincount(t, cs, ns, group); !ok || mc != 2 {
-		t.Errorf("consumer PodGroup minCount=%d (ok=%v), want 2 (N-1 split)", mc, ok)
+		t.Errorf("worker PodGroup minCount=%d (ok=%v), want 2 (N-1 split)", mc, ok)
 	}
 	// No separate submitter pod is created.
 	pods, _ := cs.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{})
@@ -135,11 +129,11 @@ func TestSharedConsumerGatedRoleAndSplit(t *testing.T) {
 	}
 }
 
-// The shared-mode PRODUCER (completion index 0) is wired as the real coordinator:
-// its own group-of-one <group>-producer at minCount 1, the real sidecar, not
-// gated, role=producer, and told which consumer group to ungate via
+// The shared-mode SCOUT (completion index 0) is wired as the real coordinator:
+// its own group-of-one <group>-scout at minCount 1, the real sidecar, not
+// gated, role=scout, and told which worker group to ungate via
 // FLUENCE_GANG_GROUP. It is one of the N members — no extra pod is created.
-func TestSharedProducerWiredAsRealSidecar(t *testing.T) {
+func TestSharedScoutWiredAsRealSidecar(t *testing.T) {
 	ns, group, job := "default", "qg2", "qg2-job"
 	par := int32(2)
 	cs := fake.NewSimpleClientset(&batchv1.Job{
@@ -150,21 +144,21 @@ func TestSharedProducerWiredAsRealSidecar(t *testing.T) {
 	ops := m.Mutate(context.Background(), sharedQPUPod(ns, group, "qg2-0", job, "0"))
 
 	if !hasSidecarOp(ops) {
-		t.Error("producer must get the real sidecar")
+		t.Error("scout must get the real sidecar")
 	}
 	if hasGateOp(ops) {
-		t.Error("producer must NOT be gated")
+		t.Error("scout must NOT be gated")
 	}
 	if hasDropQuantumResourceOp(ops) {
-		t.Error("producer must KEEP its qpu resource (it runs the real submit)")
+		t.Error("scout must KEEP its qpu resource (it runs the real submit)")
 	}
-	if e, ok := envOp(ops, CoordinationRoleEnv); !ok || e.Value != RoleProducer {
-		t.Errorf("producer must get %s=%s", CoordinationRoleEnv, RoleProducer)
+	if e, ok := envOp(ops, CoordinationRoleEnv); !ok || e.Value != RoleScout {
+		t.Errorf("scout must get %s=%s", CoordinationRoleEnv, RoleScout)
 	}
 	if _, ok := envOp(ops, QuantumJobIDEnv); ok {
-		t.Error("producer must NOT get FLUENCE_QUANTUM_JOB_ID (it submits its own task)")
+		t.Error("scout must NOT get FLUENCE_QUANTUM_JOB_ID (it submits its own task)")
 	}
-	// FLUENCE_GANG_GROUP (the consumer group to ungate) is on the sidecar.
+	// FLUENCE_GANG_GROUP (the worker group to ungate) is on the sidecar.
 	var sidecar *corev1.Container
 	for _, op := range ops {
 		if c, ok := op.Value.(corev1.Container); ok && c.Name == SidecarContainerName {
@@ -173,7 +167,7 @@ func TestSharedProducerWiredAsRealSidecar(t *testing.T) {
 		}
 	}
 	if sidecar == nil {
-		t.Fatal("no sidecar container on producer")
+		t.Fatal("no sidecar container on scout")
 	}
 	var gotGang bool
 	for _, e := range sidecar.Env {
@@ -182,21 +176,21 @@ func TestSharedProducerWiredAsRealSidecar(t *testing.T) {
 		}
 	}
 	if !gotGang {
-		t.Errorf("producer sidecar must get %s=%q", GangGroupEnv, group)
+		t.Errorf("scout sidecar must get %s=%q", GangGroupEnv, group)
 	}
-	// Producer is its own group-of-one (minCount 1).
-	if mc, ok := mincount(t, cs, ns, group+ProducerGroupSuffix); !ok || mc != 1 {
-		t.Errorf("producer PodGroup %s minCount=%d (ok=%v), want 1", group+ProducerGroupSuffix, mc, ok)
+	// Scout is its own group-of-one (minCount 1).
+	if mc, ok := mincount(t, cs, ns, group+ScoutGroupSuffix); !ok || mc != 1 {
+		t.Errorf("scout PodGroup %s minCount=%d (ok=%v), want 1", group+ScoutGroupSuffix, mc, ok)
 	}
 	// No separate submitter pod.
 	pods, _ := cs.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{})
 	if len(pods.Items) != 0 {
-		t.Errorf("producer is a member, not a spawned pod; found %d pods", len(pods.Items))
+		t.Errorf("scout is a member, not a spawned pod; found %d pods", len(pods.Items))
 	}
 }
 
-// Shared mode never creates an extra pod: a full gang (producer index 0 +
-// consumers) is N members, so the application runs exactly N times (not N+1 as
+// Shared mode never creates an extra pod: a full gang (scout index 0 +
+// workers) is N members, so the application runs exactly N times (not N+1 as
 // the old submitter-pod model did).
 func TestSharedGangNoSeparateSubmitterPod(t *testing.T) {
 	ns, group, job := "default", "qauto", "qauto-job"
@@ -206,19 +200,19 @@ func TestSharedGangNoSeparateSubmitterPod(t *testing.T) {
 		Spec:       batchv1.JobSpec{Parallelism: &par, Completions: &par}})
 	m := &webhook.Mutator{Clientset: cs}
 
-	m.Mutate(context.Background(), sharedQPUPod(ns, group, "qauto-0", job, "0")) // producer
-	m.Mutate(context.Background(), sharedQPUPod(ns, group, "qauto-1", job, "1")) // consumer
+	m.Mutate(context.Background(), sharedQPUPod(ns, group, "qauto-0", job, "0")) // scout
+	m.Mutate(context.Background(), sharedQPUPod(ns, group, "qauto-1", job, "1")) // worker
 
 	pods, _ := cs.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{})
 	if len(pods.Items) != 0 {
 		t.Errorf("shared mode must not create any pods (no submitter); found %d", len(pods.Items))
 	}
 	// Both groups exist with the right minCounts.
-	if mc, ok := mincount(t, cs, ns, group+ProducerGroupSuffix); !ok || mc != 1 {
-		t.Errorf("producer group minCount=%d (ok=%v), want 1", mc, ok)
+	if mc, ok := mincount(t, cs, ns, group+ScoutGroupSuffix); !ok || mc != 1 {
+		t.Errorf("scout group minCount=%d (ok=%v), want 1", mc, ok)
 	}
 	if mc, ok := mincount(t, cs, ns, group); !ok || mc != 1 {
-		t.Errorf("consumer group minCount=%d (ok=%v), want N-1=1", mc, ok)
+		t.Errorf("worker group minCount=%d (ok=%v), want N-1=1", mc, ok)
 	}
 }
 
@@ -243,8 +237,8 @@ func TestIndependentGroupedQuantumIsStandalone(t *testing.T) {
 	if _, ok := envOp(ops, CoordinationRoleEnv); ok {
 		t.Error("independent member must not get a coordination role env")
 	}
-	if _, ok := mincount(t, cs, ns, group+ProducerGroupSuffix); ok {
-		t.Error("independent mode must not create a producer group")
+	if _, ok := mincount(t, cs, ns, group+ScoutGroupSuffix); ok {
+		t.Error("independent mode must not create a scout group")
 	}
 	pods, _ := cs.CoreV1().Pods(ns).List(context.Background(), metav1.ListOptions{})
 	if len(pods.Items) != 0 {
@@ -277,7 +271,7 @@ func TestStandaloneQuantumIsReal(t *testing.T) {
 }
 
 // Even with coordination=shared, a group of one (Job parallelism 1) has no
-// consumers to coordinate, so it falls through to the standalone real-submit path.
+// workers to coordinate, so it falls through to the standalone real-submit path.
 func TestSharedGroupOfOneIsStandalone(t *testing.T) {
 	ns, group, job := "default", "one", "one-job"
 	par := int32(1)
@@ -290,8 +284,8 @@ func TestSharedGroupOfOneIsStandalone(t *testing.T) {
 	if hasGateOp(ops) {
 		t.Error("shared group-of-one must not be gated")
 	}
-	if _, ok := mincount(t, cs, ns, group+ProducerGroupSuffix); ok {
-		t.Error("shared group-of-one must not create a producer group")
+	if _, ok := mincount(t, cs, ns, group+ScoutGroupSuffix); ok {
+		t.Error("shared group-of-one must not create a scout group")
 	}
 }
 
@@ -364,10 +358,10 @@ func unescapeJSONPointer(s string) string {
 	return out
 }
 
-// A shared-mode consumer is expressed as a general Dependency: gated, stamped
-// with depends-on-{kind,producer,gate}, and the producer is the <group>-producer
+// A shared-mode worker is expressed as a general Dependency: gated, stamped
+// with depends-on-{kind,scout,gate}, and the scout is the <group>-scout
 // group.
-func TestQuantumConsumerIsGeneralDependency(t *testing.T) {
+func TestQuantumWorkerIsGeneralDependency(t *testing.T) {
 	ns, group, job := "default", "depq", "depq-job"
 	par := int32(3)
 	cs := fake.NewSimpleClientset(&batchv1.Job{
@@ -378,14 +372,14 @@ func TestQuantumConsumerIsGeneralDependency(t *testing.T) {
 	ops := m.Mutate(context.Background(), sharedQPUPod(ns, group, "depq-1", job, "1"))
 
 	if !hasGateOp(ops) {
-		t.Errorf("consumer not gated by the dependency (ops: %+v)", ops)
+		t.Errorf("worker not gated by the dependency (ops: %+v)", ops)
 	}
 	ann := annotationOps(ops)
 	if ann[DependsOnKindAnnotation] != DependencyKindQuantumSubmit {
 		t.Errorf("depends-on-kind=%q, want %q", ann[DependsOnKindAnnotation], DependencyKindQuantumSubmit)
 	}
-	if ann[DependsOnProducerAnnotation] != group+ProducerGroupSuffix {
-		t.Errorf("depends-on-producer=%q, want %q (the producer group)", ann[DependsOnProducerAnnotation], group+ProducerGroupSuffix)
+	if ann[DependsOnScoutAnnotation] != group+ScoutGroupSuffix {
+		t.Errorf("depends-on-scout=%q, want %q (the scout group)", ann[DependsOnScoutAnnotation], group+ScoutGroupSuffix)
 	}
 	if ann[DependsOnGateAnnotation] != QuantumGate {
 		t.Errorf("depends-on-gate=%q, want %q", ann[DependsOnGateAnnotation], QuantumGate)
@@ -397,11 +391,11 @@ func TestQuantumConsumerIsGeneralDependency(t *testing.T) {
 func TestDependencyOfRoundTrip(t *testing.T) {
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
 		DependsOnKindAnnotation:     DependencyKindQuantumSubmit,
-		DependsOnProducerAnnotation: "grp",
+		DependsOnScoutAnnotation: "grp",
 		DependsOnGateAnnotation:     QuantumGate,
 	}}}
 	d, ok := DependencyOf(pod)
-	if !ok || d.Kind != DependencyKindQuantumSubmit || d.Producer != "grp" || d.Gate != QuantumGate {
+	if !ok || d.Kind != DependencyKindQuantumSubmit || d.Scout != "grp" || d.Gate != QuantumGate {
 		t.Errorf("DependencyOf=%+v ok=%v, want quantum-submit/grp/%s", d, ok, QuantumGate)
 	}
 	if _, ok := DependencyOf(&corev1.Pod{}); ok {
@@ -409,11 +403,10 @@ func TestDependencyOfRoundTrip(t *testing.T) {
 	}
 }
 
-// The consumer is role-aware: it gets FLUENCE_COORDINATION_ROLE=consumer and the
-// producer's task id via the FLUENCE_QUANTUM_JOB_ID downward-API env, and it is
-// NOT staged with the interceptor (a consumer never submits, so it needs neither
-// the interceptor nor any faux flag). The user's script branches on the role.
-func TestQuantumConsumerStagedWithRole(t *testing.T) {
+// A worker gets FLUENCE_COORDINATION_ROLE=worker and the scout's task id in
+// FLUENCE_QUANTUM_JOB_ID. It is not staged with the interceptor, since any
+// submit it makes goes into the scout session and needs no tagging.
+func TestQuantumWorkerStagedWithRole(t *testing.T) {
 	ns, group, job := "default", "roleq", "roleq-job"
 	par := int32(2)
 	cs := fake.NewSimpleClientset(&batchv1.Job{
@@ -424,19 +417,19 @@ func TestQuantumConsumerStagedWithRole(t *testing.T) {
 	ops := m.Mutate(context.Background(), sharedQPUPod(ns, group, "roleq-1", job, "1"))
 
 	// Role surfaced to the container.
-	if e, ok := envOp(ops, CoordinationRoleEnv); !ok || e.Value != RoleConsumer {
-		t.Errorf("consumer missing %s=%s (got %+v, ok=%v)", CoordinationRoleEnv, RoleConsumer, e, ok)
+	if e, ok := envOp(ops, CoordinationRoleEnv); !ok || e.Value != RoleWorker {
+		t.Errorf("worker missing %s=%s (got %+v, ok=%v)", CoordinationRoleEnv, RoleWorker, e, ok)
 	}
 
-	// A consumer never submits, so it is NOT staged with the interceptor.
+	// no interceptor on a worker, its submits go into the scout session
 	if _, ok := envOp(ops, "PYTHONPATH"); ok {
-		t.Error("consumer must NOT be staged with the interceptor (it does not submit)")
+		t.Error("worker must not be staged with the interceptor")
 	}
 
-	// Producer's task id sourced from the annotation the ungating sidecar stamps.
+	// Scout's task id sourced from the annotation the ungating sidecar stamps.
 	e, ok := envOp(ops, QuantumJobIDEnv)
 	if !ok {
-		t.Fatalf("consumer missing %s env", QuantumJobIDEnv)
+		t.Fatalf("worker missing %s env", QuantumJobIDEnv)
 	}
 	if e.ValueFrom == nil || e.ValueFrom.FieldRef == nil ||
 		e.ValueFrom.FieldRef.FieldPath != "metadata.annotations['"+QuantumJobIDAnnotation+"']" {
@@ -511,11 +504,11 @@ func TestSidecarInheritsWorkloadSecretEnv(t *testing.T) {
 	}
 }
 
-// The producer member of a shared gang requests the quantum resource (it runs the
+// The scout member of a shared gang requests the quantum resource (it runs the
 // real submit). Sanity check that the helper builds a quantum pod.
-func TestSharedProducerRequestsQuantumResource(t *testing.T) {
+func TestSharedScoutRequestsQuantumResource(t *testing.T) {
 	p := sharedQPUPod("default", "g", "g-0", "g-job", "0")
 	if !spec.PodRequestsResource(p, QuantumResource) {
-		t.Error("producer must request the quantum resource (it runs the real submit)")
+		t.Error("scout must request the quantum resource (it runs the real submit)")
 	}
 }

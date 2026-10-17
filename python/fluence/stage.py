@@ -37,7 +37,8 @@ def stage(dest: str) -> None:
     if os.path.exists(pkg_dst):
         shutil.rmtree(pkg_dst)
     shutil.copytree(
-        pkg_src, pkg_dst,
+        pkg_src,
+        pkg_dst,
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "tests"),
     )
 
@@ -51,7 +52,9 @@ def stage(dest: str) -> None:
 
 def main(argv=None):
     argv = argv if argv is not None else sys.argv[1:]
-    dest = argv[0] if argv else os.environ.get("FLUENCE_STAGE_DIR", "/opt/fluence-staged")
+    dest = (
+        argv[0] if argv else os.environ.get("FLUENCE_STAGE_DIR", "/opt/fluence-staged")
+    )
     stage(dest)
 
 

@@ -30,6 +30,21 @@ type MutatorAPI interface {
 	// of the group label. creatorPod is recorded only as the PodGroup's creator
 	// reference; the core ascribes no role semantics to it.
 	EnsurePodGroup(ctx context.Context, namespace, group, creatorPod string, minCount int32)
+
+	// Admit applies admission control, see admission.go. key names the group
+	// in the refusal.
+	Admit(ctx context.Context, pod *corev1.Pod, key string, cores int) error
+
+	// RecordAdmission stamps the admitted core total on the PodGroup once.
+	RecordAdmission(ctx context.Context, namespace, podGroup string, cores int)
+}
+
+// Admitter is an optional handler capability. A handler that implements it
+// may refuse a pod, and the webhook answers the review with allowed false and
+// the error as the message. Admit runs before any Mutate, and a refusal
+// discards every patch.
+type Admitter interface {
+	Admit(ctx context.Context, m MutatorAPI, pod *corev1.Pod) error
 }
 
 // Handler inspects a pod and, when it applies, contributes JSON patch ops. A pod

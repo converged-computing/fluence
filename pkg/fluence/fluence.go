@@ -828,18 +828,18 @@ func (f *Fluence) reconcileGroup(ctx context.Context, namespace, group string) {
 	log.Printf("fluence: reconciled completed gang %s/%s — deleted Fluence-created PodGroup, allocation freed",
 		namespace, group)
 
-	// Producer-group cleanup: in shared coordination the gang is split into the
-	// consumer group <group> (this group) and the producer's group-of-one
-	// <group>-producer (a Fluence-created PodGroup, minCount 1). The producer POD
+	// Scout-group cleanup: in shared coordination the gang is split into the
+	// worker group <group> (this group) and the scout's group-of-one
+	// <group>-scout (a Fluence-created PodGroup, minCount 1). The scout POD
 	// is a real member of the user's workload (indexed-Job index 0), so we must
 	// NOT delete it — only its Fluence-created PodGroup, as a backstop to free its
-	// allocation (its own reconcile pass also reaps it once the producer pod is
-	// terminal). Skip when this group is itself a producer group, to avoid
-	// recursing on <group>-producer-producer.
-	if !strings.HasSuffix(group, producerGroupSuffix) {
-		pg := group + producerGroupSuffix
+	// allocation (its own reconcile pass also reaps it once the scout pod is
+	// terminal). Skip when this group is itself a scout group, to avoid
+	// recursing on <group>-scout-scout.
+	if !strings.HasSuffix(group, scoutGroupSuffix) {
+		pg := group + scoutGroupSuffix
 		_ = f.handle.ClientSet().SchedulingV1alpha2().PodGroups(namespace).Delete(ctx, pg, metav1.DeleteOptions{})
-		log.Printf("fluence: reaped producer PodGroup %s/%s for gang %s", namespace, pg, group)
+		log.Printf("fluence: reaped scout PodGroup %s/%s for gang %s", namespace, pg, group)
 	}
 }
 
@@ -852,11 +852,11 @@ const reconcileGraceForEmpty = 2 * time.Minute
 // package (the scheduler must not depend on the webhook). Kept in sync with it.
 const webhookGroupLabel = "fluence.flux-framework.org/group"
 
-// producerGroupSuffix mirrors handlers.ProducerGroupSuffix: in shared
-// coordination the producer (indexed-Job index 0) is its own group-of-one named
-// <g>-producer. Duplicated here to avoid importing the webhook handlers package
+// scoutGroupSuffix mirrors handlers.ScoutGroupSuffix: in shared
+// coordination the scout (indexed-Job index 0) is its own group-of-one named
+// <g>-scout. Duplicated here to avoid importing the webhook handlers package
 // into the scheduler plugin; keep the two in sync.
-const producerGroupSuffix = "-producer"
+const scoutGroupSuffix = "-scout"
 
 // onPodGroupDeleted frees the gang's allocation when its PodGroup is deleted.
 func (f *Fluence) onPodGroupDeleted(obj interface{}) {
