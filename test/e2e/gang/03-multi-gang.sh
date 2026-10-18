@@ -37,7 +37,8 @@ kubectl wait --for=delete pod -l app=gang3 --timeout=60s 2>/dev/null || true
 
 # ---- B) contention: the gang that can't fully fit stays ENTIRELY pending --------
 log "TEST 6B: contention, a gang that cannot fully fit must NOT partially place"
-kubectl apply -f examples/test/e2e/gang/multi-gang-contention.yaml
+log "each pod asks for $(free_cores_per_worker) cores, the free cores on a worker, so a gang of two takes both workers"
+render_gang_manifest examples/test/e2e/gang/multi-gang-contention.yaml | kubectl apply -f -
 
 # wait until the cluster settles. Three possible outcomes.
 #   - one gang fully Running, other fully Pending  -> contention; assert no partial
@@ -66,7 +67,7 @@ else
   log "PASS 6B: $loser stayed entirely pending, no partial placement under contention"
 fi
 
-kubectl delete -f examples/test/e2e/gang/multi-gang-contention.yaml --wait=false || true
+render_gang_manifest examples/test/e2e/gang/multi-gang-contention.yaml | kubectl delete -f - --wait=false || true
 for g in gang-a gang-b; do
   kubectl patch podgroup $g --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
 done

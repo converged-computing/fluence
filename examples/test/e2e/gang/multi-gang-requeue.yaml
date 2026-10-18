@@ -4,7 +4,8 @@
 # gang-wait. A 2-pod gang needing the same nodes. Loses the initial race and sits
 #            Unschedulable. When gang-win completes, gang-wait must be re-attempted
 #            (via the shortened unschedulable-recheck timeout) and place atomically.
-# On a 3-worker (~3-core) cluster the two 2-pod gangs (4 cores) cannot co-run.
+# GANG_CPU is filled in by the test with the free cores on a worker, so one pod
+# fills one worker and the two gangs cannot co-run.
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -24,7 +25,7 @@ spec:
         - name: w
           image: busybox
           command: ["sh","-c","sleep 30"]   # completes, frees nodes
-          resources: {requests: {cpu: "1"}}
+          resources: {requests: {cpu: "${GANG_CPU}"}}
 ---
 apiVersion: batch/v1
 kind: Job
@@ -45,4 +46,4 @@ spec:
         - name: w
           image: busybox
           command: ["sh","-c","sleep 10"]
-          resources: {requests: {cpu: "1"}}
+          resources: {requests: {cpu: "${GANG_CPU}"}}

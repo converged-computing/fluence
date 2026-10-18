@@ -39,6 +39,8 @@ Everything in the graph that can be allocated is a node vertex. That includes th
 
 Real nodes have the attribute virtual=false and virtual resources have virtual=true. A full set of attributes might include virtual=true, class=qpu, and region=us-east-1, because RFC 31 only checks whether a key is present. You select a resource by its class, which means any level of the tree can be asked for on its own. Classes are inherited so a nested type is not pruned at its parent on the way down.
 
+A vertex is the unit Fluxion allocates. Anything under a slot is taken whole, so a node modeled as one core vertex of size 64 could hold a single slot of a gang, and two pods of one gang could only land on two nodes. Real nodes are built the way Flux builds them, one vertex per core and per GPU. Memory is chunked, which is how flux-sched's own test graphs and Slurm's memory per CPU work. Each node gets one memory chunk per core, sized as the node's memory split over its cores in MiB, and a pod's request in MiB takes however many whole chunks cover it. The vertex count stays at about twice the cores, and the kubelet's own fit check still admits the pod with the exact bytes.
+
 ## Resources
 
 Here is an example of resources for AWS Braket.

@@ -10,8 +10,9 @@
 #      re-attempted on its own (no manual nudge) and then ALSO places atomically
 #      (2/2), driven by the shortened --pod-max-in-unschedulable-pods-duration.
 #
-# SCOPE / LIMITATION. This is a 3-node kind cluster with small (1-core) pods. It
-# verifies the INVARIANTS on a minimal contention case. It does NOT reproduce the
+# SCOPE / LIMITATION. This is a kind cluster with two workers, and each pod's cpu
+# request is raised to fill a worker, so one gang fits at a time. It verifies
+# the INVARIANTS on a minimal contention case. It does NOT reproduce the
 # GKE-scale dynamics where the bug was first seen, one-pod-per-node (~80-core)
 # saturation and ~20 simultaneous mixed-size gangs draining in sequence. That
 # scale behavior is validated on the real cluster, not in CI. A pass here means
@@ -25,7 +26,8 @@ running() { kubectl get pods -l job-name="$1" --field-selector=status.phase=Runn
 on_nodes() { kubectl get pods -l job-name="$1" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' 2>/dev/null | grep -c . || true; }
 
 log "TEST 9: contended gangs stay all-or-nothing, loser requeues when capacity frees"
-kubectl apply -f examples/test/e2e/gang/multi-gang-requeue.yaml
+log "each pod asks for $(free_cores_per_worker) cores, the free cores on a worker, so one gang fits at a time"
+render_gang_manifest examples/test/e2e/gang/multi-gang-requeue.yaml | kubectl apply -f -
 
 # ---- 1. one gang wins CLEANLY (2/2); the other places NOTHING (0/2) ------------
 log "waiting for a clean 2/0 split (one whole gang runs, the other entirely waits)"
@@ -79,7 +81,7 @@ either the shortened --pod-max-in-unschedulable-pods-duration is not taking effe
 (gang stuck) or the requeued gang did not assemble"
 log "PASS 9: $loser requeued and placed atomically (2/2) after $winner freed capacity"
 
-kubectl delete -f examples/test/e2e/gang/multi-gang-requeue.yaml --wait=false || true
+render_gang_manifest examples/test/e2e/gang/multi-gang-requeue.yaml | kubectl delete -f - --wait=false || true
 for g in gang-win gang-wait; do
   kubectl patch podgroup $g --type=merge -p '{"metadata":{"finalizers":null}}' 2>/dev/null || true
 done
