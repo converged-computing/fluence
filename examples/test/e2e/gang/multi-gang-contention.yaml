@@ -1,6 +1,7 @@
-# Two gangs that cannot both place. fluxion allocates one core per slot, so two
-# 2-pod gangs need 4 cores, but the cluster graphs ~3 (3 workers, ~1 core each). One gang places entirely. The loser stays FULLY pending
-# (all-or-nothing), never partial.
+# Two gangs that cannot both place. GANG_CPU is filled in by the test with the
+# free cores on a worker, so one pod fills one worker and a gang of two takes
+# both. One gang places entirely. The loser stays FULLY pending (all-or-nothing),
+# never partial.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,7 +19,7 @@ spec:
         - name: w
           image: busybox
           command: ["sleep", "3600"]
-          resources: {requests: {cpu: "1"}}
+          resources: {requests: {cpu: "${GANG_CPU}"}}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -37,4 +38,4 @@ spec:
         - name: w
           image: busybox
           command: ["sleep", "3600"]
-          resources: {requests: {cpu: "1"}}
+          resources: {requests: {cpu: "${GANG_CPU}"}}

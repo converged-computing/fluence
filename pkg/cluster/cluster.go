@@ -85,14 +85,23 @@ func BuildGraph(nodes []corev1.Node, opts Options) ([]byte, error) {
 		})
 		parents[n.Name] = nodeV
 
-		if cpu := count(n, corev1.ResourceCPU); cpu > 0 {
-			b.AddChild(nodeV, "core", "core", jgf.Options{Size: cpu})
+		// A vertex is the unit Fluxion allocates. Anything under a slot is taken
+		// whole, so a node built as one sized vertex per type can host one slot
+		// of a gang. Cores and GPUs are one vertex each, as in Flux. Memory is
+		// chunked the way flux-sched's own graphs and Slurm's memory per CPU
+		// do it, one chunk per core sized in MiB, so a request takes whole
+		// chunks and the vertex count stays at twice the cores.
+		cores := count(n, corev1.ResourceCPU)
+		for i := int64(0); i < cores; i++ {
+			b.AddChild(nodeV, "core", "core", jgf.Options{})
 		}
-		if memMB := memoryMB(n); memMB > 0 {
-			b.AddChild(nodeV, "memory", "memory", jgf.Options{Size: memMB, Unit: "MB"})
+		if chunk := memoryChunkMiB(n, cores); chunk > 0 {
+			for i := int64(0); i < cores; i++ {
+				b.AddChild(nodeV, "memory", "memory", jgf.Options{Size: chunk, Unit: "MiB"})
+			}
 		}
-		if gpu := count(n, gpuName); gpu > 0 {
-			b.AddChild(nodeV, "gpu", "gpu", jgf.Options{Size: gpu})
+		for i := int64(0); i < count(n, gpuName); i++ {
+			b.AddChild(nodeV, "gpu", "gpu", jgf.Options{})
 		}
 	}
 
@@ -131,8 +140,13 @@ func count(n *corev1.Node, name corev1.ResourceName) int64 {
 	return 0
 }
 
-// memoryMB returns node memory in mebibytes.
-func memoryMB(n *corev1.Node) int64 {
+// memoryChunkMiB is the size of one memory chunk, the node's memory split
+// evenly over its cores, in whole MiB rounded down. Zero when there is no
+// memory or no cores to split it over.
+func memoryChunkMiB(n *corev1.Node, cores int64) int64 {
+	if cores <= 0 {
+		return 0
+	}
 	q, ok := n.Status.Allocatable[corev1.ResourceMemory]
 	if !ok {
 		q, ok = n.Status.Capacity[corev1.ResourceMemory]
@@ -140,5 +154,5 @@ func memoryMB(n *corev1.Node) int64 {
 	if !ok {
 		return 0
 	}
-	return q.Value() / (1024 * 1024)
+	return q.Value() / (1024 * 1024) / cores
 }

@@ -439,3 +439,26 @@ func computeConstraints(t *testing.T, spec *jobspec.Jobspec) map[string]interfac
 	}
 	return cons
 }
+
+// Memory requests are counted in whole MiB rounded up, the unit the graph
+// sizes its memory chunks in, so Fluxion takes however many chunks cover it.
+func TestMemoryRequestsCountInMiB(t *testing.T) {
+	cases := []struct {
+		req  string
+		want int
+	}{
+		{"128Mi", 128},
+		{"1Gi", 1024},
+		{"1536Ki", 2},
+		{"100M", 96},
+	}
+	for _, tc := range cases {
+		p := podWith("p", corev1.ResourceList{
+			corev1.ResourceCPU:    qty(1),
+			corev1.ResourceMemory: resource.MustParse(tc.req),
+		})
+		if got := podResources(&p)["memory"]; got != tc.want {
+			t.Errorf("memory %s = %d vertices, want %d", tc.req, got, tc.want)
+		}
+	}
+}
