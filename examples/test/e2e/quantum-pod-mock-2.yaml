@@ -1,5 +1,5 @@
 # A second qpu pod, identical request to sampler-mock. Used by the restart-recovery
-# test: after fluence restarts and replays the first allocation, this one must NOT be
+# test after fluence restarts and replays the first allocation, this one must NOT be
 # given the same exclusive backend (it should stay Pending if the backend is taken).
 apiVersion: v1
 kind: Pod

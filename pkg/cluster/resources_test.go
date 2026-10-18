@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-// A realistic config: a virtual qdevice (under the default parent) holding a qpu
+// A realistic config. A virtual qdevice (under the default parent) holding a qpu
 // child, with attributes given by reference, plus a second device with inline
 // attributes. Exercises nesting, count, the parent default, and both attribute
 // forms.
@@ -145,7 +145,7 @@ resources:
 	}
 }
 
-// A config with content but no resources: key (e.g. an older "backends:" layout)
+// A config with content but no resources key (e.g. an older "backends:" layout)
 // must error loudly rather than silently yielding an empty graph.
 func TestLoadResourcesConfigRejectsSchemaMismatch(t *testing.T) {
 	_, err := LoadResourcesConfig([]byte("backends:\n  - name: ibm_fez\n    num_qubits: 156\n"))
@@ -167,9 +167,9 @@ func TestLoadResourcesConfigEmptyIsClassical(t *testing.T) {
 	}
 }
 
-// Attributes inherit downward: a child gets the parent's attributes, can override
+// Attributes inherit downward. A child gets the parent's attributes, can override
 // a key, and can clear one by setting it to empty. This makes a nested class +
-// attribute constraint reachable (every node on the path carries the attribute).
+// attribute constraint reachable (every node on the path has the attribute).
 func TestAttributeInheritance(t *testing.T) {
 	cfg := `
 resources:

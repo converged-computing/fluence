@@ -2,13 +2,13 @@ package graph
 
 import "testing"
 
-// jgf match format: vertices at top-level graph.
+// jgf match format. Vertices at top-level graph.
 const jgfAlloc = `{"graph":{"nodes":[
   {"metadata":{"type":"node","name":"kind-worker"}},
   {"metadata":{"type":"core","name":"core0"}},
   {"metadata":{"type":"qpu","name":"ibm_marrakesh"}}]}}`
 
-// rv1 match format: execution view + scheduling key holding the same vertices.
+// rv1 match format. Execution view + scheduling key holding the same vertices.
 const rv1Alloc = `{"version":1,
   "execution":{"R_lite":[{"rank":"0","children":{"core":"0"}}],"nodelist":["kind-worker"]},
   "scheduling":{"graph":{"nodes":[
@@ -38,8 +38,8 @@ func TestNamesFromAllocationRV1(t *testing.T) {
 	}
 }
 
-// markedAlloc has node vertices carrying composed virtual markers plus a qpu
-// child — the shape PlacementFromAllocation classifies.
+// markedAlloc has node vertices with composed virtual markers plus a qpu
+// child, the shape PlacementFromAllocation classifies.
 const markedAlloc = `{"graph":{"nodes":[
   {"metadata":{"type":"node","name":"kind-worker","properties":{"virtual=false":""}}},
   {"metadata":{"type":"node","name":"rigetti","properties":{"virtual=true":"","class=qdevice":""}}},
@@ -70,6 +70,6 @@ func TestNodesFromAllocation(t *testing.T) {
 		t.Errorf("rigetti missing class=qdevice: %v", byName["rigetti"].Properties)
 	}
 	if byName["kind-worker"].HasProperty("virtual=true") {
-		t.Error("kind-worker should not carry virtual=true")
+		t.Error("kind-worker should not have virtual=true")
 	}
 }

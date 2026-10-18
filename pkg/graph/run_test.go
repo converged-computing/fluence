@@ -5,7 +5,7 @@ import (
 )
 
 func TestBackendFromAllocation(t *testing.T) {
-	// Shape mirrors a Fluxion allocation graph: a qpu vertex named after the
+	// Shape mirrors a Fluxion allocation graph. A qpu vertex named after the
 	// QRMI backend, sitting under a gateway under the cluster.
 	alloc := `{"graph":{"nodes":[
 	  {"metadata":{"type":"cluster","name":"tiny0"}},

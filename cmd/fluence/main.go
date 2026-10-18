@@ -1,6 +1,6 @@
 // Command fluence is a Kubernetes scheduler built from the standard
 // kube-scheduler with the Fluence placement plugin registered out-of-tree. Run
-// it as a second scheduler (schedulerName: fluence) alongside the default one.
+// it as a second scheduler (schedulerName fluence) alongside the default one.
 package main
 
 import (

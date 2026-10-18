@@ -1,4 +1,4 @@
-# fluence sitecustomize — staged onto the user container's PYTHONPATH by the
+# fluence sitecustomize, staged onto the user container's PYTHONPATH by the
 # Fluence init container. Python imports `sitecustomize` automatically on every
 # interpreter start (interactive OR script), so this runs the interceptor with
 # zero user code changes and without relying on PYTHONSTARTUP (which only fires

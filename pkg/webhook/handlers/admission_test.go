@@ -106,7 +106,7 @@ func TestStandaloneAdmittedWhenItFits(t *testing.T) {
 		t.Errorf("admitted pod must be marked protected, got %v", ann)
 	}
 	if ann[webhook.AdmittedCoresAnnotation] != "3" {
-		t.Errorf("standalone pod must carry its own record, got %v", ann)
+		t.Errorf("standalone pod must have its own record, got %v", ann)
 	}
 	if ann[webhook.AdmittedGroupAnnotation] != "default/sampler" {
 		t.Errorf("standalone pod must point at its own record, got %v", ann)

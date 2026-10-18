@@ -2,7 +2,7 @@
 #
 # Two identical pods, both requesting the quantum resource, in group "qgang" with
 # coordination=shared. The user authors NO roles and NO submitter pod. The webhook
-# splits the gang by completion index:
+# splits the gang by completion index.
 #   qgang-0 (index 0)  -> SCOUT: its own group-of-one "qgang-scout"
 #                         (minCount 1), real submit, sidecar, NOT gated. It is a
 #                         real member, so the app runs N times, never N+1.
@@ -10,12 +10,12 @@
 #                         quantum.braket/ready + preempting priority, interceptor
 #                         told role=worker; it fetches the scout's result by id.
 #
-# These are raw pods (not a Job) so the e2e can reference stable names; the
+# These are raw pods (not a Job) so the e2e can reference stable names. The
 # completion-index annotation is set manually to make scout election
 # deterministic (a real workload uses an indexed Job, which the controller stamps
 # with batch.kubernetes.io/job-completion-index automatically). group-size makes N
 # deterministic for raw pods, which have no owning Job to derive it from. busybox
-# stands in for the quantum app; the interceptor staging fails soft (no python),
+# stands in for the quantum app. The interceptor staging fails soft (no python),
 # which is fine for the structural assertions in 02/03/04.
 apiVersion: v1
 kind: Pod

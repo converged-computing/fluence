@@ -1,4 +1,4 @@
-// quantum_test.go — all tests for the quantum handler: the scout/worker
+// quantum_test.go, all tests for the quantum handler. The scout/worker
 // shared-coordination split (no separate submitter pod), independent mode,
 // the coordination role + job-id handoff, the sidecar wiring, the Dependency primitive, and the
 // standalone/observe paths. Shared fixtures (qpuPod, cpuPod, op helpers) live in
@@ -51,12 +51,12 @@ func TestObserveLabelInjectsSidecar(t *testing.T) {
 	}
 }
 
-// ── shared coordination: scout / worker split ──────────────────────────────
+// ── shared coordination. Scout / worker split ──────────────────────────────
 
 // sharedQPUPod is a quantum workload pod (requests the resource) in a group,
 // owned by a Job of parallelism N, with coordination=shared and a completion
-// index. Index "0" is the scout; any other index is a worker. This is the
-// real shape: an indexed Job whose identical template yields differentiated
+// index. Index "0" is the scout. Any other index is a worker. This is the
+// real shape. An indexed Job whose identical template yields differentiated
 // roles purely from the completion index.
 func sharedQPUPod(ns, group, name, job, index string) *corev1.Pod {
 	p := qpuPod("fluence")
@@ -72,7 +72,7 @@ func sharedQPUPod(ns, group, name, job, index string) *corev1.Pod {
 }
 
 // gangQPUPod is a quantum workload pod in a group owned by a Job, with NO
-// coordination annotation — i.e. the default (independent) mode.
+// coordination annotation, i.e. the default (independent) mode.
 func gangQPUPod(ns, group, name, job string) *corev1.Pod {
 	p := qpuPod("fluence")
 	p.Name = name
@@ -95,7 +95,7 @@ func mincount(t *testing.T, cs *fake.Clientset, ns, group string) (int32, bool) 
 // A shared-mode WORKER (completion index != 0, owned by Job parallelism=3) is
 // gated, told its role (FLUENCE_COORDINATION_ROLE=worker), joins the <group>
 // worker gang at minCount N-1 (the split), and gets NO sidecar (it is gated).
-// No separate submitter pod is ever created — the scout is one of the N members.
+// No separate submitter pod is ever created, the scout is one of the N members.
 func TestSharedWorkerGatedRoleAndSplit(t *testing.T) {
 	ns, group, job := "default", "qg", "qg-job"
 	par := int32(3)
@@ -129,10 +129,10 @@ func TestSharedWorkerGatedRoleAndSplit(t *testing.T) {
 	}
 }
 
-// The shared-mode SCOUT (completion index 0) is wired as the real coordinator:
+// The shared-mode SCOUT (completion index 0) is wired as the real coordinator.
 // its own group-of-one <group>-scout at minCount 1, the real sidecar, not
 // gated, role=scout, and told which worker group to ungate via
-// FLUENCE_GANG_GROUP. It is one of the N members — no extra pod is created.
+// FLUENCE_GANG_GROUP. It is one of the N members, no extra pod is created.
 func TestSharedScoutWiredAsRealSidecar(t *testing.T) {
 	ns, group, job := "default", "qg2", "qg2-job"
 	par := int32(2)
@@ -189,7 +189,7 @@ func TestSharedScoutWiredAsRealSidecar(t *testing.T) {
 	}
 }
 
-// Shared mode never creates an extra pod: a full gang (scout index 0 +
+// Shared mode never creates an extra pod. A full gang (scout index 0 +
 // workers) is N members, so the application runs exactly N times (not N+1 as
 // the old submitter-pod model did).
 func TestSharedGangNoSeparateSubmitterPod(t *testing.T) {
@@ -218,8 +218,8 @@ func TestSharedGangNoSeparateSubmitterPod(t *testing.T) {
 
 // ── independent mode (default) ──────────────────────────────────────────────────
 
-// A grouped quantum pod with no coordination annotation is INDEPENDENT (default):
-// it does its own real submit, is not gated, carries no coordination role, and
+// A grouped quantum pod with no coordination annotation is INDEPENDENT (default).
+// it does its own real submit, is not gated, has no coordination role, and
 // triggers no group split and no submitter pod.
 func TestIndependentGroupedQuantumIsStandalone(t *testing.T) {
 	ns, group, job := "default", "indep", "indep-job"
@@ -247,7 +247,7 @@ func TestIndependentGroupedQuantumIsStandalone(t *testing.T) {
 }
 
 // A standalone quantum pod (no group, no owner → group of one) does its own real
-// submit: interceptor staged, but no gating, no coordination role, no submitter.
+// submit interceptor staged, but no gating, no coordination role, no submitter.
 func TestStandaloneQuantumIsReal(t *testing.T) {
 	ns := "default"
 	cs := fake.NewSimpleClientset()
@@ -315,7 +315,7 @@ func envOp(ops []spec.Op, name string) (corev1.EnvVar, bool) {
 func annotationOps(ops []spec.Op) map[string]string {
 	out := map[string]string{}
 	for _, op := range ops {
-		// whole-map add: /metadata/annotations
+		// whole-map add. /metadata/annotations
 		if op.Path == "/metadata/annotations" {
 			if m, ok := op.Value.(map[string]string); ok {
 				for k, v := range m {
@@ -358,7 +358,7 @@ func unescapeJSONPointer(s string) string {
 	return out
 }
 
-// A shared-mode worker is expressed as a general Dependency: gated, stamped
+// A shared-mode worker is expressed as a general Dependency. Gated, stamped
 // with depends-on-{kind,scout,gate}, and the scout is the <group>-scout
 // group.
 func TestQuantumWorkerIsGeneralDependency(t *testing.T) {
@@ -439,7 +439,7 @@ func TestQuantumWorkerStagedWithRole(t *testing.T) {
 
 // Classical override below the replica count: group-size=2 on a gang owned by a
 // Job(parallelism=5) must yield minCount=2 (the override), not 5. With a cluster
-// sized to 2, the gang reaches quorum and runs; if the override were dropped the
+// sized to 2, the gang reaches quorum and runs. If the override were dropped the
 // gang would wait forever for 5 (the e2e hang that fails CI).
 func TestClassicalOverrideBelowReplicaCount(t *testing.T) {
 	ns, group, job := "default", "ovr2", "ovr2-job"
@@ -459,7 +459,7 @@ func TestClassicalOverrideBelowReplicaCount(t *testing.T) {
 
 // The sidecar inherits the workload's secret/configMap-sourced credentials so it
 // can talk to the same backend, but NOT plain-value env. (Moved from the core
-// webhook package: sidecar construction is now quantum-owned.)
+// webhook package. Sidecar construction is now quantum-owned.)
 func TestSidecarInheritsWorkloadSecretEnv(t *testing.T) {
 	m := &webhook.Mutator{Clientset: fake.NewSimpleClientset()}
 	pod := &corev1.Pod{

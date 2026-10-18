@@ -1,4 +1,4 @@
-# CI mock of examples/quantum-pod.yaml: requests the same fluxion.flux-framework.org/qpu
+# CI mock of examples/quantum-pod.yaml. Requests the same fluxion.flux-framework.org/qpu
 # resource so fluence matches a backend and the webhook injects QRMI_BACKEND, but runs a
 # trivial container instead of qrmi-sampler -- no IBM secrets, no real submission. Proves
 # placement + the backend handoff end to end.

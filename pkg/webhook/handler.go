@@ -11,11 +11,11 @@ import (
 
 // MutatorAPI is the capability surface the webhook core exposes to handlers.
 // Handlers live in a subpackage and depend only on this interface, never on the
-// concrete Mutator — so the core never has to import the handlers package, and
+// concrete Mutator, so the core never has to import the handlers package, and
 // handlers cannot reach into core internals. The concrete *Mutator implements
 // this.
 //
-// The core knows nothing about what any handler does with these capabilities;
+// The core knows nothing about what any handler does with these capabilities.
 // quantum-specific policy (resource names, gate names, observe label) lives
 // entirely in the quantum handler.
 type MutatorAPI interface {
@@ -28,7 +28,7 @@ type MutatorAPI interface {
 	// EnsurePodGroup creates the group's PodGroup with the given gang minCount if
 	// it does not already exist (idempotent). Group identity is the opaque value
 	// of the group label. creatorPod is recorded only as the PodGroup's creator
-	// reference; the core ascribes no role semantics to it.
+	// reference. The core ascribes no role semantics to it.
 	EnsurePodGroup(ctx context.Context, namespace, group, creatorPod string, minCount int32)
 
 	// Admit applies admission control, see admission.go. key names the group
@@ -48,8 +48,8 @@ type Admitter interface {
 }
 
 // Handler inspects a pod and, when it applies, contributes JSON patch ops. A pod
-// flows through every registered handler whose Applies returns true; their ops
-// are concatenated. Applies is fully general — it receives the pod and the
+// flows through every registered handler whose Applies returns true. Their ops
+// are concatenated. Applies is fully general, it receives the pod and the
 // MutatorAPI, so a handler may consult cluster state in deciding whether it
 // applies.
 type Handler interface {
@@ -59,8 +59,8 @@ type Handler interface {
 }
 
 // DefaultHandlerOrder is the active set AND the dispatch order when the operator
-// passes no --handlers flag. Order matters: specific handlers run before the
-// generic gang fallback, so "gang" is LAST — it applies default gang sizing
+// passes no --handlers flag. Order matters. Specific handlers run before the
+// generic gang fallback, so "gang" is LAST, it applies default gang sizing
 // (group-size annotation or owner-derived N) only if no earlier handler already
 // shaped the gang. To change the order or disable a handler, pass a different
 // list (e.g. --handlers=fluxion,gang drops quantum).
@@ -69,9 +69,9 @@ var DefaultHandlerOrder = []string{"fluxion", "quantum", "gang"}
 // ── registration ────────────────────────────────────────────────────────────────
 //
 // Handlers self-register via Register() from their package's init(). The core
-// never names a handler; importing the handlers package (a blank import in the
+// never names a handler. Importing the handlers package (a blank import in the
 // webhook server wiring) is what populates the registry. This keeps the core
-// domain-agnostic: adding or removing a handler does not touch core code.
+// domain-agnostic. Adding or removing a handler does not touch core code.
 
 // available maps a handler's Name() to the handler. Populated by Register() from
 // each handler package's init(). This is the set of handlers that EXIST; which
@@ -80,7 +80,7 @@ var available = map[string]Handler{}
 
 // activeOrder is the ordered list of handler names to dispatch. It is BOTH the
 // selection (names not present are disabled) and the order (dispatch follows the
-// slice). Defaults to DefaultHandlerOrder; overridden by SetActiveHandlers.
+// slice). Defaults to DefaultHandlerOrder. Overridden by SetActiveHandlers.
 var activeOrder = append([]string(nil), DefaultHandlerOrder...)
 
 // Register adds a handler to the available set under its Name(). Called from
@@ -92,7 +92,7 @@ func Register(h Handler) {
 // SetActiveHandlers sets the active, ordered handler list (the --handlers value).
 // Empty/nil restores DefaultHandlerOrder. Names with no registered handler are
 // dropped and returned as `unknown` so the caller can warn. Order is preserved
-// exactly as given — the list is the dispatch order.
+// exactly as given, the list is the dispatch order.
 func SetActiveHandlers(names []string) (active, unknown []string) {
 	if len(names) == 0 {
 		activeOrder = append([]string(nil), DefaultHandlerOrder...)

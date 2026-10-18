@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# PostFilter re-match: when another scheduler plugin (TaintToleration) rejects a
+# PostFilter re-match. When another scheduler plugin (TaintToleration) rejects a
 # node Fluxion allocated, Fluence must abandon that allocation, exclude the node,
-# and re-match onto an untainted node. Safety: the gang's RUNNING pod must NEVER
+# and re-match onto an untainted node. Safety. The gang's RUNNING pod must NEVER
 # bind to the tainted node.
 #
-# This test is self-isolating: it uses its own workload name (pf-rematch) and
+# This test is self-isolating. It uses its own workload name (pf-rematch) and
 # labels, distinct from the other e2e scenarios, and ensures a clean slate first,
 # so a pod left over (terminating) from a previous test can never be mistaken for
 # this test's placement. It also ignores terminating pods when asserting.
@@ -22,7 +22,7 @@ kubectl delete podgroup "$NAME" --ignore-not-found >/dev/null 2>&1 || true
 kubectl patch podgroup "$NAME" --type=merge \
   -p '{"metadata":{"finalizers":null}}' >/dev/null 2>&1 || true
 kubectl wait --for=delete pod -l "$SEL" --timeout=60s >/dev/null 2>&1 || true
-# Defensive: a prior test's workload left running would occupy the only
+# Defensive. A prior test's workload left running would occupy the only
 # untainted worker and make this test fail with a (correct) fluxion
 # allocate -1 for lack of capacity. Ensure none lingers.
 kubectl delete deployment training --ignore-not-found --wait=false >/dev/null 2>&1 || true
@@ -80,9 +80,9 @@ YAML
 
 log "waiting for the gang to schedule (must avoid the tainted node)"
 wait_pods_ready "$SEL" 1 180 \
-  || fail "gang never became Ready — PostFilter re-match did not recover (likely stuck on the taint-rejected allocation)"
+  || fail "gang never became Ready, PostFilter re-match did not recover (likely stuck on the taint-rejected allocation)"
 
-# SAFETY: among NON-terminating (Running, no deletionTimestamp) pods, none may be
+# SAFETY. Among NON-terminating (Running, no deletionTimestamp) pods, none may be
 # on the tainted node. Terminating leftovers are ignored by construction (we use
 # a unique name and cleaned the slate), but we still filter defensively.
 checked=0
@@ -103,7 +103,7 @@ done < <(kubectl get pods -l "$SEL" \
 
 [ "$checked" -ge 1 ] || fail "no running ${NAME} pod found to check"
 
-# Informational: did PostFilter actually fire (Fluxion picked the tainted node
+# Informational. Did PostFilter actually fire (Fluxion picked the tainted node
 # first and we re-matched), or did Fluxion place on the good node directly?
 POD="$(kubectl -n kube-system get pods -l app=fluence \
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"

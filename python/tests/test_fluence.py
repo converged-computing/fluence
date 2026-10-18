@@ -1,6 +1,6 @@
 """
-Tests for the fluence package. Run: python3 -m pytest python/tests/
-None of these require a vendor SDK — they exercise registration, resolution,
+Tests for the fluence package. Run. python3 -m pytest python/tests/
+None of these require a vendor SDK, they exercise registration, resolution,
 fail-soft interceptor behavior, and the staging mechanism.
 """
 
@@ -73,7 +73,7 @@ def test_stage_produces_importable_package():
 
 def test_staged_sitecustomize_runs_interceptor():
     # Stage, then run a subprocess with ONLY the staged dir on PYTHONPATH and a
-    # fake braket SDK; the interceptor must patch AwsDevice.run to inject the tag.
+    # fake braket SDK. The interceptor must patch AwsDevice.run to inject the tag.
     with tempfile.TemporaryDirectory() as d:
         staged = os.path.join(d, "staged")
         subprocess.run([sys.executable, "-m", "fluence.stage", staged], check=True)
@@ -120,7 +120,7 @@ def test_braket_matches_by_qrmi_type_and_vendor():
 
 
 def test_find_my_task_matches_tag_client_side():
-    # SearchQuantumTasks has no tags filter; the provider must match the tag
+    # SearchQuantumTasks has no tags filter. The provider must match the tag
     # client-side. It calls search_quantum_tasks DIRECTLY (not the paginator,
     # which rejects empty filters) and pages via nextToken. Fake that here.
     from fluence.providers.braket import BraketProvider, BraketTask

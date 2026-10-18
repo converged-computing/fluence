@@ -44,22 +44,22 @@ type matcher interface {
 }
 
 // groupAlloc is the in-memory record of a group's Fluxion allocation. It is a
-// rebuildable, within-lifetime memo: its job is race-free "match once per group"
+// rebuildable, within-lifetime memo. Its job is race-free "match once per group"
 // dedup on the scheduling path (the durable record is the jobid annotation on
-// the owning object). It does not survive a scheduler restart, which is fine —
+// the owning object). It does not survive a scheduler restart, which is fine
 // the graph itself is rebuilt fresh on restart.
 type groupAlloc struct {
 	place placement.Placement
-	// jobids are the Fluxion allocations backing this group — one per match
+	// jobids are the Fluxion allocations backing this group, one per match
 	// (compute, plus one per requested virtual device). All are held (duration 0)
-	// and cancelled together; the group is all-or-nothing across them.
+	// and cancelled together. The group is all-or-nothing across them.
 	jobids []uint64
 }
 
 // Fluence is a scheduler-framework plugin that places whole pod groups by
 // matching them against a flux-sched resource graph built from the live cluster
 // (plus any configured virtual resources). Gang/all-or-nothing semantics are
-// delegated to the native PodGroup API; Fluence only decides placement.
+// delegated to the native PodGroup API. Fluence only decides placement.
 type Fluence struct {
 	handle  fwk.Handle
 	matcher matcher
@@ -70,7 +70,7 @@ type Fluence struct {
 	knownDevices map[string]bool
 
 	// matcherMu serializes all access to the cgo Fluxion client, which is not
-	// thread-safe. Match runs on the (sequential) scheduling path; Cancel runs in
+	// thread-safe. Match runs on the (sequential) scheduling path. Cancel runs in
 	// informer handler goroutines, so the two can race without this.
 	matcherMu sync.Mutex
 
@@ -79,7 +79,7 @@ type Fluence struct {
 	placement map[string]groupAlloc
 	// excludedNodes maps a group key to the set of nodes that are GENUINELY
 	// INCOMPATIBLE with that group (PostFilter saw UnschedulableAndUnresolvable
-	// from another plugin: a taint, affinity, or constraint Fluxion's graph does
+	// from another plugin. A taint, affinity, or constraint Fluxion's graph does
 	// not model). PreFilter feeds them back as an RFC 31 negated-hostlist
 	// constraint so the re-match is steered onto other nodes. Nodes that were
 	// merely BUSY are deliberately NOT recorded here (excluding them would turn
@@ -99,17 +99,17 @@ var (
 
 // schedulableNodes returns only the nodes a normal pod could actually be placed
 // on, so the Fluxion graph never offers a node that Kubernetes will then reject
-// in Filter. Two kinds are dropped:
+// in Filter. Two kinds are dropped.
 //
 //   - cordoned nodes (spec.unschedulable), and
-//   - nodes carrying a NoSchedule/NoExecute taint (e.g. the control-plane's
+//   - nodes with a NoSchedule/NoExecute taint (e.g. the control-plane's
 //     node-role.kubernetes.io/control-plane:NoSchedule).
 //
 // Without this, Fluxion can place a gang slot on the control-plane (it looks like
 // a valid virtual=false compute node to the graph), the pod is then rejected by
 // TaintToleration with UnschedulableAndUnresolvable, and PostFilter abandons the
-// whole allocation — on a small cluster that strands the gang permanently. We do
-// not attempt to honor specific tolerations here: gang workloads in this setup do
+// whole allocation, on a small cluster that strands the gang permanently. We do
+// not attempt to honor specific tolerations here. Gang workloads in this setup do
 // not tolerate node taints, so any NoSchedule/NoExecute taint means "not for us".
 func schedulableNodes(nodes []corev1.Node) []corev1.Node {
 	out := make([]corev1.Node, 0, len(nodes))
@@ -132,7 +132,7 @@ func schedulableNodes(nodes []corev1.Node) []corev1.Node {
 	return out
 }
 
-// New builds the plugin: discover cluster nodes, optionally inject quantum
+// New builds the plugin. Discover cluster nodes, optionally inject quantum
 // resources, write the JGF graph, initialize the Fluxion matcher, and register
 // the delete handlers that cancel allocations when their owning object is gone.
 //
@@ -142,7 +142,7 @@ func schedulableNodes(nodes []corev1.Node) []corev1.Node {
 func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error) {
 	// List nodes via the API. The scheduler's shared snapshot is empty at
 	// plugin-construction time, so a direct List is what gives us the cluster's
-	// compute. Static cluster for now: read once, graph not updated live.
+	// compute. Static cluster for now. Read once, graph not updated live.
 	nodeList, err := h.ClientSet().CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
@@ -164,7 +164,7 @@ func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error
 			}
 			opts.Resources = rc.Resources
 			// The requestable device types are the FluxionResourceNames, minus
-			// the prefix — the suffixes a pod requests as
+			// the prefix, the suffixes a pod requests as
 			// fluxion.flux-framework.org/<type>.
 			for _, name := range cluster.FluxionResourceNames(rc.Resources) {
 				knownDevices[strings.TrimPrefix(name, placement.FluxionResourcePrefix)] = true
@@ -194,12 +194,12 @@ func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error
 	}
 	_ = tmp.Close()
 
-	// rv1 (full writer, with the scheduling key) is a superset of jgf: its
+	// rv1 (full writer, with the scheduling key) is a superset of jgf. Its
 	// scheduling key is the same JGF vertex subgraph we parse for placement, and
-	// it carries the execution view flux uses to replay an allocation on restart.
+	// it has the execution view flux uses to replay an allocation on restart.
 	// This is the format we persist and feed back to UpdateAllocate for recovery.
-	// jgf match format: emits every allocated vertex (with properties) as a graph,
-	// regardless of type. rv1 cannot represent our allocations — its R_lite is
+	// jgf match format. Emits every allocated vertex (with properties) as a graph,
+	// regardless of type. rv1 cannot represent our allocations, its R_lite is
 	// built from core/gpu "reducer" children under a node, so a virtual allocation
 	// that bottoms out in nodes (no cores) serializes to an empty R. jgf has no
 	// such assumption and is exactly what PlacementFromAllocation parses (node
@@ -218,7 +218,7 @@ func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error
 	// Periodic + startup reconcile of completed Fluence-created PodGroups, so a
 	// gang's allocation is freed even if a completion/delete event is missed
 	// (informer resync gaps, controller restart, force-deleted pods). The
-	// event-driven path (onPodUpdated) handles the common case promptly; this is
+	// event-driven path (onPodUpdated) handles the common case promptly. This is
 	// the correctness backstop.
 	go f.runReconcileSweeps(ctx)
 	return f, nil
@@ -226,7 +226,7 @@ func New(ctx context.Context, _ runtime.Object, h fwk.Handle) (fwk.Plugin, error
 
 // runReconcileSweeps reconciles all Fluence-created PodGroups on startup and then
 // periodically. On startup it also catches allocations that outlived a scheduler
-// restart: a completed gang whose PodGroup still exists is deleted here, freeing
+// restart a completed gang whose PodGroup still exists is deleted here, freeing
 // its allocation via onPodGroupDeleted (cancelGroup reads jobids from the
 // PodGroup annotation, which survives restart, so the free works even though the
 // in-memory placement memo was lost).
@@ -269,7 +269,7 @@ func (f *Fluence) reconcileAll(ctx context.Context) {
 }
 
 // reconcileInterval is how often the backstop sweep runs. The event-driven path
-// handles the prompt case; this only needs to be frequent enough to bound how
+// handles the prompt case. This only needs to be frequent enough to bound how
 // long a leaked allocation can persist after a missed event.
 const reconcileInterval = 60 * time.Second
 
@@ -277,7 +277,7 @@ const reconcileInterval = 60 * time.Second
 func (f *Fluence) Name() string { return Name }
 
 // PreFilter runs once per scheduling cycle for a pod. The first pod of a group
-// triggers a single match for the whole gang; the resulting placement (and the
+// triggers a single match for the whole gang. The resulting placement (and the
 // Fluxion jobid) is cached and consumed by Filter/PreBind for every pod.
 func (f *Fluence) PreFilter(
 	ctx context.Context,
@@ -313,7 +313,7 @@ func (f *Fluence) PreFilter(
 	}
 
 	// Run every jobspec as an independent held allocation (duration 0). The group
-	// is all-or-nothing: if any match fails, cancel the ones that already
+	// is all-or-nothing. If any match fails, cancel the ones that already
 	// succeeded so we never hold a partial allocation (e.g. compute without its
 	// device, or vice versa).
 	place, jobids, status := f.matchGroup(specs)
@@ -331,13 +331,13 @@ func (f *Fluence) PreFilter(
 }
 
 // matchGroup runs each jobspec as an independent held Fluxion allocation and
-// combines them into one placement. It is all-or-nothing: on the first failure
+// combines them into one placement. It is all-or-nothing. On the first failure
 // it cancels every allocation already made and returns an Unschedulable status,
 // so the group never holds a partial set (compute without its device, etc.).
 //
-// The combined placement unions the per-match results: the compute match
+// The combined placement unions the per-match results. The compute match
 // supplies the bind nodes, a device match supplies the backend identity. (The
-// per-match split of nodes vs backend is PlacementFromAllocation's job; here we
+// per-match split of nodes vs backend is PlacementFromAllocation's job. Here we
 // merge.)
 func (f *Fluence) matchGroup(specs []*jobspec.Jobspec) (placement.Placement, []uint64, *fwk.Status) {
 	var combined placement.Placement
@@ -350,7 +350,7 @@ func (f *Fluence) matchGroup(specs []*jobspec.Jobspec) (placement.Placement, []u
 		// (e.g. "- virtual=false"), which the parser rejects with "non-string
 		// property specified" -> the whole match fails with -1. JSON always quotes
 		// strings, and JSON is valid YAML input to the matcher, so this is the
-		// reliable encoding for jobspecs that carry constraints.
+		// reliable encoding for jobspecs that have constraints.
 		spec, err := js.JSON()
 		if err != nil {
 			f.cancelJobids(jobids)
@@ -364,7 +364,7 @@ func (f *Fluence) matchGroup(specs []*jobspec.Jobspec) (placement.Placement, []u
 		req, err := f.matcher.MatchAllocateSpec(spec)
 		f.matcherMu.Unlock()
 		if err != nil {
-			log.Printf("[fluence] MATCH %d/%d FAILED: %v — rolling back jobids %v",
+			log.Printf("[fluence] MATCH %d/%d FAILED: %v, rolling back jobids %v",
 				i+1, len(specs), err, jobids)
 			f.cancelJobids(jobids)
 			return placement.Placement{}, nil, fwk.NewStatus(
@@ -392,7 +392,7 @@ func (f *Fluence) matchGroup(specs []*jobspec.Jobspec) (placement.Placement, []u
 	}
 
 	if len(combined.Nodes) == 0 && combined.Backend == "" {
-		log.Printf("[fluence] match produced no nodes and no backend — unschedulable")
+		log.Printf("[fluence] match produced no nodes and no backend, unschedulable")
 		f.cancelJobids(jobids)
 		return placement.Placement{}, nil, fwk.NewStatus(
 			fwk.Unschedulable, "fluxion returned no allocation")
@@ -403,7 +403,7 @@ func (f *Fluence) matchGroup(specs []*jobspec.Jobspec) (placement.Placement, []u
 }
 
 // cancelJobids frees a set of held allocations, used to unwind a partial group
-// match. Cancel is idempotent and best-effort; errors are logged, not returned.
+// match. Cancel is idempotent and best-effort. Errors are logged, not returned.
 func (f *Fluence) cancelJobids(jobids []uint64) {
 	for _, id := range jobids {
 		f.matcherMu.Lock()
@@ -415,7 +415,7 @@ func (f *Fluence) cancelJobids(jobids []uint64) {
 	}
 }
 
-// PreFilterExtensions: no add/remove pod handling for now.
+// PreFilterExtensions. No add/remove pod handling for now.
 func (f *Fluence) PreFilterExtensions() fwk.PreFilterExtensions { return nil }
 
 // Filter permits a node only if Fluxion assigned it to this group.
@@ -432,7 +432,7 @@ func (f *Fluence) Filter(
 	f.mu.Unlock()
 
 	// A quantum-only allocation pins no node (the backend is a remote API any
-	// node can reach), so impose no constraint; the qpu device plugin already
+	// node can reach), so impose no constraint. The qpu device plugin already
 	// gates which nodes can admit the pod.
 	if len(nodes) == 0 {
 		return fwk.NewStatus(fwk.Success)
@@ -446,7 +446,7 @@ func (f *Fluence) Filter(
 	return fwk.NewStatus(fwk.Unschedulable, "node not in fluxion allocation for this group")
 }
 
-// PostFilter runs when a pod could not be scheduled after Filter — for a Fluence
+// PostFilter runs when a pod could not be scheduled after Filter, for a Fluence
 // group, this means the cached Fluxion allocation's nodes did not all survive the
 // other scheduler plugins' Filter checks. Without intervention the group would
 // retry forever against the same cached allocation while the Fluxion reservation
@@ -457,21 +457,21 @@ func (f *Fluence) Filter(
 // the cached placement) so the next PreFilter re-matches fresh. The careful part
 // is WHICH nodes we then permanently exclude from the group's future matches,
 // because a group reaches PostFilter for two very different reasons and they must
-// be handled oppositely (see fwk.Code docs):
+// be handled oppositely (see fwk.Code docs).
 //
-//   - UnschedulableAndUnresolvable: the node genuinely cannot host this pod and
+//   - UnschedulableAndUnresolvable. The node genuinely cannot host this pod and
 //     re-trying it is pointless (a taint the pod does not tolerate, node affinity
-//     mismatch, a constraint Fluxion's graph does not model). EXCLUDE it; the
+//     mismatch, a constraint Fluxion's graph does not model). EXCLUDE it. The
 //     next PreFilter feeds the exclusion set back as an RFC 31 negated-hostlist
 //     constraint so Fluxion is steered onto other nodes.
 //
-//   - Unschedulable (plain): the node could host the pod, just not at this
-//     instant (it is momentarily full). This is TRANSIENT. Do NOT exclude it —
+//   - Unschedulable (plain). The node could host the pod, just not at this
+//     instant (it is momentarily full). This is TRANSIENT. Do NOT exclude it
 //     excluding a merely-busy node converts ordinary contention into permanent
 //     group failure, and in a saturated cluster (a gang that needs the whole node
 //     set) it strands the gang forever even though it would fit once a node frees.
 //
-// So contention excludes nothing and the group recovers by waiting/retrying;
+// So contention excludes nothing and the group recovers by waiting/retrying.
 // only durable incompatibility accumulates in excludedNodes (cleared on group
 // teardown), which keeps the exclusion-driven re-match finite and correct.
 func (f *Fluence) PostFilter(
@@ -485,25 +485,25 @@ func (f *Fluence) PostFilter(
 	f.mu.Lock()
 	alloc, ok := f.placement[group]
 	if !ok {
-		// No cached allocation for this group — nothing of ours to reconcile.
+		// No cached allocation for this group, nothing of ours to reconcile.
 		// (Another plugin's PostFilter, or a non-group pod.)
 		f.mu.Unlock()
 		return nil, fwk.NewStatus(fwk.Unschedulable)
 	}
 	// Exclude ONLY nodes that are genuinely incompatible with this pod, never
 	// nodes that were merely busy this cycle. The framework gives us a per-node
-	// status: UnschedulableAndUnresolvable means the node cannot host the pod and
+	// status. UnschedulableAndUnresolvable means the node cannot host the pod and
 	// re-trying it is pointless (a taint the pod does not tolerate, node affinity
 	// mismatch, a constraint Fluxion's graph does not model) -> exclude it so the
 	// re-match is steered elsewhere. A plain Unschedulable means the node could
 	// host the pod but not right now (it is momentarily full) -> do NOT exclude
-	// it; it must stay eligible so the group can land there once capacity frees.
+	// it. It must stay eligible so the group can land there once capacity frees.
 	//
-	// This is the whole point: a group enters PostFilter for many reasons, and
+	// This is the whole point. A group enters PostFilter for many reasons, and
 	// "the cluster is just full at this instant" is the common one. Permanently
 	// banning the busy nodes (the old whole-allocation exclusion) turned transient
-	// contention into permanent group failure — exactly backwards. Now contention
-	// excludes nothing; the group simply abandons this cycle's reservation and
+	// contention into permanent group failure, exactly backwards. Now contention
+	// excludes nothing. The group simply abandons this cycle's reservation and
 	// retries the same nodes when they free.
 	if f.excludedNodes[group] == nil {
 		f.excludedNodes[group] = map[string]bool{}
@@ -537,7 +537,7 @@ func (f *Fluence) PostFilter(
 		"incompatible(excluded)=%v busy(retryable, NOT excluded)=%v; %d node(s) excluded total",
 		group, jobids, incompatible, busy, excludedCount)
 
-	// Returning Unschedulable (no nominated node) lets the pod be requeued; the
+	// Returning Unschedulable (no nominated node) lets the pod be requeued. The
 	// next PreFilter re-matches (with any incompatible nodes excluded, but busy
 	// nodes still in play). Fluxion, not PostFilter preemption, chooses placement.
 	return nil, fwk.NewStatus(fwk.Unschedulable)
@@ -562,13 +562,13 @@ func (f *Fluence) PreBindPreFlight(
 }
 
 // Reserve stamps the chosen backend (and matched attributes) onto the pod as
-// early as possible — at reservation, in the scheduling cycle — rather than in
+// early as possible, at reservation, in the scheduling cycle, rather than in
 // PreBind. The webhook injects FLUXION_BACKEND (and FLUXION_<ATTR>) as a
-// downward-API env sourced from these annotations; downward-API env is resolved
+// downward-API env sourced from these annotations. downward-API env is resolved
 // by the kubelet when the container starts and is NOT updated afterward, so the
 // annotation must be present well before the container starts. PreBind runs in
 // the (asynchronous) binding cycle, milliseconds before Bind, which races the
-// kubelet — Reserve runs earlier and synchronously, giving the annotation time
+// kubelet, Reserve runs earlier and synchronously, giving the annotation time
 // to propagate so the value reliably surfaces in the container.
 func (f *Fluence) Reserve(
 	ctx context.Context,
@@ -582,7 +582,7 @@ func (f *Fluence) Reserve(
 	return fwk.NewStatus(fwk.Success)
 }
 
-// Unreserve is a no-op: a stale backend annotation from a reservation that was
+// Unreserve is a no-op. A stale backend annotation from a reservation that was
 // later rejected is harmless (it is overwritten on the next attempt and the
 // value is correct for the allocation that produced it), and clearing it would
 // cost an extra API call. Required to satisfy fwk.ReservePlugin.
@@ -591,7 +591,7 @@ func (f *Fluence) Unreserve(ctx context.Context, state fwk.CycleState, pod *core
 
 // stampBackend writes the allocated backend name and matched attributes onto the
 // pod (idempotent merge patch). No-op when there is no cached allocation or the
-// allocation carries no backend (classical, non-quantum gangs).
+// allocation has no backend (classical, non-quantum gangs).
 func (f *Fluence) stampBackend(ctx context.Context, pod *corev1.Pod) error {
 	f.mu.Lock()
 	alloc, ok := f.placement[groupKey(pod)]
@@ -608,12 +608,12 @@ func (f *Fluence) stampBackend(ctx context.Context, pod *corev1.Pod) error {
 	return f.patchPodAnnotations(ctx, pod.Namespace, pod.Name, ann)
 }
 
-// PreBind records, in the commit phase, the durable state for this group:
+// PreBind records, in the commit phase, the durable state for this group.
 // the Fluxion jobid onto the owning object (the PodGroup for a gang, else the
 // pod) so the allocation can be cancelled when that object is deleted. The
 // backend annotation is stamped earlier, in Reserve (see stampBackend), because
 // the webhook-injected downward-API env (FLUXION_BACKEND) must be present before
-// the container starts; PreBind is too late and races the kubelet.
+// the container starts. PreBind is too late and races the kubelet.
 func (f *Fluence) PreBind(
 	ctx context.Context,
 	state fwk.CycleState,
@@ -630,7 +630,7 @@ func (f *Fluence) PreBind(
 	if err := f.recordJobIDs(ctx, pod, alloc.jobids); err != nil {
 		return fwk.AsStatus(fmt.Errorf("record jobids: %w", err))
 	}
-	// Backstop: if Reserve was skipped for any reason, ensure the backend is
+	// Backstop. If Reserve was skipped for any reason, ensure the backend is
 	// stamped before bind anyway (idempotent).
 	if err := f.stampBackend(ctx, pod); err != nil {
 		return fwk.AsStatus(fmt.Errorf("stamp backend annotations: %w", err))
@@ -639,8 +639,8 @@ func (f *Fluence) PreBind(
 }
 
 // recordJobIDs writes the jobid annotation (a comma-separated list of all the
-// group's held allocations) onto the allocation's owning object: a grouped pod's
-// allocation belongs to the PodGroup; an ungrouped pod owns its own.
+// group's held allocations) onto the allocation's owning object. A grouped pod's
+// allocation belongs to the PodGroup. An ungrouped pod owns its own.
 func (f *Fluence) recordJobIDs(ctx context.Context, pod *corev1.Pod, jobids []uint64) error {
 	val := formatJobIDs(jobids)
 	if group := placement.PodGroupName(pod); group != "" {
@@ -704,7 +704,7 @@ func (f *Fluence) registerCancelHandlers() {
 }
 
 // podTerminal reports whether a pod has reached a terminal phase (run to
-// completion or failed) — at which point its held allocation should be freed.
+// completion or failed), at which point its held allocation should be freed.
 func podTerminal(p *corev1.Pod) bool {
 	return p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed
 }
@@ -712,7 +712,7 @@ func podTerminal(p *corev1.Pod) bool {
 // onPodUpdated frees an ungrouped pod's allocation when the pod finishes, and
 // for a GROUPED pod triggers gang cleanup when the whole group has finished. A
 // completed pod is not deleted, so this is the path that releases resources when
-// a job ends normally; the DeleteFunc path remains as a backstop. Cancel and
+// a job ends normally. The DeleteFunc path remains as a backstop. Cancel and
 // PodGroup deletion are both idempotent, so repeated triggers are safe.
 func (f *Fluence) onPodUpdated(oldObj, newObj interface{}) {
 	oldPod, ok := oldObj.(*corev1.Pod)
@@ -724,19 +724,19 @@ func (f *Fluence) onPodUpdated(oldObj, newObj interface{}) {
 		return
 	}
 	// Only act on the transition INTO a terminal phase (UpdateFunc fires on every
-	// pod update; this avoids re-acting on each subsequent update).
+	// pod update. This avoids re-acting on each subsequent update).
 	if podTerminal(oldPod) || !podTerminal(newPod) {
 		return
 	}
 	group := placement.PodGroupName(newPod)
 	if group == "" {
-		// Ungrouped pod: its allocation is owned by the pod; free on completion.
+		// Ungrouped pod. Its allocation is owned by the pod. Free on completion.
 		f.cancelGroup(newPod.Namespace+"/"+newPod.Name, newPod.Annotations)
 		return
 	}
-	// Grouped pod: the gang's allocation is owned by the PodGroup, so we must not
+	// Grouped pod. The gang's allocation is owned by the PodGroup, so we must not
 	// free it when a single member finishes. Instead, when the LAST member goes
-	// terminal, reconcile the group — which (for a Fluence-created PodGroup)
+	// terminal, reconcile the group, which (for a Fluence-created PodGroup)
 	// deletes the PodGroup and lets onPodGroupDeleted free the allocation.
 	f.reconcileGroup(context.Background(), newPod.Namespace, group)
 }
@@ -746,19 +746,19 @@ func (f *Fluence) onPodUpdated(oldObj, newObj interface{}) {
 // the single decision point for "is this gang done, and may we clean it up?" and
 // is safe to call repeatedly (PodGroup deletion is idempotent).
 //
-// Safety rules, in order:
-//  1. The PodGroup must exist and carry the Fluence ownership annotation. A
+// Safety rules, in order.
+//  1. The PodGroup must exist and have the Fluence ownership annotation. A
 //     user-created PodGroup is NEVER deleted, even if all its pods are terminal.
-//  2. The gang must have actually materialized: at least one member pod must
+//  2. The gang must have actually materialized. At least one member pod must
 //     exist. This guards the window right after the leader is admitted, before
-//     the gated workers are created — we must not reap a group that has not yet
+//     the gated workers are created, we must not reap a group that has not yet
 //     grown its members.
 //  3. EVERY member pod (gated or not) must be in a terminal phase. A single
-//     running or still-gated member keeps the gang alive — exactly the property
+//     running or still-gated member keeps the gang alive, exactly the property
 //     that prevents freeing resources out from under workers that ungated after
 //     the leader finished.
 func (f *Fluence) reconcileGroup(ctx context.Context, namespace, group string) {
-	// Defensive: the scheduler handle (and thus the API client / informers) may
+	// Defensive. The scheduler handle (and thus the API client / informers) may
 	// be absent in unit tests or before the framework is fully wired. Reconcile
 	// needs the API to read/delete PodGroups, so without a handle it is a no-op
 	// rather than a nil dereference.
@@ -771,7 +771,7 @@ func (f *Fluence) reconcileGroup(ctx context.Context, namespace, group string) {
 		return // gone already, or not ours to inspect
 	}
 	if pg.Annotations[placement.CreatedByAnnotation] != placement.CreatedByValue {
-		return // rule 1: not Fluence-created — never delete a user's PodGroup
+		return // rule 1: not Fluence-created, never delete a user's PodGroup
 	}
 
 	members, err := f.handle.SharedInformerFactory().Core().V1().Pods().Lister().
@@ -793,31 +793,31 @@ func (f *Fluence) reconcileGroup(ctx context.Context, namespace, group string) {
 		}
 	}
 
-	// Rule 2 (refined): distinguish two "zero live members" states, which member
-	// count alone cannot:
-	//   (a) brand-new gang: PodGroup just created, workers not yet created. Must
-	//       NOT reap — that would kill a gang before it starts.
-	//   (b) finished/abandoned gang: pods completed and were already removed,
+	// Rule 2 (refined). Distinguish two "zero live members" states, which member
+	// count alone cannot.
+	//   (a) brand-new gang. PodGroup just created, workers not yet created. Must
+	//       NOT reap, that would kill a gang before it starts.
+	//   (b) finished/abandoned gang. Pods completed and were already removed,
 	//       leaving the PodGroup holding a Fluxion allocation. MUST reap, or the
 	//       allocation leaks and blocks future gangs ("qpu match failed -1").
-	// We tell them apart by whether the gang was ever scheduled: a scheduled gang
-	// carries the jobid annotation (written in PreBind). A jobid + zero live
+	// We tell them apart by whether the gang was ever scheduled. A scheduled gang
+	// has the jobid annotation (written in PreBind). A jobid + zero live
 	// members ⇒ case (b), reap. No jobid + zero members ⇒ case (a) or never
-	// scheduled; protect it with a creation grace period as a backstop.
+	// scheduled. Protect it with a creation grace period as a backstop.
 	if seen == 0 {
 		_, scheduled := parseJobIDs(pg.Annotations)
 		if !scheduled {
 			if time.Since(pg.CreationTimestamp.Time) < reconcileGraceForEmpty {
 				return // case (a): brand-new, give workers time to appear
 			}
-			// old, never scheduled, no members — nothing was ever allocated, but
+			// old, never scheduled, no members, nothing was ever allocated, but
 			// it is safe (and tidy) to remove a stale empty PodGroup we created.
 		}
-		// else: scheduled (has jobid) with no live members ⇒ case (b), reap.
+		// else scheduled (has jobid) with no live members ⇒ case (b), reap.
 	}
 
 	// All members terminal (or a scheduled gang whose pods are already gone) and
-	// the PodGroup is ours: delete it. onPodGroupDeleted then frees the Fluxion
+	// the PodGroup is ours. Delete it. onPodGroupDeleted then frees the Fluxion
 	// allocation (cancelGroup reads jobids from the annotation).
 	if err := f.handle.ClientSet().SchedulingV1alpha2().PodGroups(namespace).
 		Delete(ctx, group, metav1.DeleteOptions{}); err != nil {
@@ -825,14 +825,14 @@ func (f *Fluence) reconcileGroup(ctx context.Context, namespace, group string) {
 			namespace, group, err)
 		return
 	}
-	log.Printf("fluence: reconciled completed gang %s/%s — deleted Fluence-created PodGroup, allocation freed",
+	log.Printf("fluence: reconciled completed gang %s/%s, deleted Fluence-created PodGroup, allocation freed",
 		namespace, group)
 
-	// Scout-group cleanup: in shared coordination the gang is split into the
+	// Scout-group cleanup. In shared coordination the gang is split into the
 	// worker group <group> (this group) and the scout's group-of-one
 	// <group>-scout (a Fluence-created PodGroup, minCount 1). The scout POD
 	// is a real member of the user's workload (indexed-Job index 0), so we must
-	// NOT delete it — only its Fluence-created PodGroup, as a backstop to free its
+	// NOT delete it, only its Fluence-created PodGroup, as a backstop to free its
 	// allocation (its own reconcile pass also reaps it once the scout pod is
 	// terminal). Skip when this group is itself a scout group, to avoid
 	// recursing on <group>-scout-scout.
@@ -852,10 +852,10 @@ const reconcileGraceForEmpty = 2 * time.Minute
 // package (the scheduler must not depend on the webhook). Kept in sync with it.
 const webhookGroupLabel = "fluence.flux-framework.org/group"
 
-// scoutGroupSuffix mirrors handlers.ScoutGroupSuffix: in shared
+// scoutGroupSuffix mirrors handlers.ScoutGroupSuffix. In shared
 // coordination the scout (indexed-Job index 0) is its own group-of-one named
 // <g>-scout. Duplicated here to avoid importing the webhook handlers package
-// into the scheduler plugin; keep the two in sync.
+// into the scheduler plugin. Keep the two in sync.
 const scoutGroupSuffix = "-scout"
 
 // onPodGroupDeleted frees the gang's allocation when its PodGroup is deleted.
@@ -874,7 +874,7 @@ func (f *Fluence) onPodGroupDeleted(obj interface{}) {
 }
 
 // onPodDeleted frees an ungrouped pod's allocation when the pod is deleted.
-// Grouped pods are ignored: their allocation is owned by the PodGroup and is
+// Grouped pods are ignored. Their allocation is owned by the PodGroup and is
 // freed only when the PodGroup is deleted (freeing it on a single pod's delete
 // would release the whole gang's resources while its other pods still run).
 func (f *Fluence) onPodDeleted(obj interface{}) {
@@ -889,11 +889,11 @@ func (f *Fluence) onPodDeleted(obj interface{}) {
 		}
 	}
 	if g := placement.PodGroupName(pod); g != "" {
-		// Grouped pod deleted: do not free the gang's allocation on a single
-		// pod's removal, but DO reconcile — if this was the last member, the
+		// Grouped pod deleted. Do not free the gang's allocation on a single
+		// pod's removal, but DO reconcile, if this was the last member, the
 		// PodGroup is now empty-but-allocated and reconcileGroup will reap it
 		// (and free the allocation). This closes the gap where a completed gang's
-		// pods are deleted (not just completed): onPodUpdated never fires for a
+		// pods are deleted (not just completed). onPodUpdated never fires for a
 		// deletion, so without this the cleanup would wait for the periodic sweep.
 		f.reconcileGroup(context.Background(), pod.Namespace, g)
 		return
@@ -902,7 +902,7 @@ func (f *Fluence) onPodDeleted(obj interface{}) {
 }
 
 // cancelGroup frees all allocations for a deleted owning object. The jobids come
-// from the object's annotation (the durable source of truth); if it is missing
+// from the object's annotation (the durable source of truth). If it is missing
 // (e.g. deleted between PreFilter and PreBind, before the annotation was
 // written) it falls back to the in-memory memo by key. Cancel is idempotent.
 func (f *Fluence) cancelGroup(key string, ann map[string]string) {
@@ -962,11 +962,11 @@ func parseJobIDs(ann map[string]string) ([]uint64, bool) {
 // list the namespace and filter in code. A pod with no scheduling group is its
 // own group of one.
 //
-// Gated pods are excluded: a pod still carrying a scheduling gate is held at
+// Gated pods are excluded. A pod that still has a scheduling gate is held at
 // PreEnqueue and is not part of the live scheduling cycle. In a quantum gang the
 // workers stay gated until the sidecar ungates them at QPU position==1, so
 // including them here would make the leader's match reserve resources for pods
-// that are not yet ready to run — defeating the whole point of gating. An
+// that are not yet ready to run, defeating the whole point of gating. An
 // ungated pod re-enters the queue and is matched then.
 func (f *Fluence) groupPods(pod *corev1.Pod) ([]corev1.Pod, error) {
 	group := placement.PodGroupName(pod)
@@ -983,7 +983,7 @@ func (f *Fluence) groupPods(pod *corev1.Pod) ([]corev1.Pod, error) {
 		if placement.PodGroupName(p) != group {
 			continue
 		}
-		// Skip pods still holding a scheduling gate — they are not in the live
+		// Skip pods still holding a scheduling gate, they are not in the live
 		// scheduling cycle yet. The pod currently being scheduled (pod) has
 		// already cleared its gates by the time PreFilter runs, so it is included.
 		if len(p.Spec.SchedulingGates) > 0 {

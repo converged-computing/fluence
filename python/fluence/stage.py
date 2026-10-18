@@ -1,16 +1,16 @@
 """
-fluence.stage — init-container entrypoint for Model C delivery.
+fluence.stage, init-container entrypoint for Model C delivery.
 
 The Fluence webhook injects an init container (the sidecar image, which has
 `fluence` installed) that runs `python -m fluence.stage <dest>`. This copies the
 installed `fluence` package plus a `sitecustomize.py` into <dest>, a shared
 emptyDir volume. The webhook mounts that volume into the user's application
 container and prepends <dest> to PYTHONPATH. Python then auto-imports
-sitecustomize on startup, which imports fluence.interceptor — tagging the user's
+sitecustomize on startup, which imports fluence.interceptor, tagging the user's
 quantum tasks with zero user code changes and no vendor SDK requirement on our
 side (the interceptor patches whatever SDK the user already has).
 
-Replaces the old build-interceptor.sh: assembly is real package staging, not
+Replaces the old build-interceptor.sh. Assembly is real package staging, not
 text concatenation.
 
 Usage:
@@ -30,8 +30,8 @@ def stage(dest: str) -> None:
     os.makedirs(dest, exist_ok=True)
 
     # Copy the installed `fluence` package into <dest>/fluence so it is importable
-    # when <dest> is on PYTHONPATH. We copy only the pure-Python package — no
-    # vendor SDKs — so we never perturb the user container's own dependencies.
+    # when <dest> is on PYTHONPATH. We copy only the pure-Python package, no
+    # vendor SDKs, so we never perturb the user container's own dependencies.
     pkg_src = os.path.dirname(os.path.abspath(fluence.__file__))
     pkg_dst = os.path.join(dest, "fluence")
     if os.path.exists(pkg_dst):

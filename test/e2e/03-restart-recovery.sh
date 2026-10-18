@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Restart recovery: after the scheduler restarts, it must replay the existing allocation
+# Restart recovery. After the scheduler restarts, it must replay the existing allocation
 # (via reapi update_allocate) and NOT double-book an exclusive qpu backend.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE}/lib.sh"
@@ -15,7 +15,7 @@ backend="$(kubectl get pod sampler-mock -n "$NS" -o jsonpath="{.metadata.annotat
 [ -n "$backend" ] || fail "first pod has no backend annotation"
 log "first pod holds backend: $backend"
 
-# 2. Restart the scheduler. Its in-memory Fluxion graph is rebuilt empty; recovery must
+# 2. Restart the scheduler. Its in-memory Fluxion graph is rebuilt empty. Recovery must
 #    replay the persisted allocation so the backend stays occupied.
 log "restarting fluence scheduler"
 kubectl rollout restart -n "${NS_KUBE}" deployment/fluence

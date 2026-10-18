@@ -149,10 +149,10 @@ def main():
     session_id = provider.session_id(task)
     n_ok = ungate_pods(gated_pods, job_id, namespace, session_id=session_id)
     if n_ok == len(gated_pods):
-        log(f"done — {n_ok} gang pod(s) ungated")
+        log(f"done, {n_ok} gang pod(s) ungated")
     else:
         log(
-            f"WARNING: ungated only {n_ok}/{len(gated_pods)} gang pod(s) — see errors above"
+            f"WARNING: ungated only {n_ok}/{len(gated_pods)} gang pod(s), see errors above"
         )
     _hold_for_workers(namespace, gang_group, pod_name)
 

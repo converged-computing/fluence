@@ -1,5 +1,5 @@
 # Native gang scheduling (k8s >= 1.36, GangScheduling/GenericWorkload gates on).
-# Fluence does placement; the PodGroup gives all-or-nothing semantics. Pods link
+# Fluence does placement. The PodGroup gives all-or-nothing semantics. Pods link
 # to the PodGroup via the first-class field spec.schedulingGroup.podGroupName.
 apiVersion: scheduling.k8s.io/v1alpha2
 kind: PodGroup

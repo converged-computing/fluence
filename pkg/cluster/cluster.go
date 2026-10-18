@@ -1,11 +1,11 @@
 // Package cluster builds a Fluxion resource graph from the live Kubernetes
-// cluster. Physical compute (cpu/memory/gpu) is discovered from node capacity;
+// cluster. Physical compute (cpu/memory/gpu) is discovered from node capacity.
 // virtual resources (e.g. quantum backends, but nothing here is quantum-specific)
 // are injected from a generic resource-tree configuration so the same graph can
-// carry both physical and virtual vertices.
+// have both physical and virtual vertices.
 //
-// Model: every allocatable thing is a "node" vertex. Physical nodes carry the
-// property virtual=false; configured virtual resources carry virtual=true plus
+// Model. Every allocatable thing is a "node" vertex. Physical nodes have the
+// property virtual=false; configured virtual resources have virtual=true plus
 // their configured attributes as RFC 31 properties. A pod's jobspec constrains
 // virtual=false for the compute it lands on and virtual=true for any virtual
 // device it requests, so the two are matched from disjoint vertex sets out of a
@@ -38,7 +38,7 @@ type Options struct {
 //
 // Physical nodes are built first, then the configured resource trees are
 // appended under their parent vertices. A single contiguous rank counter spans
-// physical and virtual node vertices: every node-typed vertex gets a real rank
+// physical and virtual node vertices. Every node-typed vertex gets a real rank
 // (the rv1 writer requires it), and the virtual=true/false property keeps the
 // two sets apart at match time.
 func BuildGraph(nodes []corev1.Node, opts Options) ([]byte, error) {
@@ -110,7 +110,7 @@ var controlPlaneTaints = map[string]bool{
 	"node-role.kubernetes.io/master":        true,
 }
 
-// isControlPlane reports whether a node carries a control-plane taint.
+// isControlPlane reports whether a node has a control-plane taint.
 func isControlPlane(n *corev1.Node) bool {
 	for i := range n.Spec.Taints {
 		if controlPlaneTaints[n.Spec.Taints[i].Key] {

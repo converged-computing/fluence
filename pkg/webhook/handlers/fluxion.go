@@ -21,7 +21,7 @@ func init() {
 
 // fluxionHandler injects the FLUXION_* env contract into any container that
 // requests a fluxion.flux-framework.org/* resource. Generic to all Fluxion
-// resources — not quantum-specific. (Named for the domain, not "fluxion_env",
+// resources, not quantum-specific. (Named for the domain, not "fluxion_env",
 // since Fluxion concerns may grow beyond env injection.)
 type fluxionHandler struct{}
 

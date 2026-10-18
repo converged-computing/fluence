@@ -1,10 +1,10 @@
 """
 Tests for the QRMI provider. Like test_fluence.py, none of these require the
-real qrmi SDK — they exercise registration, routing, the resource-type mapping,
+real qrmi SDK, they exercise registration, routing, the resource-type mapping,
 the handoff channel, fail-soft interceptor behavior, the status->ready mapping,
 and the free/paid (acquire) session capture using small fakes.
 
-The provider is vendor-agnostic: the tests deliberately cover more than one QRMI
+The provider is vendor-agnostic. The tests deliberately cover more than one QRMI
 vendor (IBM's qiskit-runtime-service AND Pasqal's pasqal-cloud) to prove nothing
 is IBM-specific.
 
@@ -41,7 +41,7 @@ def test_resolve_qrmi_ibm_quantum_system_and_legacy():
 
 def test_resolve_qrmi_pasqal_proves_vendor_agnostic():
     # A DIFFERENT vendor (Pasqal) must route to the same provider with no code
-    # change — routing is data-driven from qrmi_type.
+    # change, routing is data-driven from qrmi_type.
     from fluence.providers import resolve
 
     assert resolve({"qrmi_type": "pasqal-cloud"}).name == "qrmi"
@@ -62,7 +62,7 @@ def test_resolve_qrmi_by_explicit_transport_marker():
 def test_qrmi_and_braket_do_not_collide():
     from fluence.providers import resolve
 
-    # Braket-reached devices carry a braket-* qrmi_type and must go to braket.
+    # Braket-reached devices have a braket-* qrmi_type and must go to braket.
     assert resolve({"qrmi_type": "braket-gate", "vendor": "amazon"}).name == "braket"
     assert resolve({"qrmi_type": "braket-ahs", "vendor": "quera"}).name == "braket"
     # QRMI-reached devices must go to qrmi.
@@ -161,7 +161,7 @@ def test_handoff_write_is_atomic_no_partial_file():
         assert leftovers == [], leftovers
 
 
-# ── interceptor: fail-soft + free/paid session capture ────────────────────────
+# ── interceptor. fail-soft + free/paid session capture ────────────────────────
 
 
 def test_qrmi_install_interceptor_failsoft_without_qrmi():

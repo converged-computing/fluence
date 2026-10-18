@@ -1,5 +1,5 @@
 """
-fluence — quantum-classical scheduling coordination for the Fluence Kubernetes
+fluence, quantum-classical scheduling coordination for the Fluence Kubernetes
 scheduler.
 
 This package is built into the Fluence sidecar image and staged into user

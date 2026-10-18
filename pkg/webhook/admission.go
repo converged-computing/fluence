@@ -27,7 +27,7 @@ import (
 
 const (
 	// ProtectedAnnotation marks a pod as one of ours and not preemptible. Set by
-	// the webhook on every quantum pod; a submission carrying it is refused.
+	// the webhook on every quantum pod. A submission with it is refused.
 	ProtectedAnnotation = "fluence.flux-framework.org/protected"
 	ProtectedValue      = "quantum"
 
@@ -54,7 +54,7 @@ type Capacity struct {
 	Promised    int // admitted to quantum groups whose members are not all running
 }
 
-// Reachable is what a new group could have: free cores plus what preemption
+// Reachable is what a new group could have. Free cores plus what preemption
 // could free.
 func (c Capacity) Reachable() int { return c.Free + c.Preemptible }
 
@@ -135,7 +135,7 @@ func (m *Mutator) Capacity(ctx context.Context) (Capacity, error) {
 
 	// cores running per admission record, keyed namespace/name
 	runningOf := map[string]int{}
-	// the records themselves: PodGroups, and standalone pods that carry their own
+	// the records themselves. PodGroups, and standalone pods that have their own
 	records := map[string]int{}
 	for _, pg := range groups.Items {
 		if n, err := strconv.Atoi(pg.Annotations[AdmittedCoresAnnotation]); err == nil && n > 0 {

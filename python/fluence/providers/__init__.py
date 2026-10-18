@@ -1,13 +1,13 @@
 """
-fluence.providers — provider registry.
+fluence.providers, provider registry.
 
 Importing this package imports every provider submodule, each of which calls
 fluence.providers.base.register() at import time. This is the single extension
-point: to add a vendor, drop a new module here that defines a Provider subclass
-and calls register() — nothing else in the codebase needs to change.
+point to add a vendor, drop a new module here that defines a Provider subclass
+and calls register(), nothing else in the codebase needs to change.
 
 Provider discovery is by explicit submodule import below (simple and debuggable).
-Importing a provider module never fails on a missing vendor SDK: the SDK is only
+Importing a provider module never fails on a missing vendor SDK. The SDK is only
 imported lazily inside the methods that need it.
 """
 

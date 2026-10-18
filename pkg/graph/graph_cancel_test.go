@@ -1,8 +1,8 @@
 //go:build cgo
 
 // Package graph cancel test. This exercises the REAL Fluxion matcher (cgo +
-// flux-sched), so it only builds/runs where flux-sched is linkable — i.e. in CI
-// inside fluence-base, or the devcontainer. It verifies cancel's actual effect:
+// flux-sched), so it only builds/runs where flux-sched is linkable, i.e. in CI
+// inside fluence-base, or the devcontainer. It verifies cancel's actual effect.
 // a cancelled jobid frees its allocation so the resource can be matched again.
 package graph
 
@@ -13,7 +13,7 @@ import (
 )
 
 // A tiny graph with a single exclusive core, so the first match consumes it and
-// a second match must fail — until we cancel the first.
+// a second match must fail, until we cancel the first.
 const tinyGraph = `{
   "graph": {
     "nodes": [
@@ -63,7 +63,7 @@ func newGraph(t *testing.T) *FluxionGraph {
 	return g
 }
 
-// TestCancelFreesAllocation is the real "cancel of the jobid" check: match the
+// TestCancelFreesAllocation is the real "cancel of the jobid" check. Match the
 // only core (consuming it), confirm a second match is refused, cancel the first
 // jobid, then confirm the core can be matched again. This proves Cancel actually
 // releases the allocation in the Fluxion graph, not just that it returns nil.
@@ -79,7 +79,7 @@ func TestCancelFreesAllocation(t *testing.T) {
 		t.Fatalf("expected a nonzero jobid from first match")
 	}
 
-	// 2. Second match must be refused — the core is taken.
+	// 2. Second match must be refused, the core is taken.
 	if _, err := g.MatchAllocateSpec(coreJobspec); err == nil {
 		t.Fatal("second match should fail while the core is allocated, but it succeeded")
 	}
@@ -89,7 +89,7 @@ func TestCancelFreesAllocation(t *testing.T) {
 		t.Fatalf("cancel jobid %d failed: %v", req1.Number, err)
 	}
 
-	// 4. The core is free again: a fresh match must now succeed.
+	// 4. The core is free again. A fresh match must now succeed.
 	req2, err := g.MatchAllocateSpec(coreJobspec)
 	if err != nil {
 		t.Fatalf("match after cancel failed (cancel did not free the allocation): %v", err)

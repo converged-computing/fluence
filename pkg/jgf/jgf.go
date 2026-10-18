@@ -1,5 +1,5 @@
 // Package jgf builds a Fluxion JSON Graph Format (JGF) resource graph
-// programmatically. The fluxion-quantum POC used hand-written JGF files; a
+// programmatically. The fluxion-quantum POC used hand-written JGF files. A
 // scheduler has to generate the graph at runtime from the live cluster, so this
 // package provides a builder that assigns vertex ids, uniq ids, and containment
 // paths automatically.
@@ -15,7 +15,7 @@ import (
 const containment = "containment"
 
 // Vertex is a handle returned by the builder. Callers use it to attach children
-// and edges; they do not set ids or paths themselves.
+// and edges. They do not set ids or paths themselves.
 type Vertex struct {
 	key       string // graph node id (stringified uniq id)
 	path      string // containment path, e.g. /cluster0/node0/core
@@ -67,7 +67,7 @@ type Options struct {
 	// flattens descriptive fields into the top level), these populate
 	// resource_t.properties in Fluxion and are what the matcher's constraint
 	// pruning (by_constraint) and queries match against. Keys/values are
-	// strings; a bare tag is value "" (matching is by key presence).
+	// strings. A bare tag is value "" (matching is by key presence).
 	NodeProperties map[string]string
 	// Rank is the flux execution rank for a node-typed vertex. The rv1 match
 	// writer builds its R_lite/nodelist from node vertices keyed by rank, and
@@ -160,7 +160,7 @@ func (m metadata) MarshalJSON() ([]byte, error) {
 			out[k] = val
 		}
 	}
-	// RFC 31 resource properties: a nested object Fluxion loads into
+	// RFC 31 resource properties. A nested object Fluxion loads into
 	// resource_t.properties (what constraint pruning and queries match on).
 	// Emitted only when present so vertices without properties are unchanged.
 	if len(m.v.nodeProps) > 0 {

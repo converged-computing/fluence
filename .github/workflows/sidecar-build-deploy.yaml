@@ -1,7 +1,7 @@
 name: sidecar-build-deploy
 
 # Builds and tests the single, provider-agnostic Fluence quantum sidecar image.
-# The fluence Python package (python/) is baked into the image; the sidecar
+# The fluence Python package (python/) is baked into the image. The sidecar
 # resolves its vendor provider at runtime, so there is one image, not one per
 # vendor. The same image also serves as the init container that stages the
 # package into user pods (Model C).
@@ -28,7 +28,7 @@ env:
 
 jobs:
   # Test the fluence package before building the image. These tests need no
-  # vendor SDK — they cover registration, provider resolution, fail-soft
+  # vendor SDK, they cover registration, provider resolution, fail-soft
   # interceptor behavior, and the staging mechanism end to end.
   test:
     runs-on: ubuntu-latest
@@ -78,7 +78,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # One image: ghcr.io/<owner>/fluence-sidecar (matches the SidecarImage
+          # One image. ghcr.io/<owner>/fluence-sidecar (matches the SidecarImage
           # constant the webhook injects).
           images: ${{ env.REGISTRY }}/${{ github.repository }}-sidecar
           tags: |

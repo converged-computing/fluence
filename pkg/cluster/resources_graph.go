@@ -10,7 +10,7 @@ import (
 
 // Property keys fluence stamps on graph vertices. VirtualProperty marks whether
 // a node vertex is a configured virtual resource (true) or a physical compute
-// node (false); it is the discriminator the jobspec constrains on and that
+// node (false). It is the discriminator the jobspec constrains on and that
 // placement uses to tell a bind target from a backend. ClassProperty preserves
 // the configured resource type when a virtual resource is modeled as a node, so
 // the original type (e.g. "qdevice") is not lost.
@@ -21,7 +21,7 @@ const (
 
 // ComposeProperty encodes a key/value as the single "key=value" string that
 // Fluxion stores as a property key. RFC 31 PropertyConstraint matching is
-// key-presence only — it never compares the value half of a vertex property —
+// key-presence only, it never compares the value half of a vertex property
 // so to filter on a value the value must be part of the key. This is also
 // exactly how the rv1 match writer emits properties (prop + "=" + value), so the
 // encoding round-trips symmetrically between what we put in and what we read
@@ -34,7 +34,7 @@ func ComposeProperty(key, value string) string {
 }
 
 // virtualProperties builds the property SET (composed key=value strings, stored
-// as JGF property keys with empty values) for a configured virtual resource: the
+// as JGF property keys with empty values) for a configured virtual resource. The
 // virtual marker, the class of this resource AND of every descendant in its
 // subtree, and each user attribute namespaced under the Fluxion resource prefix.
 // Every entry is filterable by an identical composed string in a jobspec
@@ -44,7 +44,7 @@ func ComposeProperty(key, value string) string {
 // evaluated against every node vertex the matcher descends through (RFC 31
 // constraints prune a node, and its subtree, on mismatch). To select a nested
 // node by class (e.g. class=qpu where qpu sits under a qdevice node), every
-// ancestor node on the path must also satisfy class=qpu — so each node carries
+// ancestor node on the path must also satisfy class=qpu, so each node has
 // the classes of everything beneath it. The trees are shallow, so these sets
 // stay small. A class=<type> constraint then reaches any node of that type
 // because every ancestor down to it advertises that class.
@@ -67,7 +67,7 @@ func virtualProperties(res *Resource) map[string]string {
 }
 
 // subtreeClasses returns the set of resource types in res's subtree, including
-// res itself — the classes a node must advertise so a constraint selecting any
+// res itself, the classes a node must advertise so a constraint selecting any
 // type within the subtree is not pruned at this node on the way down.
 func subtreeClasses(res *Resource) map[string]bool {
 	types := map[string]bool{}
@@ -111,8 +111,8 @@ func appendResources(
 }
 
 // addResource adds one configured resource, at ANY depth, as a node vertex
-// carrying virtual=true, its configured type as the class property, and its
-// attributes as RFC 31 properties — then recurses on its children the same way.
+// with virtual=true, its configured type as the class property, and its
+// attributes as RFC 31 properties, then recurses on its children the same way.
 //
 // Every level is a node so that every level is independently selectable by a
 // class=<type> constraint (RFC 31 property constraints match only node and
@@ -121,9 +121,9 @@ func appendResources(
 // and class=<type> is meaningful; only the graph TYPE is "node".
 //
 // Every node consumes a real, unique rank from the shared counter. Ranks must be
-// real (not -1) for any node vertex; the virtual sub-resources therefore appear
+// real (not -1) for any node vertex. The virtual sub-resources therefore appear
 // in the rv1 nodelist, which is fine here because the allocation is a hold whose
-// response we read directly — we never dispatch work to those ranks (no
+// response we read directly, we never dispatch work to those ranks (no
 // flux-core execution).
 func addResource(b *jgf.Builder, parent *jgf.Vertex, res *Resource, rank *int64) error {
 	r := *rank
@@ -148,12 +148,12 @@ func addResource(b *jgf.Builder, parent *jgf.Vertex, res *Resource, rank *int64)
 }
 
 // FluxionResourceNames returns the distinct extended-resource names a device
-// plugin should advertise for the configured resources: every counted resource
+// plugin should advertise for the configured resources. Every counted resource
 // TYPE under a top-level resource (the top-level virtual node is matched via the
 // FluxionResourceNames returns the distinct extended-resource names a device
-// plugin should advertise: every resource TYPE at every level of the configured
+// plugin should advertise. Every resource TYPE at every level of the configured
 // trees. Every virtual resource is a node selectable by class=<type>, so every
-// type — top-level (qdevice) and nested (qpu, qubit) alike — is requestable.
+// type, top-level (qdevice) and nested (qpu, qubit) alike, is requestable.
 // Prefixed so they match what the scheduler strips off a pod request.
 func FluxionResourceNames(resources []Resource) []string {
 	types := map[string]bool{}
@@ -177,7 +177,7 @@ func collectTypes(res *Resource, types map[string]bool) {
 
 // AttributeKeys returns the sorted union of every user attribute key across all
 // configured resources (and their children). This is the set of attributes that
-// may be injected into a workload's environment; computing it from the config
+// may be injected into a workload's environment. Computing it from the config
 // (rather than hardcoding) means the env contract automatically tracks whatever
 // attributes the backends declare. The backend identity itself is separate
 // (FLUXION_BACKEND) and not included here.

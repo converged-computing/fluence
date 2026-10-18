@@ -2,7 +2,7 @@
 # Multi-pod gang scheduling on real nodes. Guards the two failures that the
 # single-pod 01 test could NOT catch (and that shipped a minCount=1 bug):
 #   A) a multi-pod gang must place ALL of them (minCount must equal the gang size, not 1)
-#   B) under contention, a gang that cannot fully fit stays ENTIRELY pending —
+#   B) under contention, a gang that cannot fully fit stays ENTIRELY pending
 #      never partially placed (no stranded pods holding nodes).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE%/test/e2e/*}/test/e2e/lib.sh"
@@ -36,10 +36,10 @@ kubectl patch podgroup gang3 --type=merge -p '{"metadata":{"finalizers":null}}' 
 kubectl wait --for=delete pod -l app=gang3 --timeout=60s 2>/dev/null || true
 
 # ---- B) contention: the gang that can't fully fit stays ENTIRELY pending --------
-log "TEST 6B: contention — a gang that cannot fully fit must NOT partially place"
+log "TEST 6B: contention, a gang that cannot fully fit must NOT partially place"
 kubectl apply -f examples/test/e2e/gang/multi-gang-contention.yaml
 
-# wait until the cluster settles. Three possible outcomes:
+# wait until the cluster settles. Three possible outcomes.
 #   - one gang fully Running, other fully Pending  -> contention; assert no partial
 #   - BOTH fully Running                            -> runner big enough, no contention to test (skip)
 #   - any partial (1 of 2 in a gang scheduled)      -> the bug, fail
@@ -55,15 +55,15 @@ for i in $(seq 1 90); do
 done
 
 if [ -n "$both" ]; then
-  log "SKIP 6B: cluster placed both gangs (>=4 schedulable cores) — no contention on this runner"
+  log "SKIP 6B: cluster placed both gangs (>=4 schedulable cores), no contention on this runner"
 else
   [ -n "$winner" ] || fail "no clean settle: gang-a=$ra gang-b=$rb running (possible PARTIAL placement)"
   log "winner=$winner (2 running), loser=$loser (expected 0 running)"
-  # the loser must have ZERO pods scheduled to a node — the all-or-nothing guarantee.
+  # the loser must have ZERO pods scheduled to a node, the all-or-nothing guarantee.
   # A single scheduled loser pod = partial placement = the bug.
   scheduled_loser="$(kubectl get pods -l app=$loser -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | grep -c . || true)"
-  [ "$scheduled_loser" = "0" ] || fail "$loser has $scheduled_loser pod(s) on a node — PARTIAL placement (gang violated)"
-  log "PASS 6B: $loser stayed entirely pending — no partial placement under contention"
+  [ "$scheduled_loser" = "0" ] || fail "$loser has $scheduled_loser pod(s) on a node, PARTIAL placement (gang violated)"
+  log "PASS 6B: $loser stayed entirely pending, no partial placement under contention"
 fi
 
 kubectl delete -f examples/test/e2e/gang/multi-gang-contention.yaml --wait=false || true

@@ -13,8 +13,8 @@ import (
 const (
 	// FluxionResourcePrefix marks an extended resource whose suffix is a Fluxion
 	// graph type. A request for fluxion.flux-framework.org/<type> is translated
-	// generically into a jobspec count of <type> — no per-type code. Anything the
-	// graph models as a count (qpu, qubit, ...) is requestable this way.
+	// generically into a jobspec count of <type>, no per-type code. Anything the
+	// graph models as a count (qpu, qubit...) is requestable this way.
 	FluxionResourcePrefix = "fluxion.flux-framework.org/"
 
 	// BackendAnnotation is where the scheduler records the Fluxion-allocated
@@ -23,16 +23,16 @@ const (
 	BackendAnnotation = "fluence.flux-framework.org/backend"
 
 	// JobIDAnnotation records the Fluxion allocation (jobid) for a scheduled
-	// group. It is written onto the owning object — the PodGroup for a gang, or
-	// the pod itself for an ungrouped pod — so the allocation can be cancelled
+	// group. It is written onto the owning object, the PodGroup for a gang, or
+	// the pod itself for an ungrouped pod, so the allocation can be cancelled
 	// when that object is deleted, and replayed on scheduler restart.
 	JobIDAnnotation = "fluence.flux-framework.org/jobid"
 
 	// CreatedByAnnotation marks an object as created by Fluence (the mutating
 	// webhook). The scheduler's PodGroup reconciler deletes a completed gang's
-	// PodGroup — to free its Fluxion allocation — ONLY when this annotation is
+	// PodGroup, to free its Fluxion allocation, ONLY when this annotation is
 	// present with CreatedByValue. A PodGroup the user created (e.g. a native
-	// gang) never carries it, so the reconciler never deletes user objects.
+	// gang) never has it, so the reconciler never deletes user objects.
 	CreatedByAnnotation = "fluence.flux-framework.org/created-by"
 	CreatedByValue      = "fluence-webhook"
 
@@ -45,13 +45,13 @@ const (
 	AttributeAnnotationPrefix = "fluence.flux-framework.org/attr-"
 
 	// EnvVarPrefix is the normalized environment-variable namespace injected into
-	// the workload. The backend name becomes <prefix>BACKEND; each attribute
+	// the workload. The backend name becomes <prefix>BACKEND. Each attribute
 	// <key> becomes <prefix><KEY> (uppercased). A vendor-agnostic container reads
 	// these common names regardless of which backend it matched.
 	EnvVarPrefix = "FLUXION_"
 )
 
-// EnvVarName maps an attribute key to its normalized environment-variable name:
+// EnvVarName maps an attribute key to its normalized environment-variable name.
 // uppercased, non-alphanumeric runes to underscores, under EnvVarPrefix. E.g.
 // "region" -> "FLUXION_REGION", "price/min" -> "FLUXION_PRICE_MIN".
 func EnvVarName(attrKey string) string {
@@ -73,7 +73,7 @@ func EnvVarName(attrKey string) string {
 // PodGroupName returns the native (Kubernetes 1.36) scheduling-group name a pod
 // belongs to, from spec.schedulingGroup.podGroupName, or "" if the pod is not
 // part of a group. This is the first-class field that links a Pod to its
-// PodGroup object; the pre-1.36 label/annotation pattern is gone.
+// PodGroup object. The pre-1.36 label/annotation pattern is gone.
 func PodGroupName(pod *corev1.Pod) string {
 	if sg := pod.Spec.SchedulingGroup; sg != nil && sg.PodGroupName != nil {
 		return *sg.PodGroupName
@@ -84,7 +84,7 @@ func PodGroupName(pod *corev1.Pod) string {
 // ComputeProperty / VirtualProperty mirror the markers cluster stamps on graph
 // node vertices (composed key=value form). A compute jobspec constrains to
 // virtual=false nodes; a device jobspec constrains to virtual=true nodes. Kept
-// here (not imported from cluster) to avoid an import cycle: cluster imports
+// here (not imported from cluster) to avoid an import cycle. Cluster imports
 // placement.
 const (
 	// VirtualPropertyTrue selects configured virtual resource nodes.
@@ -93,7 +93,7 @@ const (
 	VirtualPropertyFalse = "virtual=false"
 	// ClassPropertyPrefix composes a class= constraint selecting a virtual node by
 	// its configured resource type (e.g. class=qpu). Mirrors how the graph builder
-	// stamps the class property; kept here (not imported from cluster) to avoid an
+	// stamps the class property. Kept here (not imported from cluster) to avoid an
 	// import cycle (cluster imports placement).
 	ClassPropertyPrefix = "class="
 )
@@ -104,10 +104,10 @@ func ComposeClassProperty(resourceType string) string {
 }
 
 // RequireAnnotationPrefix is how a workload constrains which backend Fluxion may
-// select: an annotation fluence.flux-framework.org/require-<attr>: <value> on the
+// select. An annotation fluence.flux-framework.org/require-<attr>: <value> on the
 // leader pod adds a property constraint fluxion.flux-framework.org/<attr>=<value>
 // to the device match. e.g. require-qrmi_type: braket-gate keeps a gate workload
-// off an AHS device; require-vendor: amazon, require-backend: sv1, etc.
+// off an AHS device. require-vendor. Amazon, require-backend. sv1, etc.
 const RequireAnnotationPrefix = "fluence.flux-framework.org/require-"
 
 // ComposeAttributeProperty builds the graph property string for an attribute
@@ -117,7 +117,7 @@ func ComposeAttributeProperty(attr, value string) string {
 }
 
 // requireConstraintsFromPods collects fluence.flux-framework.org/require-<attr>
-// annotations across the group (the leader carries them) into graph property
+// annotations across the group (the leader has them) into graph property
 // constraints to AND into the device match.
 func requireConstraintsFromPods(pods []corev1.Pod) []string {
 	seen := map[string]bool{}
@@ -146,7 +146,7 @@ var computeTypes = map[string]bool{"core": true, "memory": true, "gpu": true}
 
 // podResources distills a pod's container requests into Fluxion resource counts
 // keyed by Fluxion graph type. Native Kubernetes resources (cpu, memory,
-// nvidia.com/gpu) map to compute types; every fluxion.flux-framework.org/<type>
+// nvidia.com/gpu) map to compute types. Every fluxion.flux-framework.org/<type>
 // request passes through generically as <type> (a virtual device type).
 func podResources(p *corev1.Pod) map[string]int {
 	counts := map[string]int{}
@@ -214,10 +214,10 @@ func withEntries(counts map[string]int) []jobspec.Resource {
 	return with
 }
 
-// systemAttributes builds the attributes.system block: a hold-until-cancel
+// systemAttributes builds the attributes.system block. A hold-until-cancel
 // allocation (duration 0 runs to graph end) plus an RFC 31 property constraint
 // selecting the eligible node set. properties is the AND-set of composed
-// key=value property strings a matched node must carry.
+// key=value property strings a matched node must have.
 func systemAttributes(properties []string, excludeNodes []string) map[string]interface{} {
 	// Base property constraint (the eligible-node property AND-set).
 	constraints := map[string]interface{}{
@@ -252,7 +252,7 @@ func systemAttributes(properties []string, excludeNodes []string) map[string]int
 	}
 }
 
-// computeJobspec builds the physical-compute jobspec for a group: one slot per
+// computeJobspec builds the physical-compute jobspec for a group. One slot per
 // pod holding the compute resources, constrained to virtual=false nodes. This is
 // the only jobspec for a group that requests no virtual devices.
 func computeJobspec(groupName string, slots int, compute map[string]int, excludeNodes []string) *jobspec.Jobspec {
@@ -274,15 +274,15 @@ func computeJobspec(groupName string, slots int, compute map[string]int, exclude
 }
 
 // deviceJobspec builds a jobspec selecting a single virtual device type. Every
-// configured virtual resource is a node carrying class=<type> (and the classes
+// configured virtual resource is a node with class=<type> (and the classes
 // of its descendants, so a nested type is reachable), so a device is selected by
 // constraining to a virtual node of the requested class. count is the requested
 // quantity.
 //
 // The constraint is virtual=true (scope to virtual backends, not physical nodes)
 // AND class=<type> (the requested resource type). The slot requests `node`
-// because every virtual resource is a node; the class constraint — not the `with`
-// type — picks which one. A nested type (e.g. qpu under a qdevice node) is
+// because every virtual resource is a node. The class constraint, not the `with`
+// type, picks which one. A nested type (e.g. qpu under a qdevice node) is
 // reachable because every ancestor node also advertises class=<type> for the
 // types beneath it, so the global constraint does not prune the path.
 func deviceJobspec(groupName, deviceType string, count int, extraProps []string) *jobspec.Jobspec {
@@ -309,10 +309,10 @@ func deviceJobspec(groupName, deviceType string, count int, extraProps []string)
 
 // JobspecsForGroup builds the set of Fluxion jobspecs to match for a pod group,
 // each held independently (duration 0, released by Cancel) and combined all-or-
-// nothing by the caller:
+// nothing by the caller.
 //
-//   - exactly one compute jobspec (slot per pod, virtual=false) — always present,
-//     so a plain pod or group with no virtual resources yields a single match;
+//   - exactly one compute jobspec (slot per pod, virtual=false), always present,
+//     so a plain pod or group with no virtual resources yields a single match.
 //   - one device jobspec per distinct requested virtual resource type
 //     (constraint virtual=true; the requested type+count rides the slot's `with`).
 //
@@ -332,7 +332,7 @@ func JobspecsForGroup(
 	}
 	// Compute sizing comes from a representative pod (the group is homogeneous in
 	// its per-pod compute slot), but DEVICE requests must be unioned across the
-	// whole group: in a quantum gang only the leader requests the qpu, and the
+	// whole group. In a quantum gang only the leader requests the qpu, and the
 	// pod order here is not guaranteed (groupPods lists in informer order), so
 	// keying off pods[0] alone would miss the leader's device entirely and emit
 	// a compute-only match with no backend.
@@ -377,15 +377,15 @@ func JobspecsForGroup(
 // Placement is the result of matching one of a group's jobspecs. Nodes are the
 // physical (virtual=false) compute nodes a pod binds to; Backend is the virtual
 // (virtual=true) resource's identity, surfaced to the pod as env. A single
-// allocation yields one or the other: the compute match yields nodes, a device
+// allocation yields one or the other. The compute match yields nodes, a device
 // match yields a backend.
 type Placement struct {
 	Nodes   []string // physical compute node names (virtual=false)
 	Backend string   // virtual backend identity (virtual=true), if any
 	// BackendAttributes are the matched virtual resource's user attributes
-	// (region, qubits, ...), decomposed from the backend node's namespaced
+	// (region, qubits...), decomposed from the backend node's namespaced
 	// properties. These are injected into the pod as env so the workload sees
-	// exactly what it matched/queried — the same set that is filterable is also
+	// exactly what it matched/queried, the same set that is filterable is also
 	// readable back.
 	BackendAttributes map[string]string
 }
@@ -404,9 +404,9 @@ func decomposeProperty(prop string) (key, value string) {
 // node-typed vertices by the virtual marker property: virtual=false nodes are
 // physical compute (bind targets), virtual=true nodes are virtual backends
 // (their name is the backend identity injected into the pod). Everything is
-// type "node" now, so the marker — not the vertex type — does the split.
+// type "node" now, so the marker, not the vertex type, does the split.
 //
-// A node carrying neither marker is treated as a physical compute node, so a
+// A node with neither marker is treated as a physical compute node, so a
 // plain graph built without markers still binds correctly. For the chosen
 // backend, its user attributes (the fluxion.flux-framework.org/<key>=<value>
 // properties) are decomposed into BackendAttributes for env injection.
@@ -433,7 +433,7 @@ func PlacementFromAllocation(alloc string) (Placement, error) {
 }
 
 // backendAttributes extracts the user attributes from a backend node's composed
-// property keys: every property of the form
+// property keys. Every property of the form
 // "fluxion.flux-framework.org/<key>=<value>" becomes <key> -> <value>. Reserved
 // markers (virtual=..., class=...) are skipped.
 func backendAttributes(props map[string]string) map[string]string {

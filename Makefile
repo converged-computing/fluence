@@ -1,15 +1,15 @@
-# fluence — Kubernetes scheduler plugin backed by Fluxion (flux-sched), with
+# fluence, Kubernetes scheduler plugin backed by Fluxion (flux-sched), with
 # optional quantum resources modeled in the resource graph.
 #
 # The scheduler only schedules. It links flux-sched (the matcher) and does NOT
-# depend on QRMI — quantum job submission lives in a separate workload container
+# depend on QRMI, quantum job submission lives in a separate workload container
 # (github.com/converged-computing/qrmi-sampler), not here.
 
 FLUX_SCHED_ROOT ?= /opt/flux-sched
 IMG             ?= ghcr.io/converged-computing/fluence:latest
 TEST_IMG	?= vanessa/fluence:test
 
-# cgo flags for the scheduler binary: flux-sched only.
+# cgo flags for the scheduler binary. flux-sched only.
 CGO_CFLAGS  = -I$(FLUX_SCHED_ROOT)
 CGO_LDFLAGS = -L$(FLUX_SCHED_ROOT)/resource \
               -L$(FLUX_SCHED_ROOT)/resource/libjobspec \

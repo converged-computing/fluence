@@ -1,4 +1,4 @@
-// Tests for gang PodGroup minCount: the whole gang (full N) must schedule
+// Tests for gang PodGroup minCount. The whole gang (full N) must schedule
 // atomically. Regression guard for the bug where every PodGroup was created
 // with minCount=1, so a multi-pod gang was "satisfied" by a single pod and the
 // rest were stranded (partial placement).
@@ -130,9 +130,9 @@ func TestGangMinCountDefaultsToOne(t *testing.T) {
 	}
 }
 
-// group-size is the authoritative gang minCount: a workload that sets it to N
+// group-size is the authoritative gang minCount. A workload that sets it to N
 // gets minCount=N (the whole gang schedules atomically), regardless of any owner
-// replica count. In the gang+submitter model the full workload IS the gang —
+// replica count. In the gang+submitter model the full workload IS the gang
 // there is no N-1 worker split.
 func TestGangMinCountHonorsGroupSize(t *testing.T) {
 	pod := cpuPod("fluence")

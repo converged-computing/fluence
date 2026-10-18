@@ -1,10 +1,10 @@
 """
-fluence.ungate — generic worker ungating (Kubernetes side).
+fluence.ungate, generic worker ungating (Kubernetes side).
 
 Once the sidecar determines the quantum task is ready, it ungates the gated
-classical worker pods: stamp the vendor-neutral job-id annotation, set the
+classical worker pods. Stamp the vendor-neutral job-id annotation, set the
 high-priority class, and remove the scheduling gate atomically. This is pure
-Kubernetes plumbing — no vendor specifics.
+Kubernetes plumbing, no vendor specifics.
 """
 
 from __future__ import annotations
@@ -31,13 +31,13 @@ def kubectl(args):
 
 def ungate_pods(gated_pods, job_id, namespace, session_id=None):
     """
-    For each gated worker pod:
+    For each gated worker pod.
       1. Stamp the job id annotation so the worker can locate the quantum
          result, and the session id when the scout has one, so the worker
          can submit into the same session.
       2. Remove the scheduling gate so the pod can be scheduled.
 
-    NOTE: priorityClassName is NOT set here — it is immutable after pod creation
+    Note that priorityClassName is NOT set here, it is immutable after pod creation
     (the API server forbids changing any spec field but image/tolerations/
     activeDeadlineSeconds/terminationGracePeriodSeconds on an existing pod). If a
     priority class is wanted on the classical gang, the webhook must set it at
@@ -113,7 +113,7 @@ GROUP_LABEL = "fluence.flux-framework.org/group"
 
 def discover_gated_pods(namespace, group, exclude=""):
     """
-    Find the names of pods in the same group that still carry the quantum
+    Find the names of pods in the same group that still have the quantum
     scheduling gate (i.e. the gang pods this submitter must ungate).
 
     The submitter is created alongside the gang, so the gated set is discovered

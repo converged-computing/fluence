@@ -1,9 +1,9 @@
 // Package webhook is fluence's mutating admission webhook.
 //
-// The core here is domain-agnostic plumbing: it owns the Mutator, the handler
+// The core here is domain-agnostic plumbing. It owns the Mutator, the handler
 // dispatcher, per-namespace PodGroup provisioning, the HTTP entrypoint, and
 // self-managed TLS. It knows nothing about quantum, Braket, gate names, sidecars,
-// RBAC, or interceptor staging — that policy and machinery lives entirely in the
+// RBAC, or interceptor staging, that policy and machinery lives entirely in the
 // handlers (pkg/webhook/handlers), which self-register via Register() and perform
 // their own create/edit side-effects through the generic MutatorAPI.
 //
@@ -41,18 +41,18 @@ import (
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const (
-	// SchedulerName gates the whole webhook: only pods scheduled by Fluence are
+	// SchedulerName gates the whole webhook. Only pods scheduled by Fluence are
 	// considered. This is the one cross-cutting constant the core owns.
 	SchedulerName = "fluence"
 
 	// GroupLabel marks a pod's gang membership. The core treats its value as an
-	// opaque group identity for PodGroup management; it ascribes no quantum
+	// opaque group identity for PodGroup management. It ascribes no quantum
 	// meaning to it (a handler decides what a group means).
 	GroupLabel = "fluence.flux-framework.org/group"
 
 	// GroupSizeAnnotation is the gang member count N, set by the workload on each
 	// pod. It is the authoritative override for the PodGroup gang minCount when
-	// the size cannot (or should not) be derived from the owning controller — and
+	// the size cannot (or should not) be derived from the owning controller, and
 	// for loose grouped pods where counting at admission is unreliable. The core
 	// treats it as an opaque integer string.
 	GroupSizeAnnotation = "fluence.flux-framework.org/group-size"
@@ -76,9 +76,9 @@ var _ MutatorAPI = (*Mutator)(nil)
 // GroupName returns the value of GroupLabel on the pod, or "".
 func GroupName(pod *corev1.Pod) string { return spec.Label(pod, GroupLabel) }
 
-// ── MutatorAPI: capabilities exposed to handlers ────────────────────────────────
+// ── MutatorAPI. Capabilities exposed to handlers ────────────────────────────────
 
-// Client implements MutatorAPI: returns the Kubernetes client (nil in tests).
+// Client implements MutatorAPI. Returns the Kubernetes client (nil in tests).
 func (m *Mutator) Client() kubernetes.Interface { return m.Clientset }
 
 // InjectedEnv is the FLUXION_* env contract sourced from scheduler annotations.
@@ -119,10 +119,10 @@ func (m *Mutator) EnsurePodGroup(ctx context.Context, namespace, group, leaderPo
 		ObjectMeta: metav1.ObjectMeta{
 			Name: group, Namespace: namespace,
 			Labels: map[string]string{"app": "fluence", GroupLabel: group},
-			// Ownership claim: the reconciler in pkg/fluence deletes a completed
+			// Ownership claim. The reconciler in pkg/fluence deletes a completed
 			// gang's PodGroup (to free its Fluxion allocation) ONLY if this
 			// annotation is present. A user-created PodGroup (e.g. a native gang
-			// not created by this webhook) never carries it and is never touched.
+			// not created by this webhook) never has it and is never touched.
 			Annotations: map[string]string{placement.CreatedByAnnotation: placement.CreatedByValue},
 		},
 		Spec: schedulingv1alpha2.PodGroupSpec{

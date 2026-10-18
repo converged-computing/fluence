@@ -40,7 +40,7 @@ func findByName(nodes []map[string]any, name string) map[string]any {
 }
 
 // A vertex given NodeProperties emits a nested "properties" object with those
-// keys/values — the RFC 31 form Fluxion matches constraints against.
+// keys/values, the RFC 31 form Fluxion matches constraints against.
 func TestNodePropertiesEmittedAsNestedObject(t *testing.T) {
 	b := NewBuilder()
 	cluster := b.AddRoot("cluster", "cluster", Options{Name: "cluster"})
@@ -84,7 +84,7 @@ func TestNoNodePropertiesMeansNoPropertiesKey(t *testing.T) {
 	}
 }
 
-// NodeProperties is distinct from Properties: the latter still flattens into the
+// NodeProperties is distinct from Properties. The latter still flattens into the
 // top level, the former nests under "properties".
 func TestPropertiesVsNodeProperties(t *testing.T) {
 	b := NewBuilder()

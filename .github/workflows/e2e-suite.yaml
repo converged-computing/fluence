@@ -1,9 +1,9 @@
-# Reusable e2e workflow (workflow_call): shared setup (build image, kind, deploy
-# fluence base), then run ONE test suite — a directory under test/e2e/. The
-# suite's tests are DISCOVERED (every NN-*.sh, run in sorted order); adding a test
+# Reusable e2e workflow (workflow_call). Shared setup (build image, kind, deploy
+# fluence base), then run ONE test suite, a directory under test/e2e/. The
+# suite's tests are DISCOVERED (every NN-*.sh, run in sorted order). Adding a test
 # is just dropping a file in the directory, no workflow edit. If the suite needs
 # special preparation it provides a setup.sh in its directory, which is run before
-# the tests (the gang suite has none; the quantum suite installs the qpu add-on).
+# the tests (the gang suite has none. The quantum suite installs the qpu add-on).
 name: e2e-suite
 on:
   workflow_call:
@@ -81,7 +81,7 @@ jobs:
             echo "running $s"
             bash "$s"
           else
-            echo "no setup.sh for suite '${{ inputs.suite }}' — skipping"
+            echo "no setup.sh for suite '${{ inputs.suite }}', skipping"
           fi
 
       # Discover and run every NN-*.sh in the suite directory, in sorted order.

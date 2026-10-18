@@ -1,14 +1,14 @@
 """
-fluence.providers.braket — AWS Braket provider.
+fluence.providers.braket, AWS Braket provider.
 
-Holds both halves of the Braket coordination mechanism:
+Holds both halves of the Braket coordination mechanism.
   - install_interceptor: patches AwsDevice.run() to stamp the pod-uid tag
-    (runs in the user container; fail-soft if amazon-braket-sdk is absent).
-  - sidecar methods: discover the tagged task, poll queue position, yield the
+    (runs in the user container. fail-soft if amazon-braket-sdk is absent).
+  - sidecar methods. Discover the tagged task, poll queue position, yield the
     task ARN as the (vendor-neutral-typed) job id.
 
 Self-registers via register(PROVIDER) at import. Importing this module never
-requires the braket SDK; SDK imports are lazy, inside the methods.
+requires the braket SDK. SDK imports are lazy, inside the methods.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def _region_from_arn(arn: str) -> str:
     # Prefer the region the scheduler chose for this backend (FLUXION_REGION,
     # injected from the resource graph's `region` attribute) over the pod's
     # generic AWS_DEFAULT_REGION. A QPU like IQM Emerald lives in eu-north-1,
-    # while the pod's AWS_DEFAULT_REGION is often us-east-1 — searching the wrong
+    # while the pod's AWS_DEFAULT_REGION is often us-east-1, searching the wrong
     # region means the task is never found and workers never ungate.
     return (
         region
@@ -56,7 +56,7 @@ class BraketProvider(Provider):
         try:
             from braket.aws import AwsDevice
         except ImportError:
-            return False  # braket SDK not in this container — fail-soft
+            return False  # braket SDK not in this container, fail-soft
 
         original_run = AwsDevice.run
 
@@ -75,10 +75,10 @@ class BraketProvider(Provider):
     # ── sidecar half ───────────────────────────────────────────────────────────
 
     def matches(self, attrs: "dict[str, str]") -> bool:
-        # Authoritative routing key: qrmi_type. Every Braket-accessed device —
+        # Authoritative routing key. qrmi_type. Every Braket-accessed device
         # gate simulators (sv1/tn1/dm1), gate QPUs (rigetti/iqm/ionq), and AHS
-        # (aquila, ahs_local) — carries a "braket-*" qrmi_type, regardless of
-        # which company (amazon, quera, rigetti, iqm, ...) made the hardware.
+        # (aquila, ahs_local), has a "braket-*" qrmi_type, regardless of
+        # which company (amazon, quera, rigetti, iqm...) made the hardware.
         qrmi = (attrs.get("qrmi_type") or "").lower()
         if qrmi.startswith("braket"):
             return True
@@ -115,13 +115,13 @@ class BraketProvider(Provider):
 
     def _candidate_regions(self, backend: str):
         """Regions to search for the task, best guess first. If the backend is an
-        ARN or FLUXION_REGION is set, try that first; then fall back to the
+        ARN or FLUXION_REGION is set, try that first. Then fall back to the
         regions Braket operates in, because the QPU's region (e.g. eu-north-1 for
         IQM) frequently differs from the pod's AWS_DEFAULT_REGION (us-east-1) and
         a task only appears in SearchQuantumTasks in the region it was created.
 
         Set FLUENCE_BRAKET_REGIONS (comma-separated) to restrict the search to
-        regions the account can actually access — useful when a service control
+        regions the account can actually access, useful when a service control
         policy explicitly denies braket:SearchQuantumTasks in some regions (those
         raise AccessDeniedException and just add noise/latency)."""
         override = os.environ.get("FLUENCE_BRAKET_REGIONS", "").strip()
@@ -160,7 +160,7 @@ class BraketProvider(Provider):
             f"across regions {regions}"
         )
         deadline = time.time() + timeout
-        # SearchQuantumTasks has NO tags filter and is REGION-SCOPED: a task only
+        # SearchQuantumTasks has NO tags filter and is REGION-SCOPED. A task only
         # shows up in the region it was created in. We don't reliably know that
         # region up front (the backend may be a name, and the pod's default region
         # often differs from the QPU's), so we search each candidate region and
@@ -174,7 +174,7 @@ class BraketProvider(Provider):
         clients = {}
         denied = (
             set()
-        )  # regions that returned AccessDenied — skip them after the first hit
+        )  # regions that returned AccessDenied, skip them after the first hit
         while time.time() < deadline:
             for region in regions:
                 if region in denied:
@@ -209,8 +209,8 @@ class BraketProvider(Provider):
                         arn = match["quantumTaskArn"]
                         log(f"[braket] found task by tag in {region}: {arn}")
                         return BraketTask(arn)
-                    # Diagnostic: how many tasks did this region have, and how many
-                    # carried OUR tag key at all? Distinguishes "task not here yet"
+                    # Diagnostic. How many tasks did this region have, and how many
+                    # had OUR tag key at all? Distinguishes "task not here yet"
                     # from "task here but tag not landing".
                     if seen:
                         log(
@@ -230,13 +230,13 @@ class BraketProvider(Provider):
                         denied.add(region)
                         log(
                             f"[braket] region {region} not accessible "
-                            f"(access denied) — skipping it for the rest of this search"
+                            f"(access denied), skipping it for the rest of this search"
                         )
                     else:
                         log(f"[braket] search error in {region} (will retry): {e}")
             if len(denied) == len(regions):
                 log(
-                    "[braket] ERROR: every candidate region was access-denied — "
+                    "[braket] ERROR: every candidate region was access-denied, "
                     "set FLUENCE_BRAKET_REGIONS to a region this account can search"
                 )
                 return None

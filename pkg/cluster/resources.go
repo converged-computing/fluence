@@ -10,38 +10,38 @@ import (
 
 // This file defines the generic resource-tree configuration that fluence reads
 // to inject virtual resources into the Fluxion graph. It is deliberately free
-// of any quantum-specific assumptions: a Resource has an arbitrary string type
+// of any quantum-specific assumptions. A Resource has an arbitrary string type
 // and may nest children, so any shape (a qdevice over qpus over qubits, a
-// license server, an FPGA pool, ...) is expressible without per-type code.
+// license server, an FPGA pool...) is expressible without per-type code.
 //
-// Two top-level keys:
+// Two top-level keys.
 //
-//	resources:  a forest of resource trees to add to the graph. Each tree is
+//	resources is a forest of resource trees to add to the graph. Each tree is
 //	            attached under a named parent vertex (default "cluster"), so the
 //	            virtual subtree sits alongside the physical "rack" tree without
 //	            being linked to any specific physical node (today). A future
 //	            design could set parent to a node name to link them.
-//	attributes: a registry of named attribute sets. A Resource's Attributes may
+//	attributes. A registry of named attribute sets. A Resource's Attributes may
 //	            be given inline (a map) or by reference (a string naming an entry
 //	            here), so a shared set (e.g. a region/connectivity profile) is
 //	            defined once and reused.
 //
 // Every attribute becomes both a queryable/prunable RFC 31 graph property and an
 // injected environment value, so what a user can constrain on, they can also
-// read back. (Graph/jobspec wiring lives in later pieces; this file only parses
+// read back. (Graph/jobspec wiring lives in later pieces. This file only parses
 // and validates.)
 
 // DefaultParent is the vertex a resource tree attaches under when none is given.
 const DefaultParent = "cluster"
 
 // Resource is one vertex in a configured resource tree. Type is the Fluxion
-// resource type (any string); Count is the size at this vertex; With are child
+// resource type (any string). Count is the size at this vertex. With are child
 // resources (recursive). Attributes are resolved to a concrete map after load.
 type Resource struct {
 	// Type is the Fluxion vertex type (e.g. "qdevice", "qpu", "qubit"). Required.
 	Type string `json:"type"`
 	// Name is an explicit vertex name (e.g. a backend id like "rigetti_cepheus").
-	// Optional; the builder derives one from type+index when empty.
+	// Optional. The builder derives one from type+index when empty.
 	Name string `json:"name,omitempty"`
 	// Count is the resource quantity at this vertex (maps to the graph vertex
 	// size). Defaults to 1 when zero.
@@ -52,13 +52,13 @@ type Resource struct {
 	Parent string `json:"parent,omitempty"`
 	// Attributes is either an inline map (object) or a reference (string) into
 	// the top-level attributes registry. Resolved into ResolvedAttributes at
-	// load time; do not read this field directly afterward.
+	// load time. Do not read this field directly afterward.
 	Attributes AttributeSpec `json:"attributes,omitempty"`
 	// With are child resources contained by this one (recursive).
 	With []Resource `json:"with,omitempty"`
 
 	// ResolvedAttributes is the concrete attribute map after reference
-	// resolution. Populated by LoadResourcesConfig; nil if none.
+	// resolution. Populated by LoadResourcesConfig. nil if none.
 	ResolvedAttributes map[string]string `json:"-"`
 
 	// BackendName is the identity of the top-level device this resource belongs
@@ -69,7 +69,7 @@ type Resource struct {
 	BackendName string `json:"-"`
 }
 
-// AttributeSpec is a polymorphic attributes field: either a reference (a string
+// AttributeSpec is a polymorphic attributes field. Either a reference (a string
 // naming a registry entry) or an inline map. Exactly one form is used.
 type AttributeSpec struct {
 	// Ref is the registry key when attributes were given as a string.
@@ -109,7 +109,7 @@ func (a AttributeSpec) empty() bool {
 	return a.Ref == "" && len(a.Inline) == 0
 }
 
-// ResourcesConfig is the on-disk configuration: a forest of resource trees plus
+// ResourcesConfig is the on-disk configuration. A forest of resource trees plus
 // a registry of named attribute sets they may reference.
 type ResourcesConfig struct {
 	Resources  []Resource                   `json:"resources"`
@@ -125,11 +125,11 @@ func LoadResourcesConfig(data []byte) (*ResourcesConfig, error) {
 	if err := yaml.Unmarshal(data, &c); err != nil {
 		return nil, fmt.Errorf("parse resources config: %w", err)
 	}
-	// Guard against a silent empty graph: if the file has real content (not just
+	// Guard against a silent empty graph. If the file has real content (not just
 	// whitespace/comments) but produced zero resources, the schema almost
 	// certainly doesn't match (e.g. a top-level key other than "resources:", like
 	// an older "backends:" layout). Building a classical-only graph silently in
-	// that case hides the misconfiguration — the configured devices simply never
+	// that case hides the misconfiguration, the configured devices simply never
 	// appear in the graph. A genuinely empty file (an optional configmap not yet
 	// populated) is fine and stays classical-only.
 	if len(c.Resources) == 0 && hasContent(data) {
@@ -167,11 +167,11 @@ func resolveResource(r *Resource, registry map[string]map[string]string, topLeve
 
 // resolveResourceInherited resolves a resource's attributes and threads them
 // down to children. A child inherits every attribute of its parent, then applies
-// its own: a key the child also sets overrides the inherited value, and a key the
+// its own. A key the child also sets overrides the inherited value, and a key the
 // child sets to the empty string clears it (removed from the resolved set). This
 // makes a constraint that selects a nested node by class AND filters on an
-// attribute reachable — every node on the path (parent down to the target)
-// carries the attribute, so none is pruned mid-descent.
+// attribute reachable, every node on the path (parent down to the target)
+// has the attribute, so none is pruned mid-descent.
 func resolveResourceInherited(
 	r *Resource,
 	registry map[string]map[string]string,
@@ -195,7 +195,7 @@ func resolveResourceInherited(
 		own = resolved
 	}
 
-	// Merge: start from inherited, apply own (override), honor explicit-clear.
+	// Merge. Start from inherited, apply own (override), honor explicit-clear.
 	merged := make(map[string]string, len(inherited)+len(own))
 	for k, v := range inherited {
 		merged[k] = v
@@ -213,7 +213,7 @@ func resolveResourceInherited(
 		r.ResolvedAttributes = nil
 	}
 
-	// Thread the device identity down: a named top-level device sets it; children
+	// Thread the device identity down. A named top-level device sets it. Children
 	// inherit it. Stamped as a match-only property by virtualProperties.
 	if topLevel && r.Name != "" {
 		r.BackendName = r.Name
@@ -227,8 +227,8 @@ func resolveResourceInherited(
 	return nil
 }
 
-// resolveAttributes turns an AttributeSpec into a concrete map: inline is used
-// directly; a reference is looked up in the registry (error if absent).
+// resolveAttributes turns an AttributeSpec into a concrete map. Inline is used
+// directly. A reference is looked up in the registry (error if absent).
 func resolveAttributes(
 	spec AttributeSpec,
 	registry map[string]map[string]string,

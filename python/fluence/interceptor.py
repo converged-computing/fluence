@@ -1,12 +1,12 @@
 """
-fluence.interceptor — installs every registered provider's submit-time tag hook.
+fluence.interceptor, installs every registered provider's submit-time tag hook.
 
 Runs inside the user's application container, triggered automatically by a
 sitecustomize.py on PYTHONPATH (staged there by the Fluence init container). On
-import it asks every registered provider to install its interceptor; each
+import it asks every registered provider to install its interceptor. Each
 provider fail-soft skips if its vendor SDK is not present in this container.
 
-This module's import must never raise — sitecustomize guards it, but we also
+This module's import must never raise, sitecustomize guards it, but we also
 guard here so a single provider bug cannot affect the user application.
 """
 

@@ -138,7 +138,7 @@ func TestMutateSkipsNonFluxion(t *testing.T) {
 	}
 }
 
-// ── gang handler: scheduling group linkage ──────────────────────────────────────
+// ── gang handler. Scheduling group linkage ──────────────────────────────────────
 
 func TestGangStampsSchedulingGroup(t *testing.T) {
 	m := &webhook.Mutator{}

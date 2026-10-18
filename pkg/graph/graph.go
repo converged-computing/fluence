@@ -27,7 +27,7 @@ type FluxionGraph struct {
 	cli *fluxcli.ReapiClient
 
 	// MatchFormat selects the Fluxion allocation output format ("simple",
-	// "jgf", "rv1", ...). Empty defaults to "simple" (human-readable tree).
+	// "jgf", "rv1"...). Empty defaults to "simple" (human-readable tree).
 	// Set it to "jgf" when you need to parse the allocation programmatically
 	// (e.g. BackendFromAllocation).
 	MatchFormat string
@@ -52,7 +52,7 @@ func (f *FluxionGraph) Init(confFile string, matchPolicy string, label string) {
 		matchPolicy = "first"
 	}
 
-	// Allocation output format; default to the human-readable tree.
+	// Allocation output format. Default to the human-readable tree.
 	matchFormat := f.MatchFormat
 	if matchFormat == "" {
 		matchFormat = "simple"
@@ -66,7 +66,7 @@ func (f *FluxionGraph) Init(confFile string, matchPolicy string, label string) {
 
 	// 2. Create the context, specify instead of JGF (default) we want graphml
 	// 3. Remainder of defaults should work out of the box
-	// Note that the options get passed as a json string to here:
+	// Note that the options get passed as a json string to here.
 	// https://github.com/flux-framework/flux-sched/blob/master/resource/reapi/bindings/c%2B%2B/reapi_cli_impl.hpp#L412
 	opts := `{"matcher_policy": "%s", "load_file": "%s", "load_format": "jgf", "match_format": "%s"}`
 	p := fmt.Sprintf(opts, matchPolicy, confFile, matchFormat)
@@ -90,7 +90,7 @@ func (f *FluxionGraph) MatchAllocate(specFile string) (MatchAllocateRequest, err
 }
 
 // MatchAllocateSpec match-allocates against a jobspec provided as a string.
-// Fluxion accepts YAML or JSON; use the jobspec package to convert/normalize if
+// Fluxion accepts YAML or JSON. Use the jobspec package to convert/normalize if
 // needed before calling this.
 func (f *FluxionGraph) MatchAllocateSpec(spec string) (MatchAllocateRequest, error) {
 	request := MatchAllocateRequest{}
@@ -111,7 +111,7 @@ func (f *FluxionGraph) MatchAllocateSpec(spec string) (MatchAllocateRequest, err
 }
 
 // Cancel frees a previously match-allocated jobid in the resource graph. It is
-// idempotent: cancelling an unknown jobid is not treated as an error (noent_ok),
+// idempotent cancelling an unknown jobid is not treated as an error (noent_ok),
 // so a double-cancel (e.g. a redelivered informer event) is harmless.
 func (f *FluxionGraph) Cancel(jobid uint64) error {
 	fmt.Printf("   🌀 Cancel jobid: %d\n", jobid)
@@ -120,10 +120,10 @@ func (f *FluxionGraph) Cancel(jobid uint64) error {
 
 // UpdateAllocate replays a previously returned allocation R into the freshly
 // built graph under the given jobid, marking exactly the vertices named in R as
-// allocated — no re-matching, no guessing. This is how a scheduler restart
-// restores prior state: persist (jobid, R) when the allocation is made, rebuild
+// allocated, no re-matching, no guessing. This is how a scheduler restart
+// restores prior state. Persist (jobid, R) when the allocation is made, rebuild
 // the graph (empty of allocations) on startup, then UpdateAllocate each
-// surviving allocation. R must be the rv1 form (with the scheduling key); the
+// surviving allocation. R must be the rv1 form (with the scheduling key). The
 // jobid is preserved, so a later Cancel(jobid) still frees it.
 func (f *FluxionGraph) UpdateAllocate(jobid uint64, R string) error {
 	fmt.Printf("   🌀 UpdateAllocate (replay) jobid: %d\n", jobid)

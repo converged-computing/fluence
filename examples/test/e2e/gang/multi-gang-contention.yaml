@@ -1,5 +1,5 @@
-# Two gangs that cannot both place: fluxion allocates one core per slot, so two
-# 2-pod gangs need 4 cores, but the cluster graphs ~3 (3 workers, ~1 core each). One gang places entirely; the loser stays FULLY pending
+# Two gangs that cannot both place. fluxion allocates one core per slot, so two
+# 2-pod gangs need 4 cores, but the cluster graphs ~3 (3 workers, ~1 core each). One gang places entirely. The loser stays FULLY pending
 # (all-or-nothing), never partial.
 apiVersion: apps/v1
 kind: Deployment

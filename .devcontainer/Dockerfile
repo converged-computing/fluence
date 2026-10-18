@@ -11,7 +11,7 @@ ENV USER_UID=${USER_UID}
 ENV USER_GID=${USER_GID}
 USER root
 
-# Install extra buildrequires for flux-sched:
+# Install extra buildrequires for flux-sched.
 RUN sudo apt-get update && \
     sudo apt-get -qq install -y --no-install-recommends \
         libboost-graph-dev \
@@ -45,7 +45,7 @@ RUN sudo apt-get update \
 
 # --- Rust (for building QRMI) --------------------------------------------
 # Installed system-wide so it is available regardless of the active user.
-# QRMI pins its toolchain via rust-toolchain.toml (currently 1.91); rustup will
+# QRMI pins its toolchain via rust-toolchain.toml (currently 1.91). Rustup will
 # fetch that automatically during the build below.
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
@@ -55,7 +55,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
  && chmod -R a+rwX /usr/local/rustup /usr/local/cargo
 
  # --- QRMI native library (the bindings' cgo dependency) ------------------
-# Pin QRMI_REF to a tag/commit for reproducibility if you like; defaults to main.
+# Pin QRMI_REF to a tag/commit for reproducibility if you like. Defaults to main.
 ARG QRMI_REPO=https://github.com/qiskit-community/qrmi
 ARG QRMI_REF=main
 RUN git clone ${QRMI_REPO} /opt/qrmi \

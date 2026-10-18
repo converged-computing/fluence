@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Quantum placement: a qpu pod is matched to a backend and the webhook injects FLUXION_BACKEND.
+# Quantum placement. A qpu pod is matched to a backend and the webhook injects FLUXION_BACKEND.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE%/test/e2e/*}/test/e2e/lib.sh"
 ANN="fluence.flux-framework.org/backend"
@@ -17,7 +17,7 @@ log "fluence chose backend: $backend"
 # The webhook must have surfaced it as FLUXION_BACKEND inside the container.
 out="$(kubectl logs sampler-mock || true)"
 if ! echo "$out" | grep -q "BACKEND=${backend}"; then
-  # Diagnostic (CI has no interactive shell): show whether the env var is ABSENT
+  # Diagnostic (CI has no interactive shell). Show whether the env var is ABSENT
   # (not injected -> webhook issue) or PRESENT-BUT-EMPTY (annotation not resolved
   # at container start -> delivery/timing issue), and what the container actually got.
   log "--- diagnostic: container env spec ---"

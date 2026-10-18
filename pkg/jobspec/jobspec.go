@@ -7,7 +7,7 @@
 //	y, err  := js.YAML()                  // render as YAML
 //	j, err  := js.JSON()                  // render as JSON
 //
-// One set of `json` struct tags drives both formats: sigs.k8s.io/yaml maps YAML
+// One set of `json` struct tags drives both formats. sigs.k8s.io/yaml maps YAML
 // onto those tags (and JSON is a subset of YAML), and encoding/json uses them
 // directly.
 package jobspec
@@ -49,7 +49,7 @@ type Task struct {
 }
 
 // Load parses a jobspec from a YAML or JSON string. JSON is a subset of YAML,
-// so the YAML decoder accepts both; detection is only used to label errors.
+// so the YAML decoder accepts both. Detection is only used to label errors.
 func Load(data string) (*Jobspec, error) {
 	var js Jobspec
 	if err := yaml.Unmarshal([]byte(data), &js); err != nil {

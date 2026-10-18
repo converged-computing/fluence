@@ -6,16 +6,16 @@ import (
 )
 
 // vertexMeta is the subset of a JGF vertex metadata fluence needs from an
-// allocation: type, name, and the RFC 31 properties object. Properties are
+// allocation type, name, and the RFC 31 properties object. Properties are
 // stored as composed "key=value" keys (matching how the graph is built and how
-// the rv1 writer emits them); the value half of the JSON object is unused.
+// the rv1 writer emits them). The value half of the JSON object is unused.
 type vertexMeta struct {
 	Type       string            `json:"type"`
 	Name       string            `json:"name"`
 	Properties map[string]string `json:"properties"`
 }
 
-// graphVertices is the subset of a JGF graph we need: the metadata of each
+// graphVertices is the subset of a JGF graph we need. The metadata of each
 // vertex. It appears at the top level of a "jgf" allocation, and under the
 // "scheduling" key of an "rv1" allocation.
 type graphVertices struct {
@@ -25,7 +25,7 @@ type graphVertices struct {
 }
 
 // allocation captures the allocated vertices from a Fluxion allocation R in
-// either match format:
+// either match format.
 //   - "jgf": the vertices are at the top level under "graph".
 //   - "rv1": the vertices are under "scheduling.graph" (the rv1 scheduling key),
 //     alongside an "execution" view we don't need for name extraction.
@@ -61,7 +61,7 @@ type AllocatedNode struct {
 	Properties map[string]string
 }
 
-// HasProperty reports whether the node carries the given composed property key
+// HasProperty reports whether the node has the given composed property key
 // (e.g. "virtual=true").
 func (n AllocatedNode) HasProperty(key string) bool {
 	_, ok := n.Properties[key]
@@ -71,7 +71,7 @@ func (n AllocatedNode) HasProperty(key string) bool {
 // NodesFromAllocation returns every node-typed vertex in an allocation together
 // with its properties, so callers can classify them (physical vs virtual) by the
 // composed marker keys rather than by vertex type. Under the virtual-resource
-// model every allocatable thing is type "node"; the virtual marker, not the
+// model every allocatable thing is type "node". The virtual marker, not the
 // type, distinguishes a compute node from a virtual backend.
 func NodesFromAllocation(alloc string) ([]AllocatedNode, error) {
 	var a allocation
@@ -89,7 +89,7 @@ func NodesFromAllocation(alloc string) ([]AllocatedNode, error) {
 
 // NamesFromAllocation returns the names of every vertex of vertexType in a
 // Fluxion allocation (jgf or rv1). Retained for callers that key on a concrete
-// vertex type (e.g. counting "qpu" children); placement now classifies node
+// vertex type (e.g. counting "qpu" children). Placement now classifies node
 // vertices via NodesFromAllocation and the virtual marker instead.
 func NamesFromAllocation(alloc string, vertexType string) ([]string, error) {
 	var a allocation
