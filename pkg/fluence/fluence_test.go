@@ -60,7 +60,7 @@ func ann(jobid string) map[string]string {
 }
 
 // groupedPod returns a pod that belongs to the named native PodGroup.
-// NOTE: corev1.PodSchedulingGroup is the k8s 1.36 native gang field; if the
+// Note that corev1.PodSchedulingGroup is the k8s 1.36 native gang field. If the
 // type name differs in your vendored k8s, adjust just this constructor.
 func groupedPod(ns, name, group string, annotations map[string]string) *corev1.Pod {
 	g := group
@@ -166,7 +166,7 @@ func TestCancelGroupUnknownNoop(t *testing.T) {
 	}
 }
 
-// Cancel is idempotent: a redelivered delete event for an already-freed group
+// Cancel is idempotent. A redelivered delete event for an already-freed group
 // does nothing the second time.
 func TestCancelGroupIdempotent(t *testing.T) {
 	m := &fakeMatcher{}
@@ -209,7 +209,7 @@ func TestOnPodDeletedUngroupedCancels(t *testing.T) {
 	}
 }
 
-// Deleting a grouped pod must NOT cancel: the allocation belongs to the
+// Deleting a grouped pod must NOT cancel. The allocation belongs to the
 // PodGroup and is freed only when the PodGroup is deleted. Cancelling here would
 // free the gang's allocation while other pods still hold it.
 func TestOnPodDeletedGroupedDoesNotCancelDirectly(t *testing.T) {
@@ -219,9 +219,9 @@ func TestOnPodDeletedGroupedDoesNotCancelDirectly(t *testing.T) {
 	// A grouped pod being deleted must NOT directly cancel the gang's allocation
 	// (the allocation is owned by the PodGroup, freed only when the whole gang is
 	// done). onPodDeleted now triggers reconcileGroup instead of ignoring the
-	// pod, but reconcile frees nothing here: there is no scheduler handle in this
-	// unit context, so reconcile is a safe no-op. The invariant under test —
-	// "one grouped pod's deletion never frees the gang" — still holds.
+	// pod, but reconcile frees nothing here. There is no scheduler handle in this
+	// unit context, so reconcile is a safe no-op. The invariant under test
+	// "one grouped pod's deletion never frees the gang", still holds.
 	f.onPodDeleted(groupedPod("default", "training-abc", "training", ann("5")))
 
 	if len(m.cancelled) != 0 {
@@ -344,7 +344,7 @@ func TestCancelGroupMultipleJobids(t *testing.T) {
 }
 
 // twoSpecs returns two minimal jobspecs (compute + device) to drive matchGroup
-// tests; their content doesn't matter since the fake matcher scripts results.
+// tests. Their content doesn't matter since the fake matcher scripts results.
 func twoSpecs() []*jobspec.Jobspec {
 	return []*jobspec.Jobspec{
 		{Version: 9999},
@@ -354,7 +354,7 @@ func twoSpecs() []*jobspec.Jobspec {
 
 // --- PostFilter allocation reconciliation -----------------------------------
 
-// fakeNodeStatus is a minimal fwk.NodeToStatusReader for PostFilter tests: it
+// fakeNodeStatus is a minimal fwk.NodeToStatusReader for PostFilter tests. It
 // maps node name -> status code so a test can mark some nodes incompatible
 // (UnschedulableAndUnresolvable) and others merely busy (Unschedulable).
 type fakeNodeStatus map[string]fwk.Code
@@ -382,7 +382,7 @@ func TestPostFilterExcludesOnlyIncompatibleNodes(t *testing.T) {
 	}
 	pod := groupedPod("default", "training-0", "training", nil)
 
-	// node-a incompatible (taint); node-b busy; node-c survived Filter.
+	// node-a incompatible (taint). node-b busy. node-c survived Filter.
 	status := fakeNodeStatus{
 		"node-a": fwk.UnschedulableAndUnresolvable,
 		"node-b": fwk.Unschedulable,
@@ -412,7 +412,7 @@ func TestPostFilterExcludesOnlyIncompatibleNodes(t *testing.T) {
 }
 
 // A group blocked purely by contention (every node merely busy) excludes NOTHING
-// so it can retry the same nodes once they free — the saturated-cluster property.
+// so it can retry the same nodes once they free, the saturated-cluster property.
 func TestPostFilterContentionExcludesNothing(t *testing.T) {
 	m := &fakeMatcher{}
 	f := newTestFluence(m)
@@ -455,7 +455,7 @@ func TestPostFilterNilStatusMapExcludesNothing(t *testing.T) {
 	}
 }
 
-// Incompatible nodes accumulate across attempts; busy ones never do.
+// Incompatible nodes accumulate across attempts. Busy ones never do.
 func TestPostFilterAccumulatesIncompatibleAcrossAttempts(t *testing.T) {
 	m := &fakeMatcher{}
 	f := newTestFluence(m)
@@ -482,7 +482,7 @@ func TestPostFilterAccumulatesIncompatibleAcrossAttempts(t *testing.T) {
 }
 
 // PostFilter on a group with no cached allocation (not ours, or already cleared)
-// is a safe no-op: no panic, no cancel, returns Unschedulable.
+// is a safe no-op. No panic, no cancel, returns Unschedulable.
 func TestPostFilterUnknownGroupNoop(t *testing.T) {
 	m := &fakeMatcher{}
 	f := newTestFluence(m)

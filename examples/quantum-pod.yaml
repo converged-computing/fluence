@@ -4,10 +4,10 @@
 # the request against the resource graph and picks a backend, the webhook injects
 # FLUXION_BACKEND (the allocated backend) automatically, and note we can add other
 # envars here in the future. I chose a webhook because I think this is going to
-# be a requirement, and the pod is immutable after creation. 
+# be a requirement, and the pod is immutable after creation.
 # Then the container submits via qrmi-go (the separate qrmi-sampler image).
 # the credentials live on the level of the application container NOT in
-# a shared space. 
+# a shared space.
 apiVersion: v1
 kind: Pod
 metadata:

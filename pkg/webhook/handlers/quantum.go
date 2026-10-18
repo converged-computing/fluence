@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/converged-computing/fluence/pkg/placement"
 	"github.com/converged-computing/fluence/pkg/webhook"
 	"github.com/converged-computing/fluence/pkg/webhook/spec"
 
@@ -21,47 +22,23 @@ func init() {
 	webhook.Register(&quantumHandler{})
 }
 
-// Quantum-specific policy. The webhook core knows NONE of these — they live only
-// here, in the quantum handler.
-//
-// Model (producer/consumer split, no separate submitter pod). A quantum task's
-// circuit comes from user code, so the pod that defines a task must RUN to submit
-// it — submit and gate are mutually exclusive per pod. Gating therefore only
-// helps pods that do NOT submit. A quantum gang in CoordinationShared mode is
-// split, per pod, into two roles decided at admission:
-//
-//   - PRODUCER (one member, the indexed-Job completion index 0): its own
-//     group-of-one <group>-producer (minCount 1) so it schedules alone and runs
-//     the SINGLE real submit; staged with the interceptor in REAL (tag) mode and
-//     given the sidecar, which polls the task and ungates the consumers at
-//     position==1. NOT gated. The producer is one of the N members, so the
-//     application is run exactly N times — never N+1.
-//   - CONSUMERS (the other N-1 members): the <group> gang (minCount N-1), each
-//     gated on quantum.braket/ready + preempting priority, told its role via
-//     FLUENCE_COORDINATION_ROLE=consumer and handed the producer's task id via
-//     FLUENCE_QUANTUM_JOB_ID. A consumer does NOT submit; it fetches the shared
-//     result by that id. Ungated together when the producer's task is ready.
-//
-// In CoordinationIndependent mode (the default) there is no shared result to
-// coordinate: every member is its own standalone producer (real submit, no gate),
-// each owning its task and its own queue wait. A lone quantum pod (no group) is
-// always standalone.
+// Quantum-specific policy.
 const (
 	// QuantumResource is the Fluxion resource a pod requests to ask Fluence to
 	// schedule quantum work. Requesting it is the sole trigger for this handler.
 	QuantumResource = "fluxion.flux-framework.org/qpu"
 
-	// QuantumGate holds a consumer pod unscheduled until the producer's task is
-	// ready (the producer's sidecar removes it).
+	// QuantumGate holds a worker pod unscheduled until the scout's task is
+	// ready (the scout's sidecar removes it).
 	QuantumGate = "quantum.braket/ready"
 
 	// ObserveLabel opts a STANDALONE quantum pod (a group of one) into
-	// observe-only telemetry: the sidecar is injected and polls queue position
-	// but ungates nothing.
+	// observe-only. The sidecar is injected and polls queue position
+	// does not ungate.
 	ObserveLabel = "fluence.flux-framework.org/observe"
 
 	// DependencyKindQuantumSubmit is the readiness Kind for the quantum resource
-	// type: consumer pods wait for a quantum submission to reach the device queue.
+	// type: worker pods wait for a quantum submission to reach the device queue.
 	// First concrete instance of the general Dependency primitive (dependency.go).
 	DependencyKindQuantumSubmit = "quantum-submit"
 
@@ -70,49 +47,112 @@ const (
 	// without changing the mechanism.
 	CoordinationAnnotation = "fluence.flux-framework.org/coordination"
 
-	// CoordinationShared: one real task; the producer (index 0) submits and the
-	// other members are gated consumers that fetch the producer's result. Each
-	// member is told its role via FLUENCE_COORDINATION_ROLE; a role-aware workload
-	// branches on it (producer submits, consumer fetches by FLUENCE_QUANTUM_JOB_ID).
+	// CoordinationShared. One real task. The scout (index 0) submits and the
+	// other members are gated workers that fetch the scout's result. Each
+	// member is told its role via FLUENCE_COORDINATION_ROLE. A role-aware workload
+	// branches on it (scout submits, worker fetches by FLUENCE_QUANTUM_JOB_ID).
 	CoordinationShared = "shared"
 
-	// CoordinationIndependent (default): every member does its own quantum work;
+	// CoordinationIndependent (default). Every member does its own quantum work.
 	// no coordination, no gating. Never invent coordination the user did not ask
 	// for, and never dedup tasks meant to be distinct.
 	CoordinationIndependent = "independent"
 
-	// ProducerGroupSuffix names the producer's own group-of-one: <group>-producer
+	// ScoutGroupSuffix names the scout's own group-of-one. <group>-scout
 	// (minCount 1) so it schedules alone and never deadlocks against the gated
-	// consumer gang.
-	ProducerGroupSuffix = "-producer"
+	// worker gang.
+	ScoutGroupSuffix = "-scout"
 
 	// CompletionIndexAnnotation is the indexed-Job completion index the Job
-	// controller stamps on each pod; index "0" is the producer (deterministic
+	// controller stamps on each pod. Index "0" is the scout (deterministic
 	// election with no recorded state).
 	CompletionIndexAnnotation = "batch.kubernetes.io/job-completion-index"
 
-	// ProducerIndex is the completion index promoted to producer.
-	ProducerIndex = "0"
+	// ScoutIndex is the completion index promoted to scout.
+	ScoutIndex = "0"
 
-	// GangGroupEnv tells the producer's sidecar which consumer group label to list
+	// GangGroupEnv tells the scout's sidecar which worker group label to list
 	// and ungate when the task is ready.
 	GangGroupEnv = "FLUENCE_GANG_GROUP"
 )
 
-// quantumHandler splits a shared quantum gang into a single producer (real
-// submit + sidecar) and N-1 gated, role-aware consumers, or runs every member
-// standalone in independent mode (see the package-level model comment). It is the
-// only place in the webhook that knows about quantum resources, gates,
-// coordination, or observe semantics.
+// quantumHandler splits a shared quantum gang into a single scout (real
+// submit + sidecar) and N-1 gated workers.
 type quantumHandler struct{}
 
 func (h *quantumHandler) Name() string { return "quantum" }
 
-// Applies to any pod requesting the quantum resource. Producers, consumers, and
-// standalone quantum pods all request it; nothing without the resource needs
-// quantum handling, so this is the single, unambiguous trigger.
+// Applies to any pod requesting the quantum resource.
 func (h *quantumHandler) Applies(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod) bool {
 	return spec.PodRequestsResource(pod, QuantumResource)
+}
+
+var _ webhook.Admitter = (*quantumHandler)(nil)
+
+// Admit is admission control, see pkg/webhook/admission.go.
+func (h *quantumHandler) Admit(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod) error {
+	if spec.Annotation(pod, webhook.ProtectedAnnotation) != "" {
+		return fmt.Errorf("%s is set by fluence and must not be set on a submission. It marks a pod as "+
+			"not preemptible, which is not yours to decide", webhook.ProtectedAnnotation)
+	}
+	g := resolveGroup(pod)
+	n := resolveGangSize(ctx, m, pod, g)
+	cores := placement.PodCores(pod)
+	key := pod.Namespace + "/" + pod.Name
+	want := cores
+	if coordinationMode(pod) == CoordinationShared && g != "" && n > 1 {
+		if groupAdmitted(ctx, m, pod.Namespace, g) {
+			return nil
+		}
+		key = pod.Namespace + "/" + g
+		want = cores * int(n)
+	}
+	return m.Admit(ctx, pod, key, want)
+}
+
+// groupAdmitted reports whether the gang PodGroup already has an admission record.
+func groupAdmitted(ctx context.Context, m webhook.MutatorAPI, namespace, group string) bool {
+	c := m.Client()
+	if c == nil {
+		return false
+	}
+	pg, err := c.SchedulingV1alpha2().PodGroups(namespace).Get(ctx, group, metav1.GetOptions{})
+	if err != nil {
+		return false
+	}
+	return pg.Annotations[webhook.AdmittedCoresAnnotation] != ""
+}
+
+// admissionOps marks a quantum pod protected and names its admission record.
+// A standalone pod is its own record and has the total.
+func admissionOps(pod *corev1.Pod, record string, standaloneCores int) []spec.Op {
+	ann := map[string]string{
+		webhook.ProtectedAnnotation:     webhook.ProtectedValue,
+		webhook.AdmittedGroupAnnotation: record,
+	}
+	if standaloneCores > 0 {
+		ann[webhook.AdmittedCoresAnnotation] = strconv.Itoa(standaloneCores)
+	}
+	return annotateOps(pod, ann)
+}
+
+// annotateOps adds annotations with one patch when the pod has none yet,
+// since repeated adds of the whole map would replace each other, and per key
+// otherwise. The pod is updated in place so later helpers see the keys.
+func annotateOps(pod *corev1.Pod, ann map[string]string) []spec.Op {
+	if pod.Annotations == nil {
+		pod.Annotations = map[string]string{}
+		for k, v := range ann {
+			pod.Annotations[k] = v
+		}
+		return []spec.Op{{Op: "add", Path: "/metadata/annotations", Value: ann}}
+	}
+	var ops []spec.Op
+	for k, v := range ann {
+		ops = append(ops, spec.Op{Op: "add", Path: "/metadata/annotations/" + escapeJSONPointer(k), Value: v})
+		pod.Annotations[k] = v
+	}
+	return ops
 }
 
 func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod) []spec.Op {
@@ -120,13 +160,16 @@ func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *
 	n := resolveGangSize(ctx, m, pod, g)
 	mode := coordinationMode(pod)
 	observe := spec.Label(pod, ObserveLabel) == "true"
+	cores := placement.PodCores(pod)
 
-	// No coordination: a standalone quantum pod, or an explicitly independent
-	// member. The REAL submit happens in THIS pod; the sidecar is added only for
+	// No coordination. A standalone quantum pod, or an explicitly independent
+	// member. The REAL submit happens in THIS pod. The sidecar is added only for
 	// observe-only telemetry. (independent mode routes every member here -> N
-	// standalone producers, each owning its task and its own queue wait.)
+	// standalone scouts, each owning its task and its own queue wait.)
 	if mode != CoordinationShared || g == "" || n <= 1 {
-		ops := interceptorOps(pod)
+		ops := admissionOps(pod, pod.Namespace+"/"+pod.Name, cores)
+		ops = append(ops, interceptorOps(pod)...)
+		ops = append(ops, handoffOps(pod)...)
 		if observe {
 			sc := sidecarFor(m)
 			sc.EnsureRBAC(ctx, pod.Namespace)
@@ -137,65 +180,66 @@ func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *
 		return ops
 	}
 
-	// shared mode: promote one member to producer; the rest are gated consumers.
-	if isProducer(ctx, m, pod, g) {
-		return h.mutateProducer(ctx, m, pod, g)
+	// shared mode. Promote one member to scout. The rest are gated workers.
+	// the gang PodGroup is the admission record for scout and workers
+	// alike, so make sure it exists and stamp the total on it once
+	m.EnsurePodGroup(ctx, pod.Namespace, g, pod.Name, n-1)
+	m.RecordAdmission(ctx, pod.Namespace, g, cores*int(n))
+	ops := admissionOps(pod, pod.Namespace+"/"+g, 0)
+	if isScout(ctx, m, pod, g) {
+		return append(ops, h.mutateScout(ctx, m, pod, g)...)
 	}
-	return h.mutateConsumer(ctx, m, pod, g, n)
+	return append(ops, h.mutateWorker(ctx, m, pod, g, n)...)
 }
 
-// mutateProducer wires the single producer member (indexed-Job completion index
-// 0): its own group-of-one <group>-producer (minCount 1) so it schedules alone
+// mutateScout wires the single scout member (indexed-Job completion index
+// 0). Its own group-of-one <group>-scout (minCount 1) so it schedules alone
 // and runs the REAL submit, the interceptor in tag mode, RBAC, and the sidecar
-// told which consumer group to ungate (FLUENCE_GANG_GROUP). The producer is one
+// told which worker group to ungate (FLUENCE_GANG_GROUP). The scout is one
 // of the N members, so the application is NOT run an extra time. Never gated.
-func (h *quantumHandler) mutateProducer(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string) []spec.Op {
-	pg := group + ProducerGroupSuffix
+func (h *quantumHandler) mutateScout(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string) []spec.Op {
+	pg := group + ScoutGroupSuffix
 	m.EnsurePodGroup(ctx, pod.Namespace, pg, pod.Name, 1)
 	ops := linkGroupOps(pod, pg)
-	ops = append(ops, interceptorOps(pod)...)           // tag mode: the producer submits for real
-	ops = append(ops, roleEnvOps(pod, RoleProducer)...) // FLUENCE_COORDINATION_ROLE=producer
+	ops = append(ops, interceptorOps(pod)...)           // tag mode: the scout submits for real
+	ops = append(ops, handoffOps(pod)...)               // where the interceptor writes the task id and session
+	ops = append(ops, roleEnvOps(pod, RoleScout)...) // FLUENCE_COORDINATION_ROLE=scout
 	sc := sidecarFor(m)
 	sc.EnsureRBAC(ctx, pod.Namespace)
 	extra := []corev1.EnvVar{{Name: GangGroupEnv, Value: group}}
 	ops = append(ops, sc.ContainerOps(pod, false, extra)...)
-	log.Printf("[fluence-webhook] quantum producer %s/%s — group %s (ungates consumers %q)",
+	log.Printf("[fluence-webhook] quantum scout %s/%s, group %s (ungates workers %q)",
 		pod.Namespace, pod.Name, pg, group)
 	return ops
 }
 
-// mutateConsumer wires a non-producer member: it joins the <group> consumer gang
-// (minCount N-1) and is gated until the producer's task is ready. It is told its
-// role (FLUENCE_COORDINATION_ROLE=consumer) and handed the producer's task id
+// mutateWorker wires a non-scout member. It joins the <group> worker gang
+// (minCount N-1) and is gated until the scout's task is ready. It is told its
+// role (FLUENCE_COORDINATION_ROLE=worker) and handed the scout's task id
 // (FLUENCE_QUANTUM_JOB_ID, stamped on the pod by the sidecar at ungate). A
-// role-aware consumer reads those and fetches the shared result instead of
-// submitting — so the consumer never calls the vendor submit, and needs neither
+// role-aware worker reads those and fetches the shared result instead of
+// submitting, so the worker never calls the vendor submit, and needs neither
 // the interceptor nor a faux flag.
-func (h *quantumHandler) mutateConsumer(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string, n int32) []spec.Op {
+func (h *quantumHandler) mutateWorker(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string, n int32) []spec.Op {
 	m.EnsurePodGroup(ctx, pod.Namespace, group, pod.Name, n-1)
 	ops := linkGroupOps(pod, group)
-	// Express the wait as the GENERAL dependency primitive: this consumer depends
-	// on the quantum submission produced by <group>-producer, held by the quantum
-	// gate. applyOps gates the pod, raises priority, and stamps depends-on-*.
-	dep := Dependency{Kind: DependencyKindQuantumSubmit, Producer: group + ProducerGroupSuffix, Gate: QuantumGate}
+	// the worker waits on the scout's submission, held by the quantum gate
+	dep := Dependency{Kind: DependencyKindQuantumSubmit, Scout: group + ScoutGroupSuffix, Gate: QuantumGate}
 	ops = append(ops, dep.applyOps(pod)...)
-	ops = append(ops, consumerEnvOps(pod)...)
-	// A gated consumer never runs the QPU task — it only fetches the producer's
-	// shared result — so it must not hold the Fluxion quantum resource. Leaving it
-	// would make Fluxion allocate a qpu per consumer, capping the gang at the
-	// backend's graph qpu count and, on a single-slot real QPU, leaving the
-	// consumers unschedulable. Applies() already routed this pod on the request, so
-	// stripping it here is safe.
+	ops = append(ops, workerEnvOps(pod)...)
+	// A worker does not hold a qpu of its own. It uses the scout session, so
+	// its quantum resource request is dropped. Otherwise Fluxion would allocate
+	// a qpu per worker and a backend with one qpu could never seat the gang.
 	ops = append(ops, dropQuantumResourceOps(pod)...)
-	log.Printf("[fluence-webhook] quantum consumer %s/%s — group %s minCount=%d, gated (role=consumer, qpu stripped)",
+	log.Printf("[fluence-webhook] quantum worker %s/%s, group %s minCount=%d, gated (role=worker, qpu stripped)",
 		pod.Namespace, pod.Name, group, n-1)
 	return ops
 }
 
-// dropQuantumResourceOps removes the Fluxion quantum resource from a consumer's
+// dropQuantumResourceOps removes the Fluxion quantum resource from a worker's
 // containers (requests and limits), returning the patch ops and mutating pod in
 // place. Only entries that are present are removed (a JSON-patch remove on a
-// missing path would fail). The sidecar container is never a consumer concern.
+// missing path would fail). The sidecar container is never a worker concern.
 func dropQuantumResourceOps(pod *corev1.Pod) []spec.Op {
 	rn := corev1.ResourceName(QuantumResource)
 	// JSON Pointer escaping for the resource key: '~' -> '~0', '/' -> '~1'.
@@ -219,7 +263,7 @@ func dropQuantumResourceOps(pod *corev1.Pod) []spec.Op {
 	return ops
 }
 
-// coordinationMode reads the coordination annotation; default independent.
+// coordinationMode reads the coordination annotation. Default independent.
 func coordinationMode(pod *corev1.Pod) string {
 	if v := spec.Annotation(pod, CoordinationAnnotation); v != "" {
 		return v
@@ -227,29 +271,29 @@ func coordinationMode(pod *corev1.Pod) string {
 	return CoordinationIndependent
 }
 
-// isProducer decides whether THIS pod is the gang's single producer. Indexed Job
-// (recommended): completion index 0 is the producer — deterministic, race-free,
-// no recorded state. Otherwise: first arrival claims the producer slot by the
-// absence of the producer PodGroup (best-effort under concurrent admission;
+// isScout decides whether THIS pod is the gang's single scout. Indexed Job
+// (recommended). Completion index 0 is the scout, deterministic, race-free,
+// no recorded state. Otherwise. First arrival claims the scout slot by the
+// absence of the scout PodGroup (best-effort under concurrent admission.
 // prefer an indexed Job for determinism). Indexing a nil annotations map yields
 // ok=false, so the indexed branch is nil-safe.
-func isProducer(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string) bool {
+func isScout(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string) bool {
 	if idx, ok := pod.Annotations[CompletionIndexAnnotation]; ok {
-		return idx == ProducerIndex
+		return idx == ScoutIndex
 	}
 	c := m.Client()
 	if c == nil {
-		return true // tests / no client: treat as producer
+		return true // tests / no client: treat as scout
 	}
-	pg := group + ProducerGroupSuffix
+	pg := group + ScoutGroupSuffix
 	if _, err := c.SchedulingV1alpha2().PodGroups(pod.Namespace).Get(ctx, pg, metav1.GetOptions{}); err == nil {
 		return false // already claimed by an earlier arrival
 	}
 	return true
 }
 
-// resolveGroup returns the gang group identity: the explicit group label, else
-// the owning controller's name (Job/ReplicaSet/StatefulSet — a Deployment's pods
+// resolveGroup returns the gang group identity. The explicit group label, else
+// the owning controller's name (Job/ReplicaSet/StatefulSet, a Deployment's pods
 // are owned by a ReplicaSet), else "" (a loose quantum pod with no group, which
 // is treated as a standalone group of one).
 func resolveGroup(pod *corev1.Pod) string {
@@ -265,10 +309,10 @@ func resolveGroup(pod *corev1.Pod) string {
 	return ""
 }
 
-// resolveGangSize returns the full gang size N: the explicit group-size
+// resolveGangSize returns the full gang size N. The explicit group-size
 // annotation (authoritative override), else the owner's replica count (Job
 // parallelism/completions, ReplicaSet replicas), else a count of pods already
-// carrying the group label (best-effort for loose grouped pods; admission-order
+// with the group label (best-effort for loose grouped pods. Admission-order
 // dependent, which is why the annotation is preferred), else 1.
 func resolveGangSize(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string) int32 {
 	if pod.Annotations != nil {
@@ -312,9 +356,9 @@ func ownerReplicaSetN(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod
 	return 0
 }
 
-// countGroupPods counts pods already carrying the group label (best-effort gang
+// countGroupPods counts pods that already have the group label (best-effort gang
 // size for loose grouped pods that have neither a group-size annotation nor an
-// owning controller). Admission-order dependent — prefer the group-size
+// owning controller). Admission-order dependent, prefer the group-size
 // annotation when the exact size must be guaranteed.
 func countGroupPods(ctx context.Context, m webhook.MutatorAPI, namespace, group string) int32 {
 	c := m.Client()
@@ -330,7 +374,7 @@ func countGroupPods(ctx context.Context, m webhook.MutatorAPI, namespace, group 
 	return int32(len(list.Items))
 }
 
-// linkGroupOps ensures the gang pod carries the group label (so the producer's
+// linkGroupOps ensures the gang pod has the group label (so the scout's
 // sidecar can list it) and is linked to the gang PodGroup via
 // spec.schedulingGroup.podGroupName. Idempotent.
 func linkGroupOps(pod *corev1.Pod, group string) []spec.Op {
@@ -362,35 +406,42 @@ func escapeJSONPointer(s string) string {
 
 const QuantumClassicalPriorityClass = "fluence-quantum-classical"
 
-// ── coordination role (producer / consumer) ─────────────────────────────────────
+// ── coordination role (scout / worker) ─────────────────────────────────────
 //
 // In a shared gang each member is told its role positively, so the application
-// branches on it instead of relying on any submit-interception magic:
-//   producer  submits the one real task (and is tagged so the sidecar finds it);
-//   consumer  does NOT submit — it reads the producer's task id and fetches the
+// branches on it instead of relying on any submit-interception magic.
+//   scout  submits the one real task (and is tagged so the sidecar finds it).
+//   worker  does NOT submit, it reads the scout's task id and fetches the
 //             shared result (e.g. via the vendor's S3-backed result API).
-// The role is decided at admission by isProducer (completion index 0, else the
-// producer-group claim) and surfaced as FLUENCE_COORDINATION_ROLE. Because the
-// election is the webhook's, this env is the single source of truth — the
+// The role is decided at admission by isScout (completion index 0, else the
+// scout-group claim) and surfaced as FLUENCE_COORDINATION_ROLE. Because the
+// election is the webhook's, this env is the single source of truth, the
 // container never re-derives its role from the Job index (which loose, non-Job
 // pods don't even have).
 
 const (
-	// CoordinationRoleEnv carries the pod's role in a shared gang. A role-aware
-	// workload branches on it: RoleProducer submits, RoleConsumer fetches the
+	// CoordinationRoleEnv has the pod's role in a shared gang. A role-aware
+	// workload branches on it. RoleScout submits, RoleWorker fetches the
 	// shared result by id. Unset for standalone/independent pods (they all submit).
 	CoordinationRoleEnv = "FLUENCE_COORDINATION_ROLE"
-	RoleProducer        = "producer"
-	RoleConsumer        = "consumer"
+	RoleScout        = "scout"
+	RoleWorker        = "worker"
 
 	// QuantumJobIDAnnotation is the vendor-neutral task id the ungating sidecar
-	// stamps on each consumer (mirrors python/fluence/ungate.py JOB_ID_ANNOTATION),
+	// stamps on each worker (mirrors python/fluence/ungate.py JOB_ID_ANNOTATION),
 	// BEFORE removing the gate. Surfaced into FLUENCE_QUANTUM_JOB_ID via the
-	// downward API so a consumer can fetch the producer's result by id.
+	// downward API so a worker can fetch the scout's result by id.
 	QuantumJobIDAnnotation = "fluence.flux-framework.org/quantum-job-id"
 
-	// QuantumJobIDEnv is the env a consumer reads for the producer's task id.
+	// QuantumJobIDEnv is the env a worker reads for the scout's task id.
 	QuantumJobIDEnv = "FLUENCE_QUANTUM_JOB_ID"
+
+	// QuantumSessionIDAnnotation is the session the scout acquired, stamped
+	// on each worker at ungate when there is one, the same way as the job id
+	// (python/fluence/ungate.py SESSION_ID_ANNOTATION). A worker can submit
+	// into the same session with it.
+	QuantumSessionIDAnnotation = "fluence.flux-framework.org/quantum-session-id"
+	QuantumSessionIDEnv        = "FLUENCE_QUANTUM_SESSION_ID"
 )
 
 // roleEnvOps sets FLUENCE_COORDINATION_ROLE=<role> on each non-sidecar container.
@@ -398,13 +449,13 @@ func roleEnvOps(pod *corev1.Pod, role string) []spec.Op {
 	return setContainerEnvOps(pod, corev1.EnvVar{Name: CoordinationRoleEnv, Value: role})
 }
 
-// consumerEnvOps tells a consumer its role and hands it the producer's task id
-// (FLUENCE_QUANTUM_JOB_ID, downward API from the annotation the ungating sidecar
-// stamps). A consumer never submits, so it gets neither the interceptor nor any
-// faux flag — just its role and the id to fetch the shared result with.
-func consumerEnvOps(pod *corev1.Pod) []spec.Op {
-	ops := roleEnvOps(pod, RoleConsumer)
+// workerEnvOps tells a worker its role and hands it the scout's task id and
+// session, read from the annotations the sidecar stamps at ungate. A worker
+// may fetch the scout result by id or submit into the scout session.
+func workerEnvOps(pod *corev1.Pod) []spec.Op {
+	ops := roleEnvOps(pod, RoleWorker)
 	ops = append(ops, setContainerEnvOps(pod, spec.AnnotationEnv(QuantumJobIDEnv, QuantumJobIDAnnotation))...)
+	ops = append(ops, setContainerEnvOps(pod, spec.AnnotationEnv(QuantumSessionIDEnv, QuantumSessionIDAnnotation))...)
 	return ops
 }
 
@@ -427,19 +478,19 @@ func setContainerEnvOps(pod *corev1.Pod, e corev1.EnvVar) []spec.Op {
 	return ops
 }
 
-// Sidecar implementation — quantum-owned, NOT core.
+// Sidecar implementation, quantum-owned, NOT core.
 //
 // The fluence coordination sidecar (its container, name, RBAC, image, and the
-// Python interceptor staging) is specific to the quantum integration: it polls a
+// Python interceptor staging) is specific to the quantum integration. It polls a
 // vendor queue and ungates workers. None of this belongs on the webhook core,
 // which stays domain-agnostic and only exposes generic primitives (Client,
-// InjectedEnv, EnsurePodGroup). The core invokes each handler's generic Mutate;
-// a handler does its own create/edit side-effects (here: RBAC, ConfigMaps,
+// InjectedEnv, EnsurePodGroup). The core invokes each handler's generic Mutate.
+// a handler does its own create/edit side-effects (here. RBAC, ConfigMaps,
 // container injection) through the generic client.
 //
 // These are package-level functions (not methods on the core *Mutator) operating
 // on the generic webhook.MutatorAPI. coreSidecar (see sidecar.go) delegates to
-// them; a future non-quantum handler that needs a different sidecar supplies its
+// them. A future non-quantum handler that needs a different sidecar supplies its
 // own Sidecar implementation and its own container name/image.
 
 const (
@@ -452,17 +503,24 @@ const (
 	SidecarServiceAccount = "fluence-sidecar"
 
 	// defaultSidecarImage is used when FLUENCE_SIDECAR_IMAGE is not set. Owned by
-	// the quantum integration; the deployment may override it via the env var.
+	// the quantum integration. The deployment may override it via the env var.
 	defaultSidecarImage = "vanessa/fluence-sidecar:latest"
 
-	// StageVolumeName / StageMountPath: the shared emptyDir the init container
+	// StageVolumeName / StageMountPath. The shared emptyDir the init container
 	// stages the fluence Python package into, mounted into workload containers
 	// and prepended to PYTHONPATH (Model C delivery).
 	StageVolumeName = "fluence-pkg"
 	StageMountPath  = "/opt/fluence-staged"
+
+	// HandoffVolumeName / HandoffMountPath / HandoffDirEnv. The shared emptyDir
+	// a submitting pod's interceptor writes its task id and session to, and
+	// its sidecar reads (python/fluence/handoff.py). Workers never get it.
+	HandoffVolumeName = "fluence-handoff"
+	HandoffMountPath  = "/opt/fluence-handoff"
+	HandoffDirEnv     = "FLUENCE_HANDOFF_DIR"
 )
 
-// sidecarImage resolves the sidecar image: the FLUENCE_SIDECAR_IMAGE override
+// sidecarImage resolves the sidecar image. The FLUENCE_SIDECAR_IMAGE override
 // (deployment config) or the quantum default. Read here so image config is owned
 // by the integration that uses it, not the core.
 func sidecarImage() string {
@@ -511,12 +569,12 @@ func ensureSidecarRBAC(ctx context.Context, m webhook.MutatorAPI, namespace stri
 	}
 }
 
-// interceptorOps stages the fluence Python package (Model C): an init container
+// interceptorOps stages the fluence Python package (Model C). An init container
 // copies it into a shared emptyDir, mounted into every workload container
 // (skipping the sidecar) with PYTHONPATH + FLUENCE_POD_UID, so Python auto-imports
 // the interceptor via sitecustomize, which tags the vendor submit so the sidecar
-// can find the task. Added to producers and standalone/independent pods (the ones
-// that actually submit); consumers don't submit, so they don't get it.
+// can find the task. Added to scouts and standalone/independent pods (the ones
+// that actually submit). Workers don't submit, so they don't get it.
 func interceptorOps(pod *corev1.Pod) []spec.Op {
 	var ops []spec.Op
 
@@ -526,6 +584,7 @@ func interceptorOps(pod *corev1.Pod) []spec.Op {
 	} else {
 		ops = append(ops, spec.Op{Op: "add", Path: "/spec/volumes/-", Value: vol})
 	}
+	pod.Spec.Volumes = append(pod.Spec.Volumes, vol)
 
 	initc := corev1.Container{
 		Name:            "fluence-stage",
@@ -553,6 +612,7 @@ func interceptorOps(pod *corev1.Pod) []spec.Op {
 		} else {
 			ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/volumeMounts/-", i), Value: mount})
 		}
+		pod.Spec.Containers[i].VolumeMounts = append(pod.Spec.Containers[i].VolumeMounts, mount)
 		if !spec.HasEnv(c, "PYTHONPATH") {
 			if len(c.Env) == 0 {
 				ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/env", i), Value: []corev1.EnvVar{pythonpath}})
@@ -567,6 +627,40 @@ func interceptorOps(pod *corev1.Pod) []spec.Op {
 			pod.Spec.Containers[i].Env = append(pod.Spec.Containers[i].Env, uid)
 		}
 	}
+	return ops
+}
+
+// handoffOps gives a submitting pod the handoff volume. Workload containers
+// mount it writable and get FLUENCE_HANDOFF_DIR. The sidecar mounts it read
+// only in sidecarContainerOps. Idempotent.
+func handoffOps(pod *corev1.Pod) []spec.Op {
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == HandoffVolumeName {
+			return nil
+		}
+	}
+	var ops []spec.Op
+	vol := corev1.Volume{Name: HandoffVolumeName, VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}
+	if len(pod.Spec.Volumes) == 0 {
+		ops = append(ops, spec.Op{Op: "add", Path: "/spec/volumes", Value: []corev1.Volume{vol}})
+	} else {
+		ops = append(ops, spec.Op{Op: "add", Path: "/spec/volumes/-", Value: vol})
+	}
+	pod.Spec.Volumes = append(pod.Spec.Volumes, vol)
+
+	mount := corev1.VolumeMount{Name: HandoffVolumeName, MountPath: HandoffMountPath}
+	for i, c := range pod.Spec.Containers {
+		if c.Name == SidecarContainerName {
+			continue
+		}
+		if len(c.VolumeMounts) == 0 {
+			ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/volumeMounts", i), Value: []corev1.VolumeMount{mount}})
+		} else {
+			ops = append(ops, spec.Op{Op: "add", Path: fmt.Sprintf("/spec/containers/%d/volumeMounts/-", i), Value: mount})
+		}
+		pod.Spec.Containers[i].VolumeMounts = append(pod.Spec.Containers[i].VolumeMounts, mount)
+	}
+	ops = append(ops, setContainerEnvOps(pod, corev1.EnvVar{Name: HandoffDirEnv, Value: HandoffMountPath})...)
 	return ops
 }
 
@@ -588,8 +682,8 @@ func sidecarContainerOps(m webhook.MutatorAPI, pod *corev1.Pod, observe bool, ex
 	}
 	env = append(env, extraEnv...)
 	// Copy the workload container's secret/configMap-sourced env onto the sidecar
-	// so it can talk to the same backend (domain-agnostic: we propagate whatever
-	// the workload pulls from a secret/configMap; existing FLUENCE_/FLUXION_ names
+	// so it can talk to the same backend (domain-agnostic. We propagate whatever
+	// the workload pulls from a secret/configMap. Existing FLUENCE_/FLUXION_ names
 	// are not overwritten).
 	if len(pod.Spec.Containers) > 0 {
 		have := map[string]bool{}
@@ -605,9 +699,15 @@ func sidecarContainerOps(m webhook.MutatorAPI, pod *corev1.Pod, observe bool, ex
 			}
 		}
 	}
+	var mounts []corev1.VolumeMount
+	for _, v := range pod.Spec.Volumes {
+		if v.Name == HandoffVolumeName {
+			mounts = append(mounts, corev1.VolumeMount{Name: HandoffVolumeName, MountPath: HandoffMountPath, ReadOnly: true})
+		}
+	}
 	sidecar := corev1.Container{
 		Name: SidecarContainerName, Image: sidecarImage(), ImagePullPolicy: corev1.PullAlways,
-		Env: env,
+		Env: env, VolumeMounts: mounts,
 		Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
 			corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("256Mi"),
 		}},

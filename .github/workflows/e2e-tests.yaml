@@ -10,7 +10,7 @@ concurrency:
 
 jobs:
   # Fan out the suites as parallel jobs, each a call into the reusable workflow.
-  # The shared setup (build, kind, deploy) lives once in e2e-suite.yaml; the
+  # The shared setup (build, kind, deploy) lives once in e2e-suite.yaml. The
   # matrix runs gang and quantum concurrently.
   e2e:
     strategy:

@@ -51,7 +51,7 @@ func metaByName(nodes []map[string]any, name string) map[string]any {
 	return nil
 }
 
-// A configured virtual resource is modeled as a node vertex carrying
+// A configured virtual resource is modeled as a node vertex with
 // virtual=true, the class of itself AND its descendants, its (inherited)
 // attributes as namespaced RFC 31 properties, and a real rank. EVERY level
 // (qdevice, qpu, qubit) is a node so each is independently selectable by a
@@ -92,7 +92,7 @@ resources:
 	if _, ok := props["virtual=true"]; !ok {
 		t.Errorf("missing virtual=true property; got %#v", props)
 	}
-	// The qdevice node carries its own class AND its descendants' classes, so a
+	// The qdevice node has its own class AND its descendants' classes, so a
 	// class=qpu / class=qubit constraint is not pruned at this node on the way
 	// down to a nested target.
 	for _, want := range []string{"class=qdevice", "class=qpu", "class=qubit"} {
@@ -123,9 +123,9 @@ resources:
 		}
 	}
 	// The qpu must NOT advertise class=qdevice (that is an ancestor, not in its
-	// subtree) — otherwise class=qdevice would wrongly select the qpu too.
+	// subtree), otherwise class=qdevice would wrongly select the qpu too.
 	if _, ok := qprops["class=qdevice"]; ok {
-		t.Errorf("qpu node should not carry class=qdevice (ancestor class); got %#v", qprops)
+		t.Errorf("qpu node should not have class=qdevice (ancestor class); got %#v", qprops)
 	}
 }
 
@@ -185,7 +185,7 @@ resources:
 }
 
 // AttributeKeys returns the sorted union of attribute keys across all resources
-// and children, deduplicated — this is the env-injection contract.
+// and children, deduplicated, this is the env-injection contract.
 func TestAttributeKeysUnion(t *testing.T) {
 	cfg := `
 resources:
@@ -209,7 +209,7 @@ resources:
 		t.Fatal(err)
 	}
 	keys := AttributeKeys(c.Resources)
-	// union: connectivity, qubits, region, vendor (region deduped)
+	// union connectivity, qubits, region, vendor (region deduped)
 	want := []string{"connectivity", "qubits", "region", "vendor"}
 	if len(keys) != len(want) {
 		t.Fatalf("keys = %v, want %v", keys, want)
@@ -223,7 +223,7 @@ resources:
 
 // The device name must be stamped as a match-only property
 // (fluxion.flux-framework.org/backend=<name>) on the device AND inherited by its
-// descendant nodes, so a require-backend constraint can pin it — but it must NOT
+// descendant nodes, so a require-backend constraint can pin it, but it must NOT
 // become a user attribute (that would double-inject FLUXION_BACKEND into pods).
 func TestBackendNameStampedAsMatchOnlyProperty(t *testing.T) {
 	cfg := `

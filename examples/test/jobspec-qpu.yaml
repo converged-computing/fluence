@@ -1,4 +1,4 @@
-# One slot holding one exclusive qpu — the clean case for the probe: the graph
+# One slot holding one exclusive qpu, the clean case for the probe. The graph
 # has exactly one exclusive qpu, so after replay the re-match MUST be refused.
 version: 9999
 resources:

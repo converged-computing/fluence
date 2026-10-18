@@ -3,15 +3,15 @@ package deviceplugin
 // Package deviceplugin implements a Kubernetes device plugin that advertises
 // "quantum reachability" as a counted extended resource on every node.
 //
-// A quantum backend is not hardware attached to a node — it is a remote API any
+// A quantum backend is not hardware attached to a node, it is a remote API any
 // node can call (subject to the user's access). So the plugin advertises a large
-// per-node ceiling of a single counted resource (quantum.flux-framework.org/qpu):
+// per-node ceiling of a single counted resource (quantum.flux-framework.org/qpu).
 // this is what lets a pod write `resources.requests: {quantum.flux-framework.org/qpu: "1"}`
 // and have the in-tree NodeResourcesFit plugin be satisfied (no wrapper needed).
 //
 // The count is a local admission gate only. Whether a backend is actually
 // available and which one is matched is decided by Fluxion in the scheduler, and
-// the real per-user limit lives on the IBM API — neither of which is node-local,
+// the real per-user limit lives on the IBM API, neither of which is node-local,
 // which is exactly why the ceiling is large rather than a true quota.
 
 import (
@@ -125,7 +125,7 @@ func (p *Plugin) register(ctx context.Context) error {
 	return err
 }
 
-// GetDevicePluginOptions: no pre-start hook needed.
+// GetDevicePluginOptions. No pre-start hook needed.
 func (p *Plugin) GetDevicePluginOptions(context.Context, *pluginapi.Empty) (*pluginapi.DevicePluginOptions, error) {
 	return &pluginapi.DevicePluginOptions{PreStartRequired: false}, nil
 }
@@ -135,7 +135,7 @@ func (p *Plugin) ListAndWatch(_ *pluginapi.Empty, stream pluginapi.DevicePlugin_
 	if err := stream.Send(&pluginapi.ListAndWatchResponse{Devices: p.devices}); err != nil {
 		return err
 	}
-	// Static list: keep the stream open, re-sending periodically until shutdown.
+	// Static list. Keep the stream open, re-sending periodically until shutdown.
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 	for {
@@ -150,7 +150,7 @@ func (p *Plugin) ListAndWatch(_ *pluginapi.Empty, stream pluginapi.DevicePlugin_
 	}
 }
 
-// Allocate is a no-op: a quantum "device" is just a reachability token, so no
+// Allocate is a no-op. A quantum "device" is just a reachability token, so no
 // env vars, mounts, or device nodes are injected. The workload gets its backend
 // from the scheduler and its credentials from a Secret.
 func (p *Plugin) Allocate(_ context.Context, req *pluginapi.AllocateRequest) (*pluginapi.AllocateResponse, error) {
@@ -161,12 +161,12 @@ func (p *Plugin) Allocate(_ context.Context, req *pluginapi.AllocateRequest) (*p
 	return resp, nil
 }
 
-// GetPreferredAllocation: no preference.
+// GetPreferredAllocation. No preference.
 func (p *Plugin) GetPreferredAllocation(context.Context, *pluginapi.PreferredAllocationRequest) (*pluginapi.PreferredAllocationResponse, error) {
 	return &pluginapi.PreferredAllocationResponse{}, nil
 }
 
-// PreStartContainer: nothing to do.
+// PreStartContainer. Nothing to do.
 func (p *Plugin) PreStartContainer(context.Context, *pluginapi.PreStartContainerRequest) (*pluginapi.PreStartContainerResponse, error) {
 	return &pluginapi.PreStartContainerResponse{}, nil
 }

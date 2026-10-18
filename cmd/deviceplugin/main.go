@@ -6,12 +6,12 @@
 // The set of types is derived from the SAME resources config the scheduler uses
 // to build its graph (FLUENCE_RESOURCES), so the advertised resources and the
 // graph's resource types come from one source and cannot drift. If
-// FLUENCE_RESOURCES is unset or the file is absent, nothing is advertised — the
+// FLUENCE_RESOURCES is unset or the file is absent, nothing is advertised, the
 // node stays classical-only.
 //
 // A quantum backend is a remote API reachable from any node, not a node-local
 // device, so each type is advertised at a large per-node ceiling. That count is
-// only a local admission gate (so NodeResourcesFit is satisfied); the real gates
+// only a local admission gate (so NodeResourcesFit is satisfied). The real gates
 // are Fluxion (which backend, is one available) and the user's API limit.
 //
 //	FLUENCE_RESOURCES          path to the shared resources config

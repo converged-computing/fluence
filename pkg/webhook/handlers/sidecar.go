@@ -10,13 +10,13 @@ import (
 )
 
 // Sidecar is the capability a handler uses to attach a coordination sidecar to a
-// pod. It is NOT part of the webhook core's MutatorAPI: only handlers that need
+// pod. It is NOT part of the webhook core's MutatorAPI. Only handlers that need
 // a sidecar (today, quantum) depend on it, and a handler may supply its own
 // implementation to customize delivery. The default implementation
 // (coreSidecar) delegates to the webhook core's interceptor/sidecar ops, which
 // remain the staging mechanism shared by any sidecar-using handler.
 //
-// This is the seam your design calls for: "a general sidecar interface that can
+// This is the seam your design calls for. "a general sidecar interface that can
 // be used across handlers and customized by the quantum [handler]". A future
 // custom-resource handler can implement Sidecar differently (different image,
 // env, gating) without touching the core or other handlers.
@@ -28,16 +28,16 @@ type Sidecar interface {
 	// containers (init container + shared volume on PYTHONPATH).
 	InterceptorOps(pod *corev1.Pod) []spec.Op
 	// ContainerOps adds the sidecar container. observe=true selects observe-only
-	// telemetry mode (no ungating). extraEnv carries handler-computed,
+	// telemetry mode (no ungating). extraEnv has handler-computed,
 	// domain-specific env (e.g. the quantum handler's FLUENCE_EXPECTED_WORKERS =
 	// N-1 and FLUENCE_WORKER_GROUP_BASE) so the core never has to know about
-	// leader/worker concepts — the handler that owns the split owns those values.
+	// leader/worker concepts, the handler that owns the split owns those values.
 	ContainerOps(pod *corev1.Pod, observe bool, extraEnv []corev1.EnvVar) []spec.Op
 }
 
 // coreSidecar is the default Sidecar. It delegates to the quantum-owned sidecar
 // implementation (see sidecar_impl.go), which uses only the generic MutatorAPI
-// (Client, InjectedEnv). The webhook core no longer carries any sidecar logic; a
+// (Client, InjectedEnv). The webhook core no longer has any sidecar logic. A
 // custom handler could supply its own Sidecar with a different container/image.
 type coreSidecar struct{ m webhook.MutatorAPI }
 

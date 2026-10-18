@@ -10,7 +10,7 @@ log()  { echo "=== $*"; }
 # Wait until at least N pods matching a label selector EXIST, then wait for them
 # to be Ready. `kubectl wait` errors immediately ("no matching resources found")
 # if the pods are not yet registered, so a Deployment that has only just been
-# applied races it — wait for existence first.
+# applied races it, wait for existence first.
 wait_pods_ready() {
   local selector="$1" want="${2:-1}" timeout="${3:-180}"
   local deadline=$(( $(date +%s) + timeout ))

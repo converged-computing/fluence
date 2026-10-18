@@ -1,25 +1,23 @@
 """
-fluence.sidecar — provider-agnostic quantum coordination sidecar main loop.
+The coordination sidecar. The webhook adds it to the scout pod of a shared
+quantum gang. It resolves the vendor provider from the injected FLUXION_*
+environment, finds the task the scout submitted, polls until the task is about
+to run, ungates the workers with the job id and the session, then waits for
+the workers to finish so the scout keeps its session until they are done. In
+observe mode it only logs the queue position.
 
-Injected by the Fluence webhook into the one-off SUBMITTER pod (gang + submitter
-model — there is no leader/worker split). Resolves its vendor at runtime from the
-backend annotation, discovers the task the user application submitted (tagged by
-the interceptor), polls readiness, and either ungates the gated GANG group (gang
-mode) or just logs the queue-position series (observe-only mode).
-
-Entry point: `fluence-sidecar` console script (see pyproject.toml) -> main().
-
-Environment (injected by the Fluence webhook):
-  FLUENCE_POD_UID                 UID of this pod (matches interceptor tag)
-  FLUENCE_NAMESPACE               Kubernetes namespace
-  FLUENCE_GANG_GROUP              group label of the gated gang to ungate
-  FLUENCE_GATED_PODS              optional explicit comma-separated gang pod names
-  FLUENCE_OBSERVE                 "true" for observe-only telemetry mode
-  FLUXION_BACKEND / FLUXION_VENDOR  scheduler-chosen backend / vendor
-  FLUENCE_TASK_DISCOVERY_TIMEOUT  seconds to wait for discovery (default 300)
+Environment, all set by the webhook
+  FLUENCE_POD_UID                 uid of this pod
+  FLUENCE_NAMESPACE               namespace
+  FLUENCE_GANG_GROUP              group label of the workers to ungate
+  FLUENCE_GATED_PODS              optional explicit list of worker pod names
+  FLUENCE_OBSERVE                 true for observe mode
+  FLUXION_BACKEND                 the backend the scheduler chose
+  FLUENCE_TASK_DISCOVERY_TIMEOUT  seconds to wait for the task (default 300)
   FLUENCE_POLL_INTERVAL           seconds between polls (default 30)
-  FLUENCE_UNGATE_POSITION         ungate at this queue position or closer
-                                  (default 1, next in line)
+  FLUENCE_UNGATE_POSITION         ungate at this queue position or closer (default 1)
+  FLUENCE_WORKER_TIMEOUT          seconds to wait for the workers after ungating,
+                                  0 waits without limit (default 0)
 """
 
 from __future__ import annotations
@@ -30,8 +28,14 @@ import time
 
 from fluence.providers import resolve_from_env
 from fluence.providers.base import log, ungate_position
-from fluence.ungate import ungate_pods, gated_pods_from_env, namespace_from_env, wait_for_gated_pods
-
+from fluence import handoff
+from fluence.ungate import (
+    ungate_pods,
+    gated_pods_from_env,
+    namespace_from_env,
+    wait_for_gated_pods,
+    wait_for_pods_done,
+)
 
 
 def _poll(provider, task, poll_interval, ungate, position=1):
@@ -56,14 +60,24 @@ def _poll(provider, task, poll_interval, ungate, position=1):
         time.sleep(poll_interval)
 
 
+def _hold_for_workers(namespace, gang_group, pod_name):
+    """Keep this pod, and with it the scout's session and its allocation,
+    until the worker group has finished. Then write the marker the scout's
+    release() waits for."""
+    timeout = int(os.environ.get("FLUENCE_WORKER_TIMEOUT", 0))
+    log("holding until the worker group finishes")
+    wait_for_pods_done(namespace, gang_group, exclude=pod_name, timeout=timeout)
+    if handoff.mark_workers_done():
+        log("worker group finished, the scout may release its session")
+    else:
+        log("WARNING: could not write the workers done marker")
+
+
 def main():
     pod_uid = os.environ.get("FLUENCE_POD_UID", "")
     pod_name = os.environ.get("FLUENCE_POD_NAME", "")
     group = os.environ.get("FLUENCE_GROUP", "")
-    # Gang + submitter model: this sidecar runs in the one-off SUBMITTER pod
-    # (its own group-of-one, <gang>-submitter). The gated workload it must ungate
-    # is the GANG group, named by FLUENCE_GANG_GROUP (set by the webhook). There
-    # is no leader/worker split and no -workers subgroup.
+    # the workers to ungate are the gang named by FLUENCE_GANG_GROUP
     gang_group = os.environ.get("FLUENCE_GANG_GROUP", "")
     backend = os.environ.get("FLUXION_BACKEND", "")
     observe = os.environ.get("FLUENCE_OBSERVE", "").lower() == "true"
@@ -74,9 +88,11 @@ def main():
 
     namespace = namespace_from_env()
 
-    log("starting fluence quantum submitter sidecar")
-    log(f"  pod_uid={pod_uid} namespace={namespace} group={group} "
-        f"gang_group={gang_group} backend={backend} observe={observe}")
+    log("starting the fluence sidecar")
+    log(
+        f"  pod_uid={pod_uid} namespace={namespace} group={group} "
+        f"gang_group={gang_group} backend={backend} observe={observe}"
+    )
 
     provider = resolve_from_env()
     if provider is None:
@@ -88,43 +104,57 @@ def main():
     if task is None:
         log("ERROR: could not discover quantum task")
         if not observe:
-            # Fail open: ungate the gang so it is not stranded forever.
-            ungate_pods(wait_for_gated_pods(namespace, gang_group, exclude=pod_name,
-                                            timeout=ungate_timeout),
-                        "", namespace)
+            # fail open so the workers are not stranded
+            ungate_pods(
+                wait_for_gated_pods(
+                    namespace, gang_group, exclude=pod_name, timeout=ungate_timeout
+                ),
+                "",
+                namespace,
+            )
+            _hold_for_workers(namespace, gang_group, pod_name)
         sys.exit(1)
 
     job_id = provider.job_id(task)
     log(f"discovered task, job_id={job_id}")
 
-    ready = _poll(provider, task, poll_interval, ungate=not observe,
-                  position=ungate_at)
+    ready = _poll(provider, task, poll_interval, ungate=not observe, position=ungate_at)
 
     if observe:
         log("observe-only run complete")
         sys.exit(0 if ready else 1)
 
     if not ready:
-        # fail open like a discovery failure does, so the gang is not stranded.
-        # The pods find no result and exit, and we exit non zero so it shows
-        log("ERROR: ungating anyway so the gang is not stranded, but the task "
-            "produced no result")
-        ungate_pods(gated_pods_from_env() or wait_for_gated_pods(
-            namespace, gang_group, exclude=pod_name, timeout=ungate_timeout),
-            job_id, namespace)
+        # fail open so the workers are not stranded. They find no result and exit
+        log(
+            "ERROR: ungating anyway so the gang is not stranded, but the task "
+            "produced no result"
+        )
+        ungate_pods(
+            gated_pods_from_env()
+            or wait_for_gated_pods(
+                namespace, gang_group, exclude=pod_name, timeout=ungate_timeout
+            ),
+            job_id,
+            namespace,
+        )
+        _hold_for_workers(namespace, gang_group, pod_name)
         sys.exit(1)
 
-    # Ungate the gang: discover the gated pods in the gang group and remove their
-    # gate, stamping the job-id so each can fetch results by id. The gang pods are
-    # created up front (Job/Deployment), so they are present by submit time.
+    # ungate the workers, stamping the job id and the session first
     gated_pods = gated_pods_from_env() or wait_for_gated_pods(
-        namespace, gang_group, exclude=pod_name, timeout=ungate_timeout)
+        namespace, gang_group, exclude=pod_name, timeout=ungate_timeout
+    )
     log(f"ungating {len(gated_pods)} gang pod(s): {gated_pods}")
-    n_ok = ungate_pods(gated_pods, job_id, namespace)
+    session_id = provider.session_id(task)
+    n_ok = ungate_pods(gated_pods, job_id, namespace, session_id=session_id)
     if n_ok == len(gated_pods):
-        log(f"done — {n_ok} gang pod(s) ungated")
+        log(f"done, {n_ok} gang pod(s) ungated")
     else:
-        log(f"WARNING: ungated only {n_ok}/{len(gated_pods)} gang pod(s) — see errors above")
+        log(
+            f"WARNING: ungated only {n_ok}/{len(gated_pods)} gang pod(s), see errors above"
+        )
+    _hold_for_workers(namespace, gang_group, pod_name)
 
 
 if __name__ == "__main__":

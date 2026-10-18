@@ -1,6 +1,6 @@
 // Package spec holds the JSON patch type and pure pod-inspection / patch-op
 // builders shared by the webhook core and its handlers. Everything here is a
-// pure function of its inputs — no Kubernetes client, no Mutator — so both the
+// pure function of its inputs, no Kubernetes client, no Mutator, so both the
 // core package and the handlers subpackage can import it without an import
 // cycle.
 package spec
@@ -26,7 +26,7 @@ type Op struct {
 	EmitNull bool `json:"-"`
 }
 
-// MarshalJSON honors EmitNull; otherwise it omits value when nil and includes it
+// MarshalJSON honors EmitNull. Otherwise it omits value when nil and includes it
 // when present, matching the previous struct-tag behavior.
 func (o Op) MarshalJSON() ([]byte, error) {
 	m := map[string]any{"op": o.Op, "path": o.Path}

@@ -56,7 +56,7 @@ RUN git clone -b lib-updates https://github.com/milroy/flux-sched /opt/flux-sche
     ./configure --prefix=/usr && \
     mkdir build && \
     cd build && \
-    cmake ../ && \ 
+    cmake ../ && \
     cd ../ && \
     make && make install
 

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 # Quantum suite setup (run by the e2e-suite workflow before the NN-*.sh tests).
 #
-# Installs the qpu add-on so nodes advertise fluxion.flux-framework.org/qpu —
+# Installs the qpu add-on so nodes advertise fluxion.flux-framework.org/qpu
 # without it every quantum pod stays Pending (fluence matches in its own graph,
 # but the default NodeResourcesFit plugin rejects each node because the extended
 # resource is not in allocatable, so the match is rolled back). The base deploy
-# (deploy/fluence-test.yaml) does NOT include this; it is quantum-only.
+# (deploy/fluence-test.yaml) does NOT include this. It is quantum-only.
 #
-# Also points the webhook-injected sidecar/stage image at the CI-loaded image:
+# Also points the webhook-injected sidecar/stage image at the CI-loaded image.
 # the default sidecar image (ghcr.io/.../fluence-sidecar:latest) is not loaded in
-# kind, so the producer's containers could not pull. The fluence-stage init is
+# kind, so the scout's containers could not pull. The fluence-stage init is
 # fail-soft (no python in this image -> it logs and exits 0), which is fine for
-# the structural assertions; the producer still schedules and runs.
+# the structural assertions. The scout still schedules and runs.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; . "${HERE%/test/e2e/*}/test/e2e/lib.sh"
 IMAGE="${IMAGE:-vanessa/fluence:test}"

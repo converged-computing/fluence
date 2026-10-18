@@ -1,9 +1,9 @@
 // Package webhook is fluence's mutating admission webhook.
 //
-// The core here is domain-agnostic plumbing: it owns the Mutator, the handler
+// The core here is domain-agnostic plumbing. It owns the Mutator, the handler
 // dispatcher, per-namespace PodGroup provisioning, the HTTP entrypoint, and
 // self-managed TLS. It knows nothing about quantum, Braket, gate names, sidecars,
-// RBAC, or interceptor staging — that policy and machinery lives entirely in the
+// RBAC, or interceptor staging, that policy and machinery lives entirely in the
 // handlers (pkg/webhook/handlers), which self-register via Register() and perform
 // their own create/edit side-effects through the generic MutatorAPI.
 //
@@ -41,18 +41,18 @@ import (
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const (
-	// SchedulerName gates the whole webhook: only pods scheduled by Fluence are
+	// SchedulerName gates the whole webhook. Only pods scheduled by Fluence are
 	// considered. This is the one cross-cutting constant the core owns.
 	SchedulerName = "fluence"
 
 	// GroupLabel marks a pod's gang membership. The core treats its value as an
-	// opaque group identity for PodGroup management; it ascribes no quantum
+	// opaque group identity for PodGroup management. It ascribes no quantum
 	// meaning to it (a handler decides what a group means).
 	GroupLabel = "fluence.flux-framework.org/group"
 
 	// GroupSizeAnnotation is the gang member count N, set by the workload on each
 	// pod. It is the authoritative override for the PodGroup gang minCount when
-	// the size cannot (or should not) be derived from the owning controller — and
+	// the size cannot (or should not) be derived from the owning controller, and
 	// for loose grouped pods where counting at admission is unreliable. The core
 	// treats it as an opaque integer string.
 	GroupSizeAnnotation = "fluence.flux-framework.org/group-size"
@@ -63,6 +63,11 @@ const (
 type Mutator struct {
 	AttributeKeys []string
 	Clientset     kubernetes.Interface
+
+	// AdmissionControl turns on admission control, see admission.go.
+	// ReserveCores is held back from its budget.
+	AdmissionControl bool
+	ReserveCores     int
 }
 
 // compile-time check that *Mutator satisfies the handler capability interface.
@@ -71,9 +76,9 @@ var _ MutatorAPI = (*Mutator)(nil)
 // GroupName returns the value of GroupLabel on the pod, or "".
 func GroupName(pod *corev1.Pod) string { return spec.Label(pod, GroupLabel) }
 
-// ── MutatorAPI: capabilities exposed to handlers ────────────────────────────────
+// ── MutatorAPI. Capabilities exposed to handlers ────────────────────────────────
 
-// Client implements MutatorAPI: returns the Kubernetes client (nil in tests).
+// Client implements MutatorAPI. Returns the Kubernetes client (nil in tests).
 func (m *Mutator) Client() kubernetes.Interface { return m.Clientset }
 
 // InjectedEnv is the FLUXION_* env contract sourced from scheduler annotations.
@@ -114,10 +119,10 @@ func (m *Mutator) EnsurePodGroup(ctx context.Context, namespace, group, leaderPo
 		ObjectMeta: metav1.ObjectMeta{
 			Name: group, Namespace: namespace,
 			Labels: map[string]string{"app": "fluence", GroupLabel: group},
-			// Ownership claim: the reconciler in pkg/fluence deletes a completed
+			// Ownership claim. The reconciler in pkg/fluence deletes a completed
 			// gang's PodGroup (to free its Fluxion allocation) ONLY if this
 			// annotation is present. A user-created PodGroup (e.g. a native gang
-			// not created by this webhook) never carries it and is never touched.
+			// not created by this webhook) never has it and is never touched.
 			Annotations: map[string]string{placement.CreatedByAnnotation: placement.CreatedByValue},
 		},
 		Spec: schedulingv1alpha2.PodGroupSpec{
@@ -139,17 +144,35 @@ func (m *Mutator) EnsurePodGroup(ctx context.Context, namespace, group, leaderPo
 // patch operations from those that apply. Pods not scheduled by Fluence are left
 // untouched.
 func (m *Mutator) Mutate(ctx context.Context, pod *corev1.Pod) []spec.Op {
-	if pod.Spec.SchedulerName != SchedulerName {
+	ops, err := m.MutateOrDeny(ctx, pod)
+	if err != nil {
+		log.Printf("[fluence-webhook] %s/%s refused: %v", pod.Namespace, pod.Name, err)
 		return nil
+	}
+	return ops
+}
+
+// MutateOrDeny runs the handlers that apply, in order. A handler that is also
+// an Admitter may refuse the pod first. A refusal returns the error and no
+// patches, and the HTTP handler turns it into a denied review.
+func (m *Mutator) MutateOrDeny(ctx context.Context, pod *corev1.Pod) ([]spec.Op, error) {
+	if pod.Spec.SchedulerName != SchedulerName {
+		return nil, nil
 	}
 	var ops []spec.Op
 	for _, h := range registered() {
-		if h.Applies(ctx, m, pod) {
-			log.Printf("[fluence-webhook] handler %q applies to %s/%s", h.Name(), pod.Namespace, pod.Name)
-			ops = append(ops, h.Mutate(ctx, m, pod)...)
+		if !h.Applies(ctx, m, pod) {
+			continue
 		}
+		log.Printf("[fluence-webhook] handler %q applies to %s/%s", h.Name(), pod.Namespace, pod.Name)
+		if a, ok := h.(Admitter); ok {
+			if err := a.Admit(ctx, m, pod); err != nil {
+				return nil, err
+			}
+		}
+		ops = append(ops, h.Mutate(ctx, m, pod)...)
 	}
-	return ops
+	return ops, nil
 }
 
 // ── HTTP handler ───────────────────────────────────────────────────────────────
@@ -168,7 +191,19 @@ func (m *Mutator) Handler(w http.ResponseWriter, r *http.Request) {
 	resp := &admissionv1.AdmissionResponse{UID: review.Request.UID, Allowed: true}
 	var pod corev1.Pod
 	if err := json.Unmarshal(review.Request.Object.Raw, &pod); err == nil {
-		if ops := m.Mutate(r.Context(), &pod); len(ops) > 0 {
+		ops, derr := m.MutateOrDeny(r.Context(), &pod)
+		switch {
+		case derr != nil:
+			// an explicit refusal, which failurePolicy Ignore does not override
+			resp.Allowed = false
+			resp.Result = &metav1.Status{
+				Status:  metav1.StatusFailure,
+				Reason:  metav1.StatusReasonForbidden,
+				Code:    http.StatusForbidden,
+				Message: derr.Error(),
+			}
+			log.Printf("[fluence-webhook] denied pod %s/%s: %v", pod.Namespace, pod.Name, derr)
+		case len(ops) > 0:
 			if patch, err := json.Marshal(ops); err == nil {
 				pt := admissionv1.PatchTypeJSONPatch
 				resp.Patch = patch

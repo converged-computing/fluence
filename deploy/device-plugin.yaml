@@ -1,5 +1,5 @@
 ---
-# Device plugin: advertises the exotic Fluxion resource types (derived from the
+# Device plugin. Advertises the exotic Fluxion resource types (derived from the
 # resources config above) on every node, so pods can request them via resources
 # and NodeResourcesFit is satisfied.
 apiVersion: apps/v1

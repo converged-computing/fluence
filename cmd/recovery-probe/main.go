@@ -1,9 +1,9 @@
 // Command recovery-probe verifies the restart-recovery primitive against a real
 // flux-sched. It match-allocates a jobspec in one graph (capturing the rv1 R +
-// jobid), then builds a SECOND, fresh graph from the same cluster file — exactly
-// what a scheduler restart does, a graph with no allocation history — and
+// jobid), then builds a SECOND, fresh graph from the same cluster file, exactly
+// what a scheduler restart does, a graph with no allocation history, and
 // replays R verbatim with UpdateAllocate under the same jobid. Finally it
-// re-matches against the fresh graph; for an exclusive, singular resource a
+// re-matches against the fresh graph. For an exclusive, singular resource a
 // refusal proves the replay re-held it.
 //
 // Run in the devcontainer (links flux-sched via cgo). Throwaway diagnostic.
@@ -47,7 +47,7 @@ func main() {
 
 	// --- Graph instance #2: the "post-restart" scheduler. Fresh context, fresh
 	// graph built from the same cluster file, NO allocation history. We never
-	// cancel jobid in instance #1; instance #2 simply never knew about it. ---
+	// cancel jobid in instance #1. Instance #2 simply never knew about it. ---
 	fmt.Println("\n=== 2. instance #2: fresh graph (simulate restart) ===")
 	post := newGraph(*graphFile)
 
@@ -67,10 +67,10 @@ func main() {
 	fmt.Println("\n=== 4. instance #2: re-MatchAllocate (refusal = replay held it) ===")
 	req2, err := post.MatchAllocate(*specFile)
 	if err != nil {
-		fmt.Println("PASS: second match refused — the replayed allocation is holding the resource.")
+		fmt.Println("PASS: second match refused, the replayed allocation is holding the resource.")
 		return
 	}
-	fmt.Printf("second match SUCCEEDED (jobid=%d) — interpret with your graph in mind:\n", req2.Number)
+	fmt.Printf("second match SUCCEEDED (jobid=%d), interpret with your graph in mind:\n", req2.Number)
 	fmt.Println("  - spare capacity for this spec exists -> expected, not a failure;")
 	fmt.Println("  - resource is exclusive & singular -> replay did NOT consume it, investigate.")
 }

@@ -11,7 +11,7 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # fluence-base carries flux-sched 0.52.0 (installed to /usr) + Go, so the
+    # fluence-base has flux-sched 0.52.0 (installed to /usr) + Go, so the
     # cgo matcher (pkg/graph) links and `make test` can build every package.
     container:
       image: ghcr.io/converged-computing/fluence-base:latest

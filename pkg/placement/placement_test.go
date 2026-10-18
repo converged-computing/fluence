@@ -57,7 +57,7 @@ func hasProp(props []string, want string) bool {
 	return false
 }
 
-// A classical group (no virtual resources) yields exactly one jobspec: the
+// A classical group (no virtual resources) yields exactly one jobspec. The
 // compute slot, constrained to virtual=false.
 func TestClassicalSingleMatch(t *testing.T) {
 	pods := []corev1.Pod{
@@ -92,7 +92,7 @@ func TestClassicalSingleMatch(t *testing.T) {
 // compute slot.
 // A quantum gang lists pods in arbitrary (informer) order, and only the leader
 // requests the qpu. The device match must be emitted even when the device
-// requester is not pods[0]; otherwise the group schedules with no backend.
+// requester is not pods[0]. Otherwise the group schedules with no backend.
 func TestGroupDeviceMatchWhenLeaderNotFirst(t *testing.T) {
 	worker := podWith("w0", corev1.ResourceList{corev1.ResourceCPU: qty(1)})
 	leader := podWith("leader", corev1.ResourceList{
@@ -128,7 +128,7 @@ func qpuPodWithRequires(name string, requires map[string]string) corev1.Pod {
 	return p
 }
 
-// Zero require- annotations: the device match must carry ONLY the base
+// Zero require- annotations. The device match must have ONLY the base
 // constraints, nothing extra (over-constraining would break unconstrained runs).
 func TestNoRequireAnnotationsAddsNoConstraints(t *testing.T) {
 	p := qpuPodWithRequires("q", nil)
@@ -257,7 +257,7 @@ func TestDeviceProducesSecondMatch(t *testing.T) {
 		t.Errorf("device constraint must include virtual=true; got %v", props)
 	}
 	// The device is selected by class=<requested-type>: every virtual resource is
-	// a node carrying its class, so the constraint picks the right one. The slot
+	// a node with its class, so the constraint picks the right one. The slot
 	// requests a node (every virtual resource is a node), count from the request.
 	if !hasProp(props, "class=qpu") {
 		t.Errorf("device constraint must include class=qpu; got %v", props)
@@ -313,7 +313,7 @@ func TestHoldDurationZero(t *testing.T) {
 	}
 }
 
-// A compute allocation: node vertices carrying virtual=false are bind targets.
+// A compute allocation: node vertices with virtual=false are bind targets.
 func TestPlacementComputeNodes(t *testing.T) {
 	alloc := `{"graph":{"nodes":[
 	  {"metadata":{"type":"node","name":"node-a","properties":{"virtual=false":""}}},
@@ -426,7 +426,7 @@ func TestExcludeNodesAddsNegatedHostlist(t *testing.T) {
 }
 
 // computeConstraints digs out attributes.system.constraints from the compute
-// jobspec (the first spec; device specs do not carry node exclusions).
+// jobspec (the first spec. Device specs do not have node exclusions).
 func computeConstraints(t *testing.T, spec *jobspec.Jobspec) map[string]interface{} {
 	t.Helper()
 	sys, ok := spec.Attributes["system"].(map[string]interface{})

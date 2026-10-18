@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -59,7 +60,7 @@ func main() {
 	}
 	active, unknown := webhook.SetActiveHandlers(requested)
 	for _, n := range unknown {
-		log.Printf("[fluence-webhook] WARNING: unknown handler %q — ignoring", n)
+		log.Printf("[fluence-webhook] WARNING: unknown handler %q, ignoring", n)
 	}
 	log.Printf("[fluence-webhook] active handlers (in dispatch order): %v", active)
 
@@ -96,7 +97,7 @@ func main() {
 	// The env contract is the union of attribute keys across the configured
 	// backends (plus FLUXION_BACKEND), so the set of injected env vars tracks the
 	// config automatically. Loaded from the same FLUENCE_RESOURCES the scheduler
-	// and device plugin use; absent/unset means just FLUXION_BACKEND.
+	// and device plugin use. absent/unset means just FLUXION_BACKEND.
 	var attrKeys []string
 	if path := os.Getenv("FLUENCE_RESOURCES"); path != "" {
 		if data, rerr := os.ReadFile(path); rerr == nil {
@@ -109,10 +110,21 @@ func main() {
 			log.Printf("no resources config at %s (%v); injecting FLUXION_BACKEND only", path, rerr)
 		}
 	}
-	mutator := &webhook.Mutator{
-		AttributeKeys: attrKeys,
-		Clientset:     client,
+	// admission control is always on unless the deployment sets
+	// FLUENCE_ADMISSION=off. It is read once here, nothing on a pod changes it.
+	// FLUENCE_RESERVE_CORES is held back from its budget
+	admission := env("FLUENCE_ADMISSION", "on") != "off"
+	reserve, err := strconv.Atoi(env("FLUENCE_RESERVE_CORES", "0"))
+	if err != nil || reserve < 0 {
+		log.Fatalf("FLUENCE_RESERVE_CORES must be a non-negative integer, got %q", os.Getenv("FLUENCE_RESERVE_CORES"))
 	}
+	mutator := &webhook.Mutator{
+		AttributeKeys:    attrKeys,
+		Clientset:        client,
+		AdmissionControl: admission,
+		ReserveCores:     reserve,
+	}
+	log.Printf("[fluence-webhook] admission control on=%v reserve_cores=%d", admission, reserve)
 	log.Printf("[fluence-webhook] env contract injected into fluxion pods: %v", mutator.EnvVarNames())
 
 	mux := http.NewServeMux()

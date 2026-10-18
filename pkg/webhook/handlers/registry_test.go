@@ -1,10 +1,4 @@
-/*
-Copyright 2024 Lawrence Livermore National Security, LLC
- (c.f. AUTHORS, NOTICE.LLNS, COPYING)
-SPDX-License-Identifier: Apache-2.0
-*/
-
-// Registry behavior: dispatch order comes from the active handler list (not a
+// Registry behavior. Dispatch order comes from the active handler list (not a
 // per-handler Order), and the list both selects and orders handlers.
 package handlers
 
@@ -42,7 +36,7 @@ func TestDefaultOrderGangLast(t *testing.T) {
 	}
 }
 
-// The active list IS the order: passing a custom order reorders dispatch, and
+// The active list IS the order. Passing a custom order reorders dispatch, and
 // unknown names are reported, not silently kept.
 func TestActiveListSetsOrderAndReportsUnknown(t *testing.T) {
 	defer webhook.SetActiveHandlers(nil)
@@ -55,7 +49,7 @@ func TestActiveListSetsOrderAndReportsUnknown(t *testing.T) {
 	}
 }
 
-// Dropping a handler from the list disables it: a quantum pod with quantum
+// Dropping a handler from the list disables it. A quantum pod with quantum
 // omitted gets no interceptor ops (only fluxion/gang act).
 func TestOmittedHandlerDoesNotDispatch(t *testing.T) {
 	defer webhook.SetActiveHandlers(nil)

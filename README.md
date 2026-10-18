@@ -5,24 +5,14 @@
 
 🚧 **UNDER DEVELOPMENT** 🚧 Thank you for your patience! -@vsoch
 
-A Kubernetes scheduler plugin that places **pod groups** (and individual pods) by
-matching them against a [Fluxion](https://github.com/flux-framework/flux-sched)
-resource graph built from the live cluster. Beyond ordinary compute, it can model
-**arbitrary virtual resources** — quantum backends today, anything with a count
-and some attributes tomorrow — as first-class graph vertices that can be filtered
-on and whose attributes are injected into the workload's environment. Nothing in
-the design is quantum-specific: a resource `type` is an opaque string throughout.
+Fluence is a Kubernetes scheduler plugin. It builds a [Fluxion](https://github.com/flux-framework/flux-sched) resource graph from the live cluster and places pods, alone or in groups, by matching them against it. The graph does not have to stop at compute. Anything with a count and a few attributes can be a vertex in it, and then you can filter on it and the pod that gets it learns what it got through its environment. Quantum backends were the first thing I modeled this way, but there is nothing quantum specific in the design.
 
-This updates [flux-k8s](https://github.com/flux-framework/flux-k8s) to use the
-native Kubernetes PodGroup (Gang) API — no sidecar, and no
-`kubernetes-sigs/scheduler-plugins` dependency. The quantum resource model is
-proven out first in
-[fluxion-quantum](https://github.com/converged-computing/fluxion-quantum).
+This replaces [flux-k8s](https://github.com/flux-framework/flux-k8s). Gangs go through the native Kubernetes PodGroup API now, and there is no dependency on kubernetes-sigs/scheduler-plugins. I worked out the quantum resource model first in [fluxion-quantum](https://github.com/converged-computing/fluxion-quantum).
 
-## How does it work?
+## How it works
 
 ```console
- resources.yaml --+ 
+ resources.yaml --+
    +--------------+-------------------------------+
    v              v                               v
 scheduler     device plugin                    webhook
@@ -39,266 +29,93 @@ scheduler     device plugin                    webhook
            webhook-injected env reads those annotations
 ```
 
-A single `resources.yaml` is the source of truth, read by three independent
-processes: the **scheduler** builds the graph and validates requests, the **device
-plugin** advertises the requestable types as Kubernetes extended resources (so
-pods requesting them pass admission), and the **webhook** computes the
-environment-variable contract it injects into workloads. Note that the device
-plugin can be removed from the design, assuming we do not need a `NodeResourcesFit` check.
-I have kept it for now anticipating future cases where we have node-specific resources.
-For now, the counts can be viewed as API quotas.
+There is one resources.yaml used by the scheduler, a device plugin, and webhook. The scheduler builds the graph from it and matches requests. The device plugin advertises the types in it as extended resources, which is only there so a pod asking for one gets past the NodeResourcesFit check. The webhook reads it to know which environment variables to inject. I could drop the device plugin, and I have kept it for the day we have resources that really are tied to a node. Until then the counts are quotas.
 
-For one pod group the scheduler generates one or more jobspecs, match-allocates
-each against the graph (all-or-nothing), combines them into a placement, binds the
-pod, and stamps the matched backend + attributes as annotations. The webhook has
-already injected downward-API env vars that read those annotations, so the
-workload sees which backend and attributes it got.
+When a group comes in, the scheduler writes one or more jobspecs for it, matches each one against the graph, and if any of them fails it cancels the rest. Any nested topology for quantum devices would be represented in the graph structure. Then fluence binds the pods and adds annotation attributes. The webhook already gave the containers downward API variables that read those annotations, so by the time the container starts it knows its backend.
 
 ## The resource model
 
-**Every allocatable thing in the graph is a `node`-typed vertex** -- physical
-compute nodes and every level of every virtual resource alike. This is deliberate:
-Fluxion's RFC 31 property constraints (the only attribute-based pruning the matcher
-offers) apply **only** to `node` and `storage_node` vertices, so modeling a virtual
-resource as a node is what makes it filterable.
+Everything in the graph that can be allocated is a node vertex. That includes the real nodes and every level of every virtual resource. I did this because Fluxion only applies property constraints, RFC 31, to node and storage_node vertices, so a virtual resource has to be a node if you want to filter on it.
 
-- **Physical nodes** carry `virtual=false`.
-- **Virtual resources** carry `virtual=true`, a `class=<type>` for the resource's
-  own type *and each descendant type in its subtree*, and their attributes.
+Real nodes have the attribute virtual=false and virtual resources have virtual=true. A full set of attributes might include virtual=true, class=qpu, and region=us-east-1, because RFC 31 only checks whether a key is present. You select a resource by its class, which means any level of the tree can be asked for on its own. Classes are inherited so a nested type is not pruned at its parent on the way down.
 
-Property values are encoded into the property **key** (`virtual=true`,
-`class=qpu`, `region=us-east-1`) because RFC 31 matching is key-presence only -- it
-never compares the value half. A resource is selected by a `class=<type>`
-constraint, so any level is independently requestable (`class=qdevice`,
-`class=qpu`, `class=qubit`). Descendant classes are propagated **up** so a global
-constraint selecting a nested type isn't pruned at an ancestor node on the way
-down; attributes are inherited **down** (a child gets its parent's attributes
-unless it overrides or clears a key) so an attribute filter combined with a nested
-class still reaches the target.
+## Resources
 
-Because a jobspec carries one global constraint, compute (`virtual=false`) and a
-virtual resource (`virtual=true`) cannot be co-selected in one match -- one would
-prune the other. A pod needing both produces **two** match-allocate calls, held
-together all-or-nothing.
-
-## Components
-
-### `pkg/jgf` — JGF graph builder
-
-Builds the JSON Graph Format document Fluxion consumes. `AddRoot`/`AddChild`
-create vertices with `Options` (size, unit, exclusivity, rank, properties).
-`Options.NodeProperties` are RFC 31 resource properties (a nested `properties`
-object the matcher prunes against); `Options.Properties` are descriptive metadata
-only. `Options.Rank` sets a real execution rank — every `node` vertex needs one.
-
-### `pkg/cluster` — config schema and graph construction
-
-Parses the resource config and turns it (plus the live cluster nodes) into a graph.
+Here is an example of resources for AWS Braket.
 
 ```yaml
 resources:
-  - type: qdevice            # opaque type; the resource's class
-    name: rigetti_cepheus    # vertex name / backend identity
-    parent: cluster          # where it attaches (default "cluster")
-    attributes: aws-east     # inline map OR a reference into the registry below
-    with:                    # recursive children, same schema
+  - type: qdevice            # the resource class
+    name: rigetti_cepheus    # vertex name, the backend identity
+    parent: cluster          # where it attaches, cluster by default
+    attributes: aws-east     # an inline map or a name from the registry below
+    with:                    # children, same schema
       - type: qpu
         count: 1
         with:
           - type: qubit
             count: 80
 
-attributes:                  # named attribute-set registry (reuse across backends)
+attributes:
   aws-east:
     region: us-east-1
     connectivity: all-to-all
 ```
 
-`LoadResourcesConfig` parses YAML/JSON, resolves attributes (inline or by
-reference) with downward inheritance, and errors on a missing `type`, an unknown
-reference, or a non-empty config that defines no `resources:` (a schema mismatch,
-so it fails loudly instead of building an empty graph). `BuildGraph` emits each
-cluster node as a `virtual=false` node, then appends the resource trees: every
-resource at every depth becomes a `virtual=true` node carrying its class set and
-inherited attributes, on a real rank from a counter shared with the physical
-nodes. `FluxionResourceNames` returns every requestable type (what the device
-plugin advertises); `AttributeKeys` returns the union of attribute keys (the
-webhook's env contract).
+A missing type, an attribute name that is not in the registry, or a config with content but no resources key are all errors. I would rather it fail loudly than build an empty graph. The placement package turns a group into jobspecs. There is always one compute jobspec, a slot per pod, constrained to virtual=false. There is one more jobspec for each virtual type (e.g., quantum) the pods ask for. Every pod gets at least one core, and every jobspec has a duration of zero to ensure it is held until someone (the scout or user) cancels it.  The graph package is what interfaces with the Fluxion matcher via cgo, meaning it needs flux-sched to build. We use jgf as the match format because rv1 will not pass through a virtual allocation without cores in it. The fluence package is the scheduler plugin, and PreFilter matches the whole group and cancels everything if any match fails. Filter only lets through the nodes Fluxion picked. Reserve and PreBind write the backend annotations and the Fluxion job ids onto the owning object, which is the PodGroup for a gang and the pod otherwise. When that object is deleted an informer cancels the allocations. The job id annotation will persist through a restart. The gang semantics come from the PodGroup API, and fluence only does placement. The deviceplugin advertises types as `fluxion.flux-framework.org/type`, and this is done as a courtesy to the user (to make it easy to use). For virtual resources these counts can be viewed as limits. In practical terms, the real limit is the number of hybrid pairs that can be supported (we cannot exceed the number of free and pre-emptible cores if we expect priority to work on a released reservation).  The webhook is a mutating webhook that allows for registration of handlers, and the handlers mutate pods per a specific role. For example, the default fluence handler is a gang. There is also a quantum handler. Finally, the python module implements the sidecar and interceptors. We have to have one per vendor, but we do not have too many vendors, so we build just one sidecar for now. The user does not need to think about it, as fluence will inject it into containers when appropriate to submit quantum work.
 
-### `pkg/jobspec` — jobspec types
+## Quantum gangs
 
-The Fluxion jobspec representation (`Jobspec`, `Resource`, `Task`) with YAML/JSON
-round-tripping: a `resources` tree (a `slot` holding the request), an `attributes`
-block (constraint + duration), and `tasks`.
+The two-queue problem is about co-scheduling of different queues. We typically control one, and not the other. A hybrid job without coscheduling would submit from classical resources and (likely) do a lot of waiting.  Fluence holds them out of the cluster until the task is about to run and then lets them in with high priority. A shared quantum gang gets split into a scout and workers, and the scout monitors and ungates the workers when the quantum is ready.
 
-### `pkg/placement` — jobspec generation and allocation parsing
+The scout is one pod of the gang, the one with completion index 0 in an indexed Job. It runs the application, submits the one quantum task, and has a sidecar. It is never gated. The workers are everyone else. They start with a scheduling gate so they hold no node resources while the task is in the vendor queue. They know their role, and when they are ungated they get the scout's job id and its session, so they can fetch the result or submit into that same session. The sidecar is what finds the task, watches the vendor queue, ungates the workers when the task is next in line, and then waits for the workers to finish so the scout keeps its session until they are done.
 
-`JobspecsForGroup` turns a pod group into the jobspecs to match:
+The vendor specific part lives in the providers. Braket tags a task and searches for it later. QRMI has no tag search, so its interceptor writes the job id and session to a file that the sidecar reads. QRMI covers IBM, Pasqal, IQM, and others through one API, and the vendor is just an attribute in the config.
 
-- Always one **compute** jobspec — a slot per pod holding core/memory/gpu,
-  constrained to `virtual=false`. A classical group produces only this (one match).
-- One **device** jobspec per requested virtual type, requesting a `node`
-  constrained to `virtual=true` + `class=<type>`. The class selects which virtual
-  node; the count comes from the request.
-- Every pod gets at least one core (a device-only pod still needs a host).
-- Every jobspec sets `duration: 0` — held until explicitly cancelled.
-- A request for an unmodeled type is a hard error.
+## Admission control
 
-Jobspecs are submitted as **JSON** (not YAML): the constraint parser requires
-quoted property scalars, and JSON always quotes.
-
-`PlacementFromAllocation` classifies an allocation's node vertices by the
-`virtual` marker — `virtual=false`/unmarked are compute bind targets, a
-`virtual=true` node is the backend identity, and its `fluxion.flux-framework.org/`
-properties are decomposed into attributes for env injection. This package also
-owns the shared names: the `fluxion.flux-framework.org/` request prefix, the
-`fluence.flux-framework.org/{backend,jobid,attr-*}` annotations, and the
-`FLUXION_` env prefix.
-
-### `pkg/graph` — Fluxion binding (cgo)
-
-Wraps the cgo matcher (`FluxionGraph`: `Init`, `MatchAllocateSpec`, `Cancel`,
-`Satisfy`) and parses allocations. Fluence uses the **jgf** match format: it emits
-every allocated vertex with its properties regardless of type, so a virtual
-allocation that bottoms out in nodes (no cores) still serializes — which rv1
-cannot. `NodesFromAllocation` returns node vertices with their properties for the
-marker-based classification. This is the only cgo-dependent package, so it gates
-local builds of everything importing it.
-
-### `pkg/fluence` — the scheduler plugin
-
-`New` lists the cluster, loads the config, builds and logs the graph, and inits the
-matcher.
-
-- **PreFilter** runs per group: generate jobspecs, then `matchGroup` runs each as
-  an independently held allocation, **all-or-nothing** — any failure cancels the
-  successes, so the group never holds a partial set.
-- **Filter** permits only the nodes Fluxion assigned.
-- **PreBind** records durable state: the jobids on the owning object (PodGroup for
-  a gang, else the pod) for cancellation, and the matched backend + attributes as
-  annotations the webhook reads.
-- **Cancellation** is informer-driven (no framework delete hook): deleting a
-  PodGroup or ungrouped pod frees its held allocations. The jobid annotation is the
-  durable source of truth; the graph (and allocations) are rebuilt on restart from
-  the same annotations.
-
-Gang semantics are delegated to the native PodGroup API; fluence only places.
-
-### `pkg/deviceplugin` — extended-resource advertisement
-
-Advertises each requestable type (`fluxion.flux-framework.org/<type>`) as a
-counted extended resource, so a pod requesting one passes `NodeResourcesFit`
-admission. The real gating is Fluxion (and the backend's own limits); since a
-virtual backend is reachable from any node, each type is advertised at a large
-ceiling. Types come from the same config as the graph, so they can't drift.
-
-### `sidecars/` — quantum coordination sidecars
-
-Vendor-specific sidecar containers injected by the webhook into the producer pod
-of a shared quantum workflow group. Each sidecar discovers the QPU task submitted
-by the producer, polls the vendor queue, and ungates the consumer pods when the
-task reaches position==1.
-
-```console
-sidecars/
-  lib/ungate.py          shared gate removal + ARN annotation logic
-  braket/
-    sidecar.py           AWS Braket sidecar (tag search, queue polling, ungate)
-    fluence_braket_intercept.py  AwsDevice.run() monkey-patch (PYTHONSTARTUP)
-    Dockerfile           build context is sidecars/ to include lib/
-    design.md            full design document
-    test/integration.sh  local integration test (requires AWS credentials)
-```
-
-The sidecar is injected automatically — users only need the group label:
-
-```yaml
-metadata:
-  labels:
-    fluence.flux-framework.org/group: my-workflow
-spec:
-  schedulerName: fluence
-```
-
-Fluence creates the PodGroup, injects the sidecar, creates per-namespace
-RBAC, and gates the consumer pods. See `sidecars/braket/design.md` for
-the full design including the SDK interceptor, queue position polling, and
-the two-queue problem motivation.
-
-### `pkg/webhook` — environment injection
-
-A mutating webhook that surfaces scheduler-chosen values to a workload. Container
-env is fixed at creation but the match happens after admission, so it injects
-**downward-API** env vars whose values populate later from the annotations PreBind
-writes. The injected set is a **config-derived contract**: `FLUXION_BACKEND` plus
-one `FLUXION_<KEY>` per attribute key across all backends — add an attribute and
-its env var appears, no code change. The webhook self-manages TLS (generates a CA
-and patches its own `caBundle`), so no cert-manager is needed. A vendor-agnostic
-workload reads these normalized names regardless of which backend it matched.
-
-## Commands
-
-- `cmd/fluence` — the scheduler binary (stock kube-scheduler + the plugin).
-- `cmd/deviceplugin` — the extended-resource DaemonSet.
-- `cmd/webhook` — the env-injection webhook.
-- `cmd/recovery-probe` — verifies allocation replay survives a graph rebuild
-  (what a restart does); see `make test-restore`. 
-  
-Note that the recovery probe (and graph restore) was implemented but removed because the code in fluxion is only part of a PR branch, and I feel nervous about depending on it.
+Admission control is a check that asks "Can we support a new hybrid queue?" where that question is based on our ability to release a reservation with priority and guarantee that it can run given free cores and pre-emptible work. It is always on, and you can turn it off at your own risk by setting FLUENCE_ADMISSION=off in the webhook deployment read at startup. When turned on, the webhook will refuse a new quantum group that will not fit. This design is analogous to what we do with the flux-quantum jobtap plugin. In simple terms, we add up the cores every pod in the group will need, plus the cores already promised to groups that were admitted but have not started. That has to fit in the set of free plus preemptible cores (lower priority). A group that does not fit is refused when its first pod is created, so you see it at kubectl apply or on the Job. Every quantum pod gets marked protected so it never counts as preemptible.
 
 ## Configuration
 
-These are environment variables for fluence.
-
-| Env var | Read by | Meaning |
+| Variable | Read by | Meaning |
 |---|---|---|
-| `FLUENCE_RESOURCES` | scheduler, device plugin, webhook | path to `resources.yaml`; absent = classical-only |
-| `FLUENCE_MATCH_POLICY` | scheduler | Fluxion match policy (default `first`) |
-| `FLUENCE_RESOURCE_CAPACITY` | device plugin | per-node ceiling per type (default 1000) |
+| `FLUENCE_RESOURCES` | scheduler, device plugin, webhook | path to resources.yaml, absent means classical only |
+| `FLUENCE_MATCH_POLICY` | scheduler | Fluxion match policy, default first |
+| `FLUENCE_RESOURCE_CAPACITY` | device plugin | per node ceiling per type, default 1000 |
+| `FLUENCE_ADMISSION` | webhook | off turns admission control off, default on, read at startup |
+| `FLUENCE_RESERVE_CORES` | webhook | cores held back from the admission budget, default 0 |
+| `FLUENCE_WORKER_TIMEOUT` | sidecar | seconds to wait for the workers after ungating, 0 waits forever, default 0 |
+| `FLUENCE_SESSION_HOLD_TIMEOUT` | scout container | seconds the scout's release waits for the workers, 0 waits forever, default 0 |
 
-## Observability
-
-The scheduler logs (prefix `[fluence]`) the full graph and known devices at
-startup and, per match, the submitted jobspec, the raw Fluxion allocation, and the
-parsed placement. The webhook logs (`[fluence-webhook]`) the env contract at
-startup. Because live behavior (cgo matcher, real Kubernetes) can't be fully
-unit-tested, these logs are the primary debugging surface.
+The scheduler logs the graph when it starts, and for every match it logs the jobspec it sent, the allocation it got back, and how it read it, all prefixed with [fluence]. The webhook logs its environment contract at startup. You can look at logs to debug.
 
 ## Build
 
-The scheduler links flux-sched (the matcher). It does **not** link QRMI or any
-quantum backend — quantum job submission lives in a separate workload container
-([qrmi-sampler](https://github.com/converged-computing/qrmi-sampler)), not here.
+The scheduler links flux-sched. It does not link QRMI or any vendor SDK. Submitting quantum work happens in the workload container. While we build and deploy images on GitHub packages, you can also build yourself to develop or test something.
 
 ```bash
-# Inside the .devcontainer (flux-sched at /opt/flux-sched):
-make build      # bin/fluence (cgo+flux) + bin/fluence-deviceplugin + bin/fluence-webhook
+# in the .devcontainer, with flux-sched at /opt/flux-sched
+make build      # bin/fluence, bin/fluence-deviceplugin, bin/fluence-webhook
 make test
-make image      # or build the container image with all three binaries
+make image
 ```
 
 ## Deploy
 
-Create a cluster on a Kubernetes release with native gang scheduling and the
-feature gates the kind config enables (`GangScheduling`, `GenericWorkload`, the
-`scheduling.k8s.io/v1alpha2` API group):
+You need a minimum Kubernetes version of 1.36.1 with the gang scheduling gates turned on. The kind config we provide does that.
 
 ```bash
 kind create cluster --image kindest/node:v1.36.1 --config deploy/kind-config.yaml
 kind load docker-image ghcr.io/converged-computing/fluence:latest
 ```
 
-### 1. Gang scheduling (classical — all you need for non-quantum)
+### Gang scheduling
+
+If all you want is classical work.
 
 ```bash
-kubectl apply -f deploy/fluence.yaml   # scheduler, RBAC, and the webhook
-```
-
-Pods opt in with `schedulerName: fluence`; a multi-pod gang adds a
-`scheduling.k8s.io/pod-group` label (a single pod is a group of one, no label
-needed).
-
-```bash
+kubectl apply -f deploy/fluence.yaml
 kubectl apply -f examples/podgroup.yaml
 kubectl get podgroups.scheduling.k8s.io
 ```
@@ -307,80 +124,50 @@ NAME       POLICY   WORKLOAD   STATUS      AGE
 training   Gang     <none>     Scheduled   15s
 ```
 
-Cleanup:
+A pod opts in by setting schedulerName to fluence. A gang adds the group label and the webhook makes the PodGroup. I started out making people create the PodGroup themselves and found that annoying. To clean up, clear the finalizer and delete.
 
 ```bash
 kubectl patch podgroup training -n default --type=merge -p '{"metadata":{"finalizers":null}}'
 kubectl delete -f examples/podgroup.yaml
 ```
 
-### 2. Quantum (the resources add-on)
+Importantly, the expectation is using fluence as the main scheduler. If you send something to another scheduler fluence cannot know about the result to update its resource graph.
 
-This supplies the `fluence-resources` ConfigMap (the source of truth for which
-backends exist) and the device plugin that advertises them:
+### Quantum resources
+
+The resources ConfigMap says which backends exist and the device plugin advertises them. The scheduler and the webhook read the config when they start, so restart them after you apply it.
 
 ```bash
 kubectl apply -f deploy/fluence-resources.yaml
 kubectl apply -f deploy/device-plugin.yaml
-# The scheduler and webhook read the config at startup — restart to pick it up:
 kubectl rollout restart deployment/fluence -n kube-system
 kubectl rollout restart deployment/fluence-webhook -n kube-system
+kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.allocatable}{"\n"}{end}' | grep fluxion.flux-framework.org
 ```
 
-Confirm the resources are advertised:
+The workload holds the credentials. The scheduler never sees them.
 
 ```bash
-kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.allocatable}{"\n"}{end}' \
-  | grep fluxion.flux-framework.org
-```
-
-Create the IBM credentials the **workload** uses to submit (the scheduler never
-needs them):
-
-```bash
-ibmcloud login --apikey <key>
 export IBM_CLOUD_TOKEN=<key>
 export IBM_CLOUD_CRN=$(ibmcloud resource service-instances --service-name quantum-computing --output json | jq -r '.[0].crn')
-kubectl create secret generic ibm-quantum -n default \
-  --from-literal=token="$IBM_CLOUD_TOKEN" --from-literal=crn="$IBM_CLOUD_CRN"
+kubectl create secret generic ibm-quantum -n default --from-literal=token="$IBM_CLOUD_TOKEN" --from-literal=crn="$IBM_CLOUD_CRN"
 ```
 
-Run a single quantum pod — it just requests `fluxion.flux-framework.org/qpu`, with
-no hard-coded backend (the webhook + PreBind supply `FLUXION_BACKEND`):
+A single quantum pod asks for `fluxion.flux-framework.org/qpu` and does not name a backend. The example in examples/qrmi-workload reads the backend fluence picked from FLUXION_BACKEND, opens a QRMI session on it, runs a Bell circuit, and closes the session. If there is no Secret it prints what it would have needed and exits, which is a fine way to check the placement without paying for anything. The image is ghcr.io/converged-computing/fluence-qrmi-workload.
 
 ```bash
-kubectl apply -f examples/quantum-pod.yaml
-
-# fluence's chosen backend, also injected as $FLUXION_BACKEND in the container:
-kubectl get pod sampler -o jsonpath='{.metadata.annotations.fluence\.flux-framework\.org/backend}{"\n"}'
-kubectl logs sampler
-```
-```console
-2026/06/06 19:04:38 submitting sampler job to ibm_marrakesh
-{"results": [ ... samples ... ]}
-2026/06/06 19:04:50 done: 2070 bytes from ibm_marrakesh
+kubectl apply -f examples/qrmi-pod.yaml
+kubectl get pod qrmi-sampler -o jsonpath='{.metadata.annotations.fluence\.flux-framework\.org/backend}{"\n"}'
+kubectl logs -f qrmi-sampler
 ```
 
-When the pod completes, fluence cancels the Fluxion allocation, freeing the
-resources (visible in the scheduler logs as `Cancel jobid: N`). Note that I lost access to
-my IBM account so this has not been tested live since mid June.
+When the pod finishes fluence cancels the allocation and you will see Cancel jobid in the scheduler log.
 
-Submission is **not** done by the scheduler — the workload container holds the
-user's credentials and submits via qrmi-go. Fluence only schedules and hands off
-the backend. (When we control local quantum devices this will change.)
+### Quantum gangs
 
-### 3. Quantum workflow groups (producer + consumers)
-
-A quantum workflow group is a gang whose members share **one** quantum task:
-one pod **submits** the work (the producer) and N−1 pods **wait** for the result
-(the consumers). All pods share a group label and run the *same* image; Fluence
-co-schedules them, gives the producer a sidecar that watches the vendor queue, and
-gates the consumers so they consume no node resources during the (long, variable)
-QPU queue wait — releasing them only when the task reaches `queue_position == 1`.
+Every pod in the gang uses the group label, a coordination annotation, and schedulerName fluence. We use an indexed Job and that index 0 is the scout.
 
 ```yaml
-# Every pod in the group carries the same group label + schedulerName: fluence,
-# and opts into shared coordination.
 metadata:
   labels:
     fluence.flux-framework.org/group: my-qaoa-workflow
@@ -390,83 +177,13 @@ spec:
   schedulerName: fluence
 ```
 
-#### Coordination modes
+The default mode is independent. Every pod submits its own task and nobody is gated, which is what you want for N different circuits, and it is no different from N standalone pods. Set shared when the whole gang should wait on one task. The scout gets a PodGroup of one named group-scout, the interceptor, and the sidecar. The workers go in the gang PodGroup of N minus one with the quantum.braket/ready gate and the fluence-quantum-classical priority class. The sidecar RBAC and the staging are created by the webhook the first time they are needed.
 
-`fluence.flux-framework.org/coordination` selects how the gang is coordinated; it
-defaults to `independent`.
-
-- **`shared`** — the gang shares ONE quantum task. Fluence promotes one member to
-  producer and gates the rest as consumers (see below). Use this for a coordinated
-  workflow where the classical post-processing should start together as the single
-  result lands.
-- **`independent`** (default) — every member does its own quantum work: its own
-  real submit, its own queue wait, no gating. N members run N tasks. This is the
-  honest default; Fluence never invents coordination you did not ask for, and
-  never dedups tasks meant to be distinct.
-
-#### How the producer is chosen
-
-In `shared` mode the producer is the member the Job controller stamps with
-`batch.kubernetes.io/job-completion-index: "0"` — so an **indexed Job** gives
-deterministic, race-free election from a single identical template (every pod has
-the same image and group label; only the index differs). This serves two contracts
-with no extra configuration:
-
-- an **explicit-role script** that branches on the completion index (index 0
-  submits; others wait and consume the result), and
-- an **identical script** where every pod calls submit — the producer's submit is
-  real, and each consumer's submit is transparently returned the producer's task
-  (the shared-result dedup), so the code need not branch at all.
-
-For loose pods with no completion index, the first pod admitted claims the producer
-slot; an indexed Job is recommended when you need determinism.
-
-#### What Fluence does
-
-In `shared` mode the producer gets the interceptor (real mode) + sidecar and its
-own group-of-one PodGroup `<group>-producer` (`minCount: 1`), so it schedules
-alone and runs the single real submit; it is never gated. The consumers join the
-`<group>` gang (`minCount: N−1`), get a `quantum.braket/ready` scheduling gate, and
-consume no node resources during the QPU queue wait. When the sidecar observes
-`queue_position == 1`, it stamps the producer's task id onto each consumer
-(surfaced as `FLUENCE_QUANTUM_JOB_ID`) and removes their gates atomically with
-setting the `fluence-quantum-classical` priority class so they reschedule promptly.
-The producer is one of the N members, so the application runs exactly N times —
-never N+1, and there is no separate submitter pod.
-
-Per-namespace RBAC (`fluence-sidecar` ServiceAccount/Role/RoleBinding) and the
-interceptor staging are created automatically by the webhook on first use — no
-manual setup required.
-
-```bash
-# Apply your pods with the group label + coordination annotation +
-# schedulerName: fluence. RBAC is created for you.
-kubectl apply -f my-quantum-workflow.yaml
-```
-
-#### A note on the independent "all submit" case
-
-`coordination: independent` (the default) means *every* pod submits its own
-quantum task: N independent submissions land in the vendor queue and run at
-uncoordinated times. That is correct and sometimes exactly what you want (N
-distinct circuits), but it offers no coordination benefit from grouping — it is
-equivalent to N standalone quantum pods. For a single quantum submission, use a
-standalone pod (no group label, see §2). For a coordinated workflow that shares
-one result, use `coordination: shared` above.
-
-
-### Notes
-
-- **Deletion hangs.** A PodGroup can hang on delete via finalizers if the workload
-  controller isn't running; clear them with the `kubectl patch` above.
-- **State restore.** On restart the plugin repopulates the graph from each group's
-  jobid annotations and re-holds the allocations: `make test-restore`.
+If a PodGroup hangs on delete, clear its finalizer the way shown above.
 
 ## License
 
-Distributed under the MIT license; all contributions must be made under it. 
-
-See [LICENSE](LICENSE), [COPYRIGHT](COPYRIGHT), and [NOTICE](NOTICE).
+Distributed under the MIT license, and all contributions must be made under it. See [LICENSE](LICENSE), [COPYRIGHT](COPYRIGHT), and [NOTICE](NOTICE).
 
 SPDX-License-Identifier: MIT
 
