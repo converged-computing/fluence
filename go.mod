@@ -3,7 +3,7 @@ module github.com/converged-computing/fluence
 go 1.26.0
 
 require (
-	github.com/flux-framework/flux-sched/resource/reapi/bindings/go v0.0.0-20260526195258-f0e815f1f354
+	github.com/flux-framework/flux-sched/resource/reapi/bindings/go v0.0.0-20261006164720-2ae3f6cdf839
 	google.golang.org/grpc v1.79.3
 	k8s.io/api v0.36.0
 	k8s.io/apimachinery v0.36.0

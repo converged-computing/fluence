@@ -89,10 +89,8 @@ assert_stays_pending() {
 # cpu quantities to millicores, so "4" and "250m" add up
 millicores() { awk '{ if ($0 ~ /m$/) { sub(/m$/, ""); t += $0 } else if ($0 != "") { t += $0 * 1000 } } END { print t + 0 }'; }
 
-# Whole cores free on the fullest worker. Allocatable less what the pods already
-# on it request, which is the arithmetic the kube-scheduler's fit check does. A
-# pod that asks for this fills a worker, so a two pod gang takes two workers and
-# two gangs contend, on any runner, with nothing assumed about the system pods.
+# Whole cores free on the fullest worker, allocatable less what its pods
+# request. A pod that asks for this fills a worker.
 free_cores_per_worker() {
   local min="" node alloc used free
   for node in $(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' -o jsonpath='{.items[*].metadata.name}'); do
@@ -106,8 +104,7 @@ free_cores_per_worker() {
   echo "$min"
 }
 
-# Render a manifest whose cpu request is ${GANG_CPU} with the free cores on a
-# worker. Pipe it to kubectl apply or delete.
+# Fill in ${GANG_CPU} with the free cores on a worker. Pipe to kubectl.
 render_gang_manifest() {
   local cpu line
   cpu="$(free_cores_per_worker)"

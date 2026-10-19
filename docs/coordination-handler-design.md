@@ -50,7 +50,7 @@ That partitions a quantum gang into two kinds, decided per pod.
 
 Identical pod templates (a Job/Deployment) are genuinely ambiguous between "one
 shared task, fan the result out to N pods" and "N independent tasks." Fluence
-cannot infer this. The user declares it with one annotation on the pod template.
+cannot infer this. The user says which with one annotation on the pod template.
 
 ```yaml
 metadata:

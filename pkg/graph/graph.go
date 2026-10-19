@@ -146,7 +146,9 @@ func (f *FluxionGraph) Satisfy(specFile string) (bool, error) {
 		return false, errors.New("Error reading jobspec")
 	}
 
-	satisfied, overhead, err := f.cli.MatchSatisfy(string(spec))
+	// 0 is satisfiable, 1 is not, -1 is an error
+	rc, overhead, err := f.cli.MatchSatisfy(string(spec))
+	satisfied := err == nil && rc == 0
 	fmt.Printf("  Satisfied : %t\n", satisfied)
 	fmt.Printf("  Overhead : %.6f seconds\n", overhead)
 

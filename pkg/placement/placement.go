@@ -144,8 +144,7 @@ func requireConstraintsFromPods(pods []corev1.Pod) []string {
 // fluxion.flux-framework.org/<type> prefix is a virtual device type instead.
 var computeTypes = map[string]bool{"core": true, "memory": true, "gpu": true}
 
-// mib is the unit memory is requested in. The graph sizes its memory chunks
-// in MiB, so a request in MiB takes however many whole chunks cover it.
+// memory is requested in MiB, the unit the graph sizes its chunks in
 const mib = 1024 * 1024
 
 // podResources distills a pod's container requests into Fluxion resource counts
@@ -160,7 +159,7 @@ func podResources(p *corev1.Pod) map[string]int {
 			case name == corev1.ResourceCPU:
 				counts["core"] += int(q.Value()) // rounds millicores up to whole cores
 			case name == corev1.ResourceMemory:
-				// whole MiB rounded up, the unit the memory chunks are sized in
+				// whole MiB, rounded up
 				counts["memory"] += int((q.Value() + mib - 1) / mib)
 			case name == "nvidia.com/gpu":
 				counts["gpu"] += int(q.Value())

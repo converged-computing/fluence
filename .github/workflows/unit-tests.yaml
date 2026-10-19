@@ -11,24 +11,29 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # fluence-base has flux-sched 0.52.0 (installed to /usr) + Go, so the
-    # cgo matcher (pkg/graph) links and `make test` can build every package.
-    container:
-      image: ghcr.io/converged-computing/fluence-base:latest
-    env:
-      FLUX_SCHED_ROOT: /opt/flux-sched
-      LD_LIBRARY_PATH: /usr/lib:/opt/flux-sched/resource:/opt/flux-sched/resource/reapi/bindings:/opt/flux-sched/resource/libjobspec
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Versions
-        run: |
-          export PATH=$PATH:/usr/local/go/bin
-          go version
-          ls /opt/flux-sched >/dev/null && echo "flux-sched present"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # the base has flux-sched and Go. Build it here so a PR is tested with its own
+      # flux-sched. Cached, so it only rebuilds when it changes.
+      - name: Build base
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker
+          file: ./docker/Dockerfile
+          provenance: false
+          load: true
+          tags: fluence-base:ci
+          cache-from: type=gha,scope=base-linux-amd64
+          cache-to: type=gha,mode=max,scope=base-linux-amd64
 
       - name: Go test
         run: |
-          export PATH=$PATH:/usr/local/go/bin
-          make test
+          docker run --rm -v "$PWD":/src -w /src \
+            -e FLUX_SCHED_ROOT=/opt/flux-sched \
+            -e LD_LIBRARY_PATH=/usr/lib:/opt/flux-sched/resource:/opt/flux-sched/resource/reapi/bindings:/opt/flux-sched/resource/libjobspec \
+            fluence-base:ci bash -c 'export PATH=$PATH:/usr/local/go/bin && go version && make test'

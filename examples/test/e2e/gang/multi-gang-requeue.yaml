@@ -4,8 +4,7 @@
 # gang-wait. A 2-pod gang needing the same nodes. Loses the initial race and sits
 #            Unschedulable. When gang-win completes, gang-wait must be re-attempted
 #            (via the shortened unschedulable-recheck timeout) and place atomically.
-# GANG_CPU is filled in by the test with the free cores on a worker, so one pod
-# fills one worker and the two gangs cannot co-run.
+# The test fills in GANG_CPU so one pod fills a worker and the gangs cannot co-run.
 apiVersion: batch/v1
 kind: Job
 metadata:

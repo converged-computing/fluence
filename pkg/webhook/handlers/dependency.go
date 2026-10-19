@@ -33,7 +33,7 @@ import (
 //
 // The webhook PRODUCES a Dependency (gates the workers, stamps the
 // annotations). REMOVING the gate is owned by the observer best placed to see
-// the scout's readiness. That split, declare here, observe elsewhere, is
+// the scout's readiness. That split, set here, watched elsewhere, is
 // what keeps the primitive general. A new resource type adds a Kind and an
 // observer and reuses the gating/annotation machinery unchanged.
 type Dependency struct {
@@ -67,7 +67,7 @@ func (d Dependency) applyOps(pod *corev1.Pod) []spec.Op {
 	return ops
 }
 
-// DependencyOf reads a dependent pod's declared Dependency, or ok=false if it
+// DependencyOf reads the Dependency set on a pod, or ok=false if it
 // has none. The scheduler's reconcile loop and the sidecar use this to learn
 // what a gated pod is waiting for without hardcoding a kind.
 func DependencyOf(pod *corev1.Pod) (Dependency, bool) {

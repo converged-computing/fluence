@@ -440,8 +440,7 @@ func computeConstraints(t *testing.T, spec *jobspec.Jobspec) map[string]interfac
 	return cons
 }
 
-// Memory requests are counted in whole MiB rounded up, the unit the graph
-// sizes its memory chunks in, so Fluxion takes however many chunks cover it.
+// Memory requests are whole MiB, rounded up.
 func TestMemoryRequestsCountInMiB(t *testing.T) {
 	cases := []struct {
 		req  string

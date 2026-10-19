@@ -1,7 +1,5 @@
-# Two gangs that cannot both place. GANG_CPU is filled in by the test with the
-# free cores on a worker, so one pod fills one worker and a gang of two takes
-# both. One gang places entirely. The loser stays FULLY pending (all-or-nothing),
-# never partial.
+# Two gangs that cannot both place. The test fills in GANG_CPU so one pod fills
+# a worker. One gang places entirely, the loser stays FULLY pending, never partial.
 apiVersion: apps/v1
 kind: Deployment
 metadata:

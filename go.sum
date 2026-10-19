@@ -34,8 +34,8 @@ github.com/emicklei/go-restful/v3 v3.13.0 h1:C4Bl2xDndpU6nJ4bc1jXd+uTmYPVUwkD6bF
 github.com/emicklei/go-restful/v3 v3.13.0/go.mod h1:6n3XBCmQQb25CM2LCACGz8ukIrRry+4bhvbpWn3mrbc=
 github.com/felixge/httpsnoop v1.0.4 h1:NFTV2Zj1bL4mc9sqWACXbQFVBBg2W3GPvqp8/ESS2Wg=
 github.com/felixge/httpsnoop v1.0.4/go.mod h1:m8KPJKqk1gH5J9DgRY2ASl2lWCfGKXixSwevea8zH2U=
-github.com/flux-framework/flux-sched/resource/reapi/bindings/go v0.0.0-20260526195258-f0e815f1f354 h1:9Z0aLiKYuqFV9BkUHIdmB2LUCL5/RRB6YkLVc8f0Ge0=
-github.com/flux-framework/flux-sched/resource/reapi/bindings/go v0.0.0-20260526195258-f0e815f1f354/go.mod h1:yhmzNyn45YhoxEohh1Sl3h3izLMqL7qpcvmYTRpv7eY=
+github.com/flux-framework/flux-sched/resource/reapi/bindings/go v0.0.0-20261006164720-2ae3f6cdf839 h1:esDDhc7wsHfKm5LF4dhlmRAlWLUT4Pq2z0gUQAmMFqw=
+github.com/flux-framework/flux-sched/resource/reapi/bindings/go v0.0.0-20261006164720-2ae3f6cdf839/go.mod h1:yhmzNyn45YhoxEohh1Sl3h3izLMqL7qpcvmYTRpv7eY=
 github.com/fsnotify/fsnotify v1.9.0 h1:2Ml+OJNzbYCTzsxtv8vKSFD9PbJjmhYF14k/jKC7S9k=
 github.com/fsnotify/fsnotify v1.9.0/go.mod h1:8jBTzvmWwFyi3Pb8djgCCO5IBqzKJ/Jwo8TRcHyHii0=
 github.com/fxamacker/cbor/v2 v2.9.0 h1:NpKPmjDBgUfBms6tr6JZkTHtfFGcMKsw3eGcmD/sapM=
