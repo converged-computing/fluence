@@ -21,8 +21,8 @@ RUN arch="${TARGETARCH:-$(dpkg --print-architecture)}" \
  && tar -C /usr/local -xzf "go1.26.0.linux-${arch}.tar.gz" && rm "go1.26.0.linux-${arch}.tar.gz"
 ENV PATH=$PATH:/usr/local/go/bin
 
-RUN wget https://github.com/flux-framework/flux-sched/releases/download/v0.52.0/flux-sched-0.52.0.tar.gz && \
-    tar -xzvf flux-sched-0.52.0.tar.gz && mv flux-sched-0.52.0 /opt/flux-sched \
+RUN wget https://github.com/flux-framework/flux-sched/releases/download/v0.56.0/flux-sched-0.56.0.tar.gz && \
+    tar -xzvf flux-sched-0.56.0.tar.gz && mv flux-sched-0.56.0 /opt/flux-sched \
  && cd /opt/flux-sched && export WITH_GO=yes && ./configure --prefix=/usr \
  && mkdir build && cd build && cmake ../ && cd ../ && make -j"$(nproc)" && make install
 ENV FLUX_SCHED_ROOT=/opt/flux-sched

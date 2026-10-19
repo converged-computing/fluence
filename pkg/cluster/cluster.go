@@ -85,12 +85,8 @@ func BuildGraph(nodes []corev1.Node, opts Options) ([]byte, error) {
 		})
 		parents[n.Name] = nodeV
 
-		// A vertex is the unit Fluxion allocates. Anything under a slot is taken
-		// whole, so a node built as one sized vertex per type can host one slot
-		// of a gang. Cores and GPUs are one vertex each, as in Flux. Memory is
-		// chunked the way flux-sched's own graphs and Slurm's memory per CPU
-		// do it, one chunk per core sized in MiB, so a request takes whole
-		// chunks and the vertex count stays at twice the cores.
+		// Fluxion gives a slot whole vertices, so a node needs many. One per
+		// core and GPU, and memory as one chunk per core, like Slurm does it.
 		cores := count(n, corev1.ResourceCPU)
 		for i := int64(0); i < cores; i++ {
 			b.AddChild(nodeV, "core", "core", jgf.Options{})
@@ -140,9 +136,7 @@ func count(n *corev1.Node, name corev1.ResourceName) int64 {
 	return 0
 }
 
-// memoryChunkMiB is the size of one memory chunk, the node's memory split
-// evenly over its cores, in whole MiB rounded down. Zero when there is no
-// memory or no cores to split it over.
+// memoryChunkMiB is the node's memory split over its cores, in whole MiB.
 func memoryChunkMiB(n *corev1.Node, cores int64) int64 {
 	if cores <= 0 {
 		return 0

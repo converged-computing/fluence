@@ -37,7 +37,7 @@ kubectl wait --for=delete pod -l app=gang3 --timeout=60s 2>/dev/null || true
 
 # ---- B) contention: the gang that can't fully fit stays ENTIRELY pending --------
 log "TEST 6B: contention, a gang that cannot fully fit must NOT partially place"
-log "each pod asks for $(free_cores_per_worker) cores, the free cores on a worker, so a gang of two takes both workers"
+log "cpu per pod is $(free_cores_per_worker), the free cores on a worker"
 render_gang_manifest examples/test/e2e/gang/multi-gang-contention.yaml | kubectl apply -f -
 
 # wait until the cluster settles. Three possible outcomes.

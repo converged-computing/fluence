@@ -41,10 +41,7 @@ func TestIsControlPlane(t *testing.T) {
 	}
 }
 
-// A real node is built with one vertex per core and per GPU, and memory as one
-// chunk per core, each chunk the node's memory split over its cores in whole
-// MiB. Fluxion hands a vertex to a slot and never splits it, so a node built
-// as one sized vertex per type could host one slot of a gang.
+// A node is one vertex per core and GPU, and one memory chunk per core.
 func TestBuildGraphOneVertexPerUnit(t *testing.T) {
 	n := corev1.Node{}
 	n.Name = "worker"
