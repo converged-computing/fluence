@@ -101,6 +101,21 @@ def main():
     log(f"resolved provider: {provider.name}")
 
     task = provider.find_my_task(pod_uid, backend, discovery_timeout)
+    if task is None and handoff.scout_exited() and not observe:
+        # a rehearsal, or an application that never submitted. Release the
+        # workers with no session and hold for them as usual
+        log(
+            "the scout finished without submitting a task, releasing the workers with no session"
+        )
+        ungate_pods(
+            wait_for_gated_pods(
+                namespace, gang_group, exclude=pod_name, timeout=ungate_timeout
+            ),
+            "",
+            namespace,
+        )
+        _hold_for_workers(namespace, gang_group, pod_name)
+        sys.exit(0)
     if task is None:
         log("ERROR: could not discover quantum task")
         if not observe:

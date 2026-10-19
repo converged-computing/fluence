@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import time
 
+from fluence import handoff
 from fluence.providers.base import (
     Provider,
     Task,
@@ -176,6 +177,9 @@ class BraketProvider(Provider):
             set()
         )  # regions that returned AccessDenied, skip them after the first hit
         while time.time() < deadline:
+            if handoff.scout_exited():
+                log("[braket] the scout exited without a task, giving up the search")
+                return None
             for region in regions:
                 if region in denied:
                     continue

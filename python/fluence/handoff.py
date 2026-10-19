@@ -67,18 +67,59 @@ def read(path=None) -> "dict | None":
 
 
 def wait(timeout, interval=5, path=None, log=None) -> "dict | None":
-    """Poll for the record until it appears or timeout seconds pass."""
+    """Poll for the record until it appears, the scout exits without one, or
+    timeout seconds pass."""
     deadline = time.time() + timeout
     announced = False
+    exited = os.path.join(os.path.dirname(handoff_path(path)), EXITED_FILENAME)
     while time.time() < deadline:
         record = read(path)
         if record is not None:
             return record
+        if os.path.exists(exited):
+            if log:
+                log("the scout exited without publishing a task")
+            return None
         if log and not announced:
             log(f"waiting for the scout to publish its job id at {handoff_path(path)}")
             announced = True
         time.sleep(interval)
     return None
+
+
+# the interceptor writes this when the scout's interpreter exits with no task
+# published, so a rehearsal with no credentials does not leave the workers
+# gated until the discovery timeout
+EXITED_FILENAME = "scout-exited"
+
+
+def exited_path(path=None) -> str:
+    if path:
+        return path
+    d = os.environ.get(HANDOFF_DIR_ENV, DEFAULT_HANDOFF_DIR)
+    return os.path.join(d, EXITED_FILENAME)
+
+
+def mark_scout_exited(path=None) -> bool:
+    """Write the marker, unless a task was published. Never raises."""
+    try:
+        if read() is not None:
+            return False
+        dest = exited_path(path)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        fd, tmp = tempfile.mkstemp(
+            dir=os.path.dirname(dest), prefix=".exited.", suffix=".tmp"
+        )
+        with os.fdopen(fd, "w") as f:
+            json.dump({"exited_at": time.time()}, f)
+        os.replace(tmp, dest)
+        return True
+    except Exception:
+        return False
+
+
+def scout_exited(path=None) -> bool:
+    return os.path.exists(exited_path(path))
 
 
 # the sidecar writes this once the workers are done and the scout's release waits for it
