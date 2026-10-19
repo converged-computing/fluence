@@ -12,6 +12,7 @@ guard here so a single provider bug cannot affect the user application.
 
 from __future__ import annotations
 
+import atexit
 import os
 
 
@@ -38,5 +39,17 @@ def install() -> None:
             )
 
 
+def _mark_exit() -> None:
+    # tell the sidecar the application ended, so a scout that never submitted
+    # releases its workers instead of leaving them gated
+    try:
+        from fluence import handoff
+
+        handoff.mark_scout_exited()
+    except Exception:
+        pass
+
+
 # Install on import.
 install()
+atexit.register(_mark_exit)

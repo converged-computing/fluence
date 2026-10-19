@@ -51,6 +51,7 @@ jobs:
           python tests/test_fluence.py
           python tests/test_qrmi.py
           python tests/test_hold.py
+          python tests/test_rehearsal.py
 
   build-deploy:
     runs-on: ubuntu-latest
