@@ -9,6 +9,7 @@ what it would need and exits, so the same pod works as a rehearsal.
 
 import argparse
 import os
+import signal
 import sys
 import time
 
@@ -73,21 +74,42 @@ def resource(backend, rtype):
     return QuantumResource(backend, getattr(ResourceType, RESOURCE_TYPES[rtype][0]))
 
 
-def wait_operational(qr, backend, timeout):
-    """The backend object, once it reports itself operational."""
+class Unanswered(Exception):
+    pass
+
+
+def _alarm(signum, frame):
+    raise Unanswered()
+
+
+def ask(fn, seconds):
+    """Call fn and give up after seconds. A request that hangs must not hold
+    the pod, and later a session, with it."""
+    signal.signal(signal.SIGALRM, _alarm)
+    signal.alarm(int(seconds))
+    try:
+        return fn()
+    finally:
+        signal.alarm(0)
+
+
+def wait_operational(qr, backend, timeout, each=60):
+    """The backend object once IBM reports it operational. Asked before a
+    session is opened, so nothing is held while waiting."""
     deadline = time.time() + timeout
     while True:
-        dev = get_backend(qr)
-        status = dev.status()
-        if status.operational:
-            print("backend: ", backend, status.status_msg)
-            return dev
+        try:
+            dev = ask(lambda: get_backend(qr), each)
+            status = ask(dev.status, each)
+            why = status.status_msg
+            if status.operational:
+                print("ready:   ", backend, why)
+                return dev
+        except Unanswered:
+            why = "no answer from IBM in {}s".format(each)
         if time.time() >= deadline:
-            sys.exit(
-                "{} not operational after {}s: {}".format(
-                    backend, timeout, status.status_msg
-                )
-            )
+            sys.exit("{} not operational after {}s: {}".format(backend, timeout, why))
+        print("waiting: ", backend, why)
         time.sleep(5)
 
 
@@ -148,6 +170,7 @@ def main():
         )
         return
 
+    qr = resource(backend, rtype)
     session = os.environ.get("FLUENCE_QUANTUM_SESSION_ID")
     if os.environ.get("FLUENCE_COORDINATION_ROLE") == "worker":
         # a worker submits into the scout's session instead of acquiring one
@@ -160,7 +183,6 @@ def main():
         section("circuit in the scout's session")
         print("session: ", session)
         os.environ[backend + "_QRMI_JOB_ACQUISITION_TOKEN"] = session
-        qr = resource(backend, rtype)
         run(
             qr,
             wait_operational(qr, backend, args.ready_timeout),
@@ -170,17 +192,13 @@ def main():
         return
 
     section("session and circuit, through QRMI")
-    qr = resource(backend, rtype)
+    # is the device usable before anything is held
+    dev = wait_operational(qr, backend, args.ready_timeout)
     lock = qr.acquire()
     print("session: ", lock)
     os.environ[backend + "_QRMI_JOB_ACQUISITION_TOKEN"] = str(lock)
     try:
-        run(
-            qr,
-            wait_operational(qr, backend, args.ready_timeout),
-            args.qubits,
-            args.shots,
-        )
+        run(qr, dev, args.qubits, args.shots)
     finally:
         qr.release(lock)
         print("released:", lock)

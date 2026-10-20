@@ -23,6 +23,6 @@ COPY . /app
 # container has NONE of these, it patches whatever SDK the user already has.
 RUN pip install --no-cache-dir ".[all]" && ln -s $(which python3) /usr/bin/python
 
-ENV FLUENCE_TASK_DISCOVERY_TIMEOUT=300000
+ENV FLUENCE_TASK_DISCOVERY_TIMEOUT=600
 ENV FLUENCE_POLL_INTERVAL=30
 CMD ["fluence-sidecar"]

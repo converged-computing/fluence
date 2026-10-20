@@ -218,10 +218,36 @@ def test_scout_release_gives_up_after_timeout():
         QR = _fake_qrmi(released)
         try:
             QRMIProvider().install_interceptor("uid")
+            qr = QR()
+            qr.task_start()
             t0 = time.time()
-            QR().release("tok")
+            qr.release("tok")
             assert released == ["tok"]
             assert time.time() - t0 >= 1
+        finally:
+            _clean()
+
+
+def test_scout_that_never_submitted_releases_at_once():
+    """A scout that acquired and then failed before submitting has no workers
+    in its session. Its release must not wait for them, or the session stays
+    open until the hold times out, which by default used to be never."""
+    from fluence.providers.qrmi import QRMIProvider
+
+    released = []
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["FLUENCE_HANDOFF_DIR"] = d
+        os.environ["FLUENCE_COORDINATION_ROLE"] = "scout"
+        os.environ.pop("FLUENCE_SESSION_HOLD_TIMEOUT", None)
+        QR = _fake_qrmi(released)
+        try:
+            QRMIProvider().install_interceptor("uid")
+            qr = QR()
+            lock = qr.acquire()
+            t0 = time.time()
+            qr.release(lock)
+            assert released == [lock]
+            assert time.time() - t0 < 1
         finally:
             _clean()
 
