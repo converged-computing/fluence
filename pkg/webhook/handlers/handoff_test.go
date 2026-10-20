@@ -53,14 +53,15 @@ func opsMountHandoffWritable(ops []spec.Op) bool {
 	return false
 }
 
-// sidecarMountsHandoffReadOnly finds the sidecar container in the ops and checks its mount
-func sidecarMountsHandoffReadOnly(ops []spec.Op) bool {
+// sidecarMountsHandoffWritable finds the sidecar container in the ops and checks
+// its mount is writable, since it writes the workers done marker
+func sidecarMountsHandoffWritable(ops []spec.Op) bool {
 	check := func(c corev1.Container) bool {
 		if c.Name != SidecarContainerName {
 			return false
 		}
 		for _, m := range c.VolumeMounts {
-			if m.Name == HandoffVolumeName && m.ReadOnly {
+			if m.Name == HandoffVolumeName && !m.ReadOnly {
 				return true
 			}
 		}
@@ -133,7 +134,7 @@ func TestWorkerGetsNoHandoff(t *testing.T) {
 	}
 }
 
-func TestScoutSidecarMountsHandoffReadOnly(t *testing.T) {
+func TestScoutSidecarMountsHandoffWritable(t *testing.T) {
 	ns, group, job := "default", "qgang2", "qgang2-job"
 	m := handoffJobMutator(ns, job, 2)
 	ops := m.Mutate(context.Background(), sharedQPUPod(ns, group, "qgang2-0", job, "0"))
@@ -143,8 +144,8 @@ func TestScoutSidecarMountsHandoffReadOnly(t *testing.T) {
 	if !opsMountHandoffWritable(ops) {
 		t.Error("the scout workload should mount the handoff volume writable")
 	}
-	if !sidecarMountsHandoffReadOnly(ops) {
-		t.Error("the scout sidecar should mount the handoff volume read only")
+	if !sidecarMountsHandoffWritable(ops) {
+		t.Error("the scout sidecar should mount the handoff volume writable, it writes the workers done marker")
 	}
 	if !contains(opEnvNames(ops), HandoffDirEnv) {
 		t.Errorf("the scout should get %s, got %v", HandoffDirEnv, opEnvNames(ops))

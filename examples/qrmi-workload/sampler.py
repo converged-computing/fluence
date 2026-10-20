@@ -45,7 +45,7 @@ def print_environment():
 def backend_from_fluence():
     backend = os.environ.get("FLUXION_BACKEND")
     if not backend:
-        sys.exit("no FLUXION_BACKEND, this pod was not placed by fluence")
+        sys.exit("no FLUXION_BACKEND in the environment")
     rtype = os.environ.get("FLUXION_QRMI_TYPE", "qiskit-runtime-service")
     if rtype not in RESOURCE_TYPES:
         sys.exit("unsupported QRMI type {} for {}".format(rtype, backend))

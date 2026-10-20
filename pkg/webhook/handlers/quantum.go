@@ -514,7 +514,8 @@ const (
 
 	// HandoffVolumeName / HandoffMountPath / HandoffDirEnv. The shared emptyDir
 	// a submitting pod's interceptor writes its task id and session to, and
-	// its sidecar reads (python/fluence/handoff.py). Workers never get it.
+	// its sidecar reads, then writes the workers done marker to
+	// (python/fluence/handoff.py). Workers never get it.
 	HandoffVolumeName = "fluence-handoff"
 	HandoffMountPath  = "/opt/fluence-handoff"
 	HandoffDirEnv     = "FLUENCE_HANDOFF_DIR"
@@ -702,7 +703,7 @@ func sidecarContainerOps(m webhook.MutatorAPI, pod *corev1.Pod, observe bool, ex
 	var mounts []corev1.VolumeMount
 	for _, v := range pod.Spec.Volumes {
 		if v.Name == HandoffVolumeName {
-			mounts = append(mounts, corev1.VolumeMount{Name: HandoffVolumeName, MountPath: HandoffMountPath, ReadOnly: true})
+			mounts = append(mounts, corev1.VolumeMount{Name: HandoffVolumeName, MountPath: HandoffMountPath})
 		}
 	}
 	sidecar := corev1.Container{

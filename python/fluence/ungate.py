@@ -18,6 +18,11 @@ from fluence.providers.base import log
 
 JOB_ID_ANNOTATION = "fluence.flux-framework.org/quantum-job-id"
 SESSION_ID_ANNOTATION = "fluence.flux-framework.org/quantum-session-id"
+# the backend fluence placed the scout on, and its attributes. The worker's
+# FLUXION_* variables read these through the downward API
+BACKEND_ANNOTATION = "fluence.flux-framework.org/backend"
+ATTR_ANNOTATION_PREFIX = "fluence.flux-framework.org/attr-"
+ENV_PREFIX = "FLUXION_"
 QUANTUM_GATE_NAME = "quantum.braket/ready"
 PRIORITY_CLASS = "fluence-quantum-classical"
 
@@ -29,12 +34,26 @@ def kubectl(args):
     return result.stdout.strip()
 
 
-def ungate_pods(gated_pods, job_id, namespace, session_id=None):
+def placement_from_env():
+    """The backend and attributes the webhook gave this pod, from FLUXION_*."""
+    backend = os.environ.get(ENV_PREFIX + "BACKEND", "")
+    attrs = {
+        k[len(ENV_PREFIX) :].lower(): v
+        for k, v in os.environ.items()
+        if k.startswith(ENV_PREFIX) and k != ENV_PREFIX + "BACKEND" and v
+    }
+    return backend, attrs
+
+
+def ungate_pods(
+    gated_pods, job_id, namespace, session_id=None, backend=None, attributes=None
+):
     """
     For each gated worker pod.
-      1. Stamp the job id annotation so the worker can locate the quantum
-         result, and the session id when the scout has one, so the worker
-         can submit into the same session.
+      1. Stamp the backend and its attributes, so the worker's FLUXION_*
+         variables read the same values the scout got. Then the job id, so
+         the worker can locate the quantum result, and the session id when
+         the scout has one, so the worker can submit into the same session.
       2. Remove the scheduling gate so the pod can be scheduled.
 
     Note that priorityClassName is NOT set here, it is immutable after pod creation
@@ -53,6 +72,10 @@ def ungate_pods(gated_pods, job_id, namespace, session_id=None):
         log(f"ungating pod: {pod_name}")
 
         notes = []
+        if backend:
+            notes.append(f"{BACKEND_ANNOTATION}={backend}")
+        for key, value in sorted((attributes or {}).items()):
+            notes.append(f"{ATTR_ANNOTATION_PREFIX}{key}={value}")
         if job_id:
             notes.append(f"{JOB_ID_ANNOTATION}={job_id}")
         if session_id:
@@ -74,7 +97,7 @@ def ungate_pods(gated_pods, job_id, namespace, session_id=None):
             except RuntimeError as e:
                 log(f"  WARNING: could not annotate {pod_name}: {e}")
         else:
-            log(f"  WARNING: no job id to patch onto {pod_name}")
+            log(f"  nothing to stamp onto {pod_name}")
 
         patch = json.dumps(
             [
