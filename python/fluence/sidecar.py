@@ -14,6 +14,7 @@ Environment, all set by the webhook
   FLUENCE_OBSERVE                 true for observe mode
   FLUXION_BACKEND                 the backend the scheduler chose
   FLUENCE_TASK_DISCOVERY_TIMEOUT  seconds to wait for the task (default 300)
+  FLUENCE_WORKER_TIMEOUT          seconds to hold for the workers (default 3600)
   FLUENCE_POLL_INTERVAL           seconds between polls (default 30)
   FLUENCE_UNGATE_POSITION         ungate at this queue position or closer (default 1)
   FLUENCE_WORKER_TIMEOUT          seconds to wait for the workers after ungating,
@@ -65,7 +66,7 @@ def _hold_for_workers(namespace, gang_group, pod_name):
     """Keep this pod, and with it the scout's session and its allocation,
     until the worker group has finished. Then write the marker the scout's
     release() waits for."""
-    timeout = int(os.environ.get("FLUENCE_WORKER_TIMEOUT", 0))
+    timeout = int(os.environ.get("FLUENCE_WORKER_TIMEOUT", 3600))
     log("holding until the worker group finishes")
     wait_for_pods_done(namespace, gang_group, exclude=pod_name, timeout=timeout)
     if handoff.mark_workers_done():

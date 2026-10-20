@@ -114,7 +114,7 @@ class QRMIProvider(Provider):
             return False
 
         backend_hint = os.environ.get("FLUXION_BACKEND", "")
-        published = {"session_id": None, "tier": None}
+        published = {"session_id": None, "tier": None, "job_id": None}
 
         # acquire records the session and tier and otherwise behaves as before
         if hasattr(QuantumResource, "acquire") and not getattr(
@@ -145,6 +145,7 @@ class QRMIProvider(Provider):
 
             def patched_task_start(self, *args, **kwargs):
                 job_id = original_task_start(self, *args, **kwargs)
+                published["job_id"] = str(job_id)
                 try:
                     handoff.publish(
                         job_id=str(job_id),
@@ -171,11 +172,19 @@ class QRMIProvider(Provider):
             original_release = QuantumResource.release
 
             def patched_release(self, *args, **kwargs):
-                if os.environ.get("FLUENCE_COORDINATION_ROLE") == "scout":
+                # only a scout that published a task has workers using its
+                # session. A scout that failed before submitting releases at
+                # once, or the session would stay open forever
+                if (
+                    os.environ.get("FLUENCE_COORDINATION_ROLE") == "scout"
+                    and published["job_id"]
+                ):
                     timeout = int(
-                        os.environ.get("FLUENCE_SESSION_HOLD_TIMEOUT", "0") or 0
+                        os.environ.get("FLUENCE_SESSION_HOLD_TIMEOUT", "3600") or 3600
                     )
-                    log("[qrmi] holding the session until the worker group is done")
+                    log(
+                        f"[qrmi] holding the session until the worker group is done, {timeout}s at most"
+                    )
                     if handoff.wait_workers_done(timeout, log=log):
                         log("[qrmi] worker group done, releasing the session")
                     else:
