@@ -95,8 +95,7 @@ Admission control is a check that asks "Can we support a new hybrid queue?" wher
 
 ### What an IBM session costs
 
-IBM bills a dedicated session for wall clock time from the moment its first job starts until the session is closed or has sat idle for a minute. This includes idle time. In a shared gang there is always idle time between the scout's circuit finishing and the workers' circuits arriving, while the worker pods schedule,
-start and submit, and again after the last worker finishes before the scout releases. With dedicated mode that gap is billed at full rate and can come to about a minute per run. A batch session is billed only for time on the hardware, so the gap costs nothing. Thus, we choose to open batch sessions unless `FLUENCE_QRMI_SESSION_MODE=dedicated` is set. Use dedicated only when exclusive access is what you are measuring, and set a cost limit on the IBM instance first.
+IBM bills a dedicated session for wall clock time from the moment its first job starts until the session is closed or has sat idle for a minute. This includes idle time. In a shared gang there is always idle time between the scout's circuit finishing and the workers' circuits arriving, while the worker pods schedule, start and submit, and again after the last worker finishes before the scout releases. With dedicated mode that gap is billed at full rate and can come to about a minute per run. A batch session is billed only for time on the hardware, so the gap costs nothing. Thus, we choose to open batch sessions unless `FLUENCE_QRMI_SESSION_MODE=dedicated` is set. Use dedicated only when exclusive access is what you are measuring, and set a cost limit on the IBM instance first.
 
 The scheduler logs the graph when it starts, and for every match it logs the jobspec it sent, the allocation it got back, and how it read it, all prefixed with [fluence]. The webhook logs its environment contract at startup. You can look at logs to debug.
 
