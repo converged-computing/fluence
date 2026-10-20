@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """A QRMI workload for a pod that fluence placed.
 
-fluence chose the backend and the webhook put its name in FLUXION_BACKEND.
+fluence chooses the backend and the webhook forwards via FLUXION_BACKEND.
 This acquires a session on it, runs a Bell circuit through the QRMI sampler,
 prints the counts, and releases the session. Without credentials it prints
 what it would need and exits, so the same pod works as a rehearsal.
-
-The session is opened in batch mode unless FLUENCE_QRMI_SESSION_MODE says
-dedicated. IBM bills a dedicated session for wall clock time from its first
-job until it closes or sits idle for a minute, so the gap between the scout's
-circuit and the workers' circuits is billed at full rate. A batch session is
-billed only for time on the hardware. Dedicated is for measuring exclusive
-access on purpose, and costs about a minute of idle time per run.
+The session is opened in batch mode unless FLUENCE_QRMI_SESSION_MODE is set
+to dedicated.
 """
 
 import argparse
