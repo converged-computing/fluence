@@ -15,7 +15,11 @@ Environment, all set by the webhook
   FLUXION_BACKEND                 the backend the scheduler chose
   FLUENCE_TASK_DISCOVERY_TIMEOUT  seconds to wait for the task (default 300)
   FLUENCE_WORKER_TIMEOUT          seconds to hold for the workers (default 3600)
-  FLUENCE_POLL_INTERVAL           seconds between polls (default 30)
+  FLUENCE_POLL_INTERVAL           seconds between polls (default 2). A dedicated
+                                  session bills the time between the scout's
+                                  circuit and the workers' circuits, and half
+                                  an interval of that is this poll. Each poll
+                                  is one status call to the vendor
   FLUENCE_UNGATE_POSITION         ungate at this queue position or closer (default 1)
   FLUENCE_WORKER_TIMEOUT          seconds to wait for the workers after ungating,
                                   0 waits without limit (default 0)
@@ -45,6 +49,13 @@ def _poll(provider, task, poll_interval, ungate, position=1):
     mode = "gang" if ungate else "observe-only"
     log(f"{mode} mode: polling queue position, ungating at {position} or closer")
     last = object()
+    # A vendor call can fail for a while and recover, so those are retried.
+    # A bug in our own code fails the same way every time and never
+    # recovers, and while it retries a session that already started keeps
+    # billing with nothing using it. So programming errors stop the poll at
+    # once, and so does any error that keeps happening.
+    max_errors = int(os.environ.get("FLUENCE_POLL_MAX_ERRORS", 10))
+    errors = 0
     while True:
         try:
             if provider.task_failed(task):
@@ -57,8 +68,18 @@ def _poll(provider, task, poll_interval, ungate, position=1):
             if pos != last:
                 log(f"queue position: {pos}")
                 last = pos
+            errors = 0
+        except (TypeError, AttributeError, NameError) as e:
+            log(f"ERROR: poll failed with a programming error, not retrying: {e!r}")
+            return False
         except Exception as e:
-            log(f"poll error (will retry): {e}")
+            errors += 1
+            log(f"poll error {errors} of {max_errors} (will retry): {e}")
+            if errors >= max_errors:
+                log(
+                    "ERROR: poll kept failing, giving up so the session is not left idle"
+                )
+                return False
         time.sleep(poll_interval)
 
 
@@ -84,7 +105,7 @@ def main():
     backend = os.environ.get("FLUXION_BACKEND", "")
     observe = os.environ.get("FLUENCE_OBSERVE", "").lower() == "true"
     discovery_timeout = int(os.environ.get("FLUENCE_TASK_DISCOVERY_TIMEOUT", 300))
-    poll_interval = int(os.environ.get("FLUENCE_POLL_INTERVAL", 30))
+    poll_interval = int(os.environ.get("FLUENCE_POLL_INTERVAL", 2))
     ungate_timeout = int(os.environ.get("FLUENCE_UNGATE_TIMEOUT", 120))
     ungate_at = ungate_position()
 
@@ -147,7 +168,9 @@ def main():
         sys.exit(0 if ready else 1)
 
     if not ready:
-        # fail open so the workers are not stranded. They find no result and exit
+        # fail open so the workers are not stranded. The session goes with
+        # them: the scout is still holding it, and workers that ran outside
+        # it would leave it open and idle, which a dedicated session bills
         log(
             "ERROR: ungating anyway so the gang is not stranded, but the task "
             "produced no result"
@@ -159,6 +182,7 @@ def main():
             ),
             job_id,
             namespace,
+            session_id=provider.session_id(task),
             backend=placed_backend,
             attributes=placed_attrs,
         )

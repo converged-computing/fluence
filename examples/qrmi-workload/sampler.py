@@ -5,6 +5,13 @@ fluence chose the backend and the webhook put its name in FLUXION_BACKEND.
 This acquires a session on it, runs a Bell circuit through the QRMI sampler,
 prints the counts, and releases the session. Without credentials it prints
 what it would need and exits, so the same pod works as a rehearsal.
+
+The session is opened in batch mode unless FLUENCE_QRMI_SESSION_MODE says
+dedicated. IBM bills a dedicated session for wall clock time from its first
+job until it closes or sits idle for a minute, so the gap between the scout's
+circuit and the workers' circuits is billed at full rate. A batch session is
+billed only for time on the hardware. Dedicated is for measuring exclusive
+access on purpose, and costs about a minute of idle time per run.
 """
 
 import argparse
@@ -54,6 +61,24 @@ def backend_from_fluence():
     print("backend: ", backend)
     print("type:    ", rtype)
     return backend, rtype
+
+
+SESSION_MODES = ("batch", "dedicated")
+
+
+def session_mode(backend, rtype):
+    """Set the QRMI session mode for this backend, batch unless asked for
+    dedicated, and return it. An explicit <backend>_QRMI_IBM_QRS_SESSION_MODE
+    in the environment wins."""
+    name = backend + RESOURCE_TYPES[rtype][1] + "_SESSION_MODE"
+    mode = (
+        os.environ.get(name) or os.environ.get("FLUENCE_QRMI_SESSION_MODE") or "batch"
+    )
+    mode = mode.lower()
+    if mode not in SESSION_MODES:
+        sys.exit("session mode must be batch or dedicated, not {}".format(mode))
+    os.environ[name] = mode
+    return mode
 
 
 def missing_credentials(backend, rtype):
@@ -162,6 +187,16 @@ def main():
 
     print_environment()
     backend, rtype = backend_from_fluence()
+    mode = session_mode(backend, rtype)
+    print(
+        "mode:    ",
+        mode,
+        (
+            "(billed only for time on the hardware)"
+            if mode == "batch"
+            else "(billed for wall clock time while the session is active, idle gaps included)"
+        ),
+    )
     missing = missing_credentials(backend, rtype)
     if missing:
         print("missing: ", ", ".join(missing))
