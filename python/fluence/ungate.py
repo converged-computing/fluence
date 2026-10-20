@@ -207,7 +207,7 @@ def pods_done(namespace, group, exclude=""):
     )
 
 
-def wait_for_pods_done(namespace, group, exclude="", timeout=0, interval=10):
+def wait_for_pods_done(namespace, group, exclude="", timeout=0, interval=2):
     """Wait until the other pods in the group have all finished. A timeout of
     zero waits without limit. Returns True when they are done."""
     if not group:

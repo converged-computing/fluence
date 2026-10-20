@@ -252,7 +252,10 @@ class QRMIProvider(Provider):
             log(f"[qrmi] task_status error (will retry): {e}")
             return None
 
-    def is_ready_to_ungate(self, task: QRMITask) -> bool:
+    def is_ready_to_ungate(self, task: QRMITask, position=None) -> bool:
+        # QRMI reports no queue position, so position is accepted to match the
+        # interface and the sidecar's call, and ignored. Ready means the task
+        # has left the queue.
         name = self._status(task)
         return name in _READY_STATES if name else False
 

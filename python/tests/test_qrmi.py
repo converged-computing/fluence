@@ -395,3 +395,114 @@ if __name__ == "__main__":
             print(f"FAIL {fn.__name__}: {e}")
     print(f"\n{len(fns) - failed}/{len(fns)} passed")
     sys.exit(1 if failed else 0)
+
+
+def test_ungate_takes_the_position_the_sidecar_passes():
+    """The sidecar calls is_ready_to_ungate(task, position) for every provider.
+    QRMI has no position, but it must accept the argument, or every poll
+    raises and the gang is never ungated."""
+    import inspect
+
+    from fluence.providers.base import Provider
+    from fluence.providers import qrmi as q
+
+    sig = inspect.signature(q.QRMIProvider.is_ready_to_ungate)
+    assert "position" in sig.parameters
+    base = inspect.signature(Provider.is_ready_to_ungate)
+    assert list(sig.parameters) == list(base.parameters)
+
+
+def test_poll_stops_on_a_programming_error(monkeypatch):
+    """A bug in a provider raises the same error every poll. Retrying it
+    forever left a started session idle and billing, so it must stop."""
+    from fluence import sidecar
+
+    monkeypatch.setattr(sidecar.time, "sleep", lambda s: None)
+
+    class Broken:
+        def task_failed(self, task):
+            return False
+
+        def is_ready_to_ungate(self, task):  # the old, wrong signature
+            return True
+
+        def queue_position(self, task):
+            return None
+
+    assert sidecar._poll(Broken(), object(), 0, ungate=True) is False
+
+
+def test_poll_gives_up_after_repeated_vendor_errors(monkeypatch):
+    from fluence import sidecar
+
+    monkeypatch.setattr(sidecar.time, "sleep", lambda s: None)
+    monkeypatch.setenv("FLUENCE_POLL_MAX_ERRORS", "3")
+    calls = {"n": 0}
+
+    class Flaky:
+        def task_failed(self, task):
+            calls["n"] += 1
+            raise RuntimeError("503 from the vendor")
+
+    assert sidecar._poll(Flaky(), object(), 0, ungate=True) is False
+    assert calls["n"] == 3
+
+
+def test_poll_retries_a_vendor_error_then_succeeds(monkeypatch):
+    from fluence import sidecar
+
+    monkeypatch.setattr(sidecar.time, "sleep", lambda s: None)
+    answers = iter([RuntimeError("timeout"), False, True])
+
+    class Recovering:
+        def task_failed(self, task):
+            return False
+
+        def is_ready_to_ungate(self, task, position=None):
+            a = next(answers)
+            if isinstance(a, Exception):
+                raise a
+            return a
+
+        def queue_position(self, task):
+            return 1
+
+    assert sidecar._poll(Recovering(), object(), 0, ungate=True) is True
+
+
+def test_fail_open_hands_the_workers_the_session(monkeypatch):
+    """When the poll fails the workers are released anyway. They must get
+    the session id, or they run outside a session the scout still holds."""
+    from fluence import sidecar
+
+    calls = {}
+    monkeypatch.setattr(sidecar, "_poll", lambda *a, **k: False)
+    monkeypatch.setattr(sidecar, "_hold_for_workers", lambda *a, **k: None)
+    monkeypatch.setattr(sidecar, "gated_pods_from_env", lambda: ["worker-0"])
+    monkeypatch.setattr(
+        sidecar,
+        "ungate_pods",
+        lambda pods, job_id, ns, **kw: calls.update(kw) or len(pods),
+    )
+    monkeypatch.setattr(sidecar, "placement_from_env", lambda: ("ibm_x", {}))
+    monkeypatch.setattr(sidecar, "namespace_from_env", lambda: "default")
+
+    class P:
+        name = "fake"
+
+        def find_my_task(self, uid, backend, timeout):
+            return "task"
+
+        def job_id(self, task):
+            return "job-1"
+
+        def session_id(self, task):
+            return "sess-1"
+
+    monkeypatch.setattr(sidecar, "resolve_from_env", lambda: P())
+    monkeypatch.setenv("FLUENCE_OBSERVE", "false")
+    try:
+        sidecar.main()
+    except SystemExit as e:
+        assert e.code == 1
+    assert calls.get("session_id") == "sess-1"

@@ -87,8 +87,16 @@ Admission control is a check that asks "Can we support a new hybrid queue?" wher
 | `FLUENCE_RESOURCE_CAPACITY` | device plugin | per node ceiling per type, default 1000 |
 | `FLUENCE_ADMISSION` | webhook | off turns admission control off, default on, read at startup |
 | `FLUENCE_RESERVE_CORES` | webhook | cores held back from the admission budget, default 0 |
-| `FLUENCE_WORKER_TIMEOUT` | sidecar | seconds to wait for the workers after ungating, 0 waits forever, default 0 |
-| `FLUENCE_SESSION_HOLD_TIMEOUT` | scout container | seconds the scout's release waits for the workers, 0 waits forever, default 0 |
+| `FLUENCE_WORKER_TIMEOUT` | sidecar | seconds to wait for the workers after ungating, 0 waits forever, default 3600 |
+| `FLUENCE_SESSION_HOLD_TIMEOUT` | scout container | seconds the scout's release waits for the workers, 0 waits forever, default 3600 |
+| `FLUENCE_POLL_INTERVAL` | sidecar | seconds between checks on the scout's task, default 2. Each check is one status call to the vendor |
+| `FLUENCE_POLL_MAX_ERRORS` | sidecar | vendor errors in a row before the sidecar gives up and releases the workers, default 10. A programming error stops it at once |
+| `FLUENCE_QRMI_SESSION_MODE` | workload container | batch or dedicated for the IBM session the scout opens, default batch |
+
+### What an IBM session costs
+
+IBM bills a dedicated session for wall clock time from the moment its first job starts until the session is closed or has sat idle for a minute. This includes idle time. In a shared gang there is always idle time between the scout's circuit finishing and the workers' circuits arriving, while the worker pods schedule,
+start and submit, and again after the last worker finishes before the scout releases. With dedicated mode that gap is billed at full rate and can come to about a minute per run. A batch session is billed only for time on the hardware, so the gap costs nothing. Thus, we choose to open batch sessions unless `FLUENCE_QRMI_SESSION_MODE=dedicated` is set. Use dedicated only when exclusive access is what you are measuring, and set a cost limit on the IBM instance first.
 
 The scheduler logs the graph when it starts, and for every match it logs the jobspec it sent, the allocation it got back, and how it read it, all prefixed with [fluence]. The webhook logs its environment contract at startup. You can look at logs to debug.
 
