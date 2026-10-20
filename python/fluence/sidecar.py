@@ -30,6 +30,7 @@ from fluence.providers import resolve_from_env
 from fluence.providers.base import log, ungate_position
 from fluence import handoff
 from fluence.ungate import (
+    placement_from_env,
     ungate_pods,
     gated_pods_from_env,
     namespace_from_env,
@@ -94,6 +95,7 @@ def main():
         f"gang_group={gang_group} backend={backend} observe={observe}"
     )
 
+    placed_backend, placed_attrs = placement_from_env()
     provider = resolve_from_env()
     if provider is None:
         log("ERROR: could not resolve a quantum provider from the backend")
@@ -113,6 +115,8 @@ def main():
             ),
             "",
             namespace,
+            backend=placed_backend,
+            attributes=placed_attrs,
         )
         _hold_for_workers(namespace, gang_group, pod_name)
         sys.exit(0)
@@ -126,6 +130,8 @@ def main():
                 ),
                 "",
                 namespace,
+                backend=placed_backend,
+                attributes=placed_attrs,
             )
             _hold_for_workers(namespace, gang_group, pod_name)
         sys.exit(1)
@@ -152,6 +158,8 @@ def main():
             ),
             job_id,
             namespace,
+            backend=placed_backend,
+            attributes=placed_attrs,
         )
         _hold_for_workers(namespace, gang_group, pod_name)
         sys.exit(1)
@@ -162,7 +170,14 @@ def main():
     )
     log(f"ungating {len(gated_pods)} gang pod(s): {gated_pods}")
     session_id = provider.session_id(task)
-    n_ok = ungate_pods(gated_pods, job_id, namespace, session_id=session_id)
+    n_ok = ungate_pods(
+        gated_pods,
+        job_id,
+        namespace,
+        session_id=session_id,
+        backend=placed_backend,
+        attributes=placed_attrs,
+    )
     if n_ok == len(gated_pods):
         log(f"done, {n_ok} gang pod(s) ungated")
     else:

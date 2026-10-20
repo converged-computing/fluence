@@ -89,6 +89,50 @@ def test_ungate_stamps_job_id_and_session():
     assert any(c[0] == "patch" for c in calls)
 
 
+def test_ungate_stamps_backend_and_attributes():
+    from fluence import ungate
+
+    calls = []
+    orig = ungate.kubectl
+    ungate.kubectl = lambda args: calls.append(args) or ""
+    try:
+        ungate.ungate_pods(
+            ["w-1"],
+            "",
+            "ns",
+            backend="ibm_fez",
+            attributes={"vendor": "ibm", "qrmi_type": "qiskit-runtime-service"},
+        )
+    finally:
+        ungate.kubectl = orig
+    annotate = [c for c in calls if c[0] == "annotate"][0]
+    assert f"{ungate.BACKEND_ANNOTATION}=ibm_fez" in annotate
+    assert f"{ungate.ATTR_ANNOTATION_PREFIX}vendor=ibm" in annotate
+    assert (
+        f"{ungate.ATTR_ANNOTATION_PREFIX}qrmi_type=qiskit-runtime-service" in annotate
+    )
+    assert not any(ungate.JOB_ID_ANNOTATION in a for a in annotate)
+
+
+def test_placement_from_env_reads_fluxion_variables():
+    from fluence import ungate
+
+    os.environ.update(
+        {
+            "FLUXION_BACKEND": "ibm_fez",
+            "FLUXION_VENDOR": "ibm",
+            "FLUXION_QRMI_TYPE": "qiskit-runtime-service",
+        }
+    )
+    try:
+        backend, attrs = ungate.placement_from_env()
+    finally:
+        for k in ("FLUXION_BACKEND", "FLUXION_VENDOR", "FLUXION_QRMI_TYPE"):
+            os.environ.pop(k, None)
+    assert backend == "ibm_fez"
+    assert attrs == {"vendor": "ibm", "qrmi_type": "qiskit-runtime-service"}
+
+
 def test_ungate_without_session_stamps_only_job_id():
     from fluence import ungate
 
