@@ -88,16 +88,10 @@ def _status_name(status) -> str:
     return s.rsplit(".", 1)[-1].upper()
 
 
-# the task has left the queue or already finished
-_READY_STATES = {
-    "RUNNING",
-    "COMPLETED",
-    "COMPLETE",
-    "DONE",
-    "FAILED",
-    "CANCELLED",
-    "CANCELED",
-}
+# the task is running on the device, or ran to the end
+_READY_STATES = {"RUNNING", "COMPLETED", "COMPLETE", "DONE"}
+# the task ended with nothing to use
+_FAILED_STATES = {"FAILED", "CANCELLED", "CANCELED"}
 
 
 class QRMIProvider(Provider):
@@ -255,9 +249,14 @@ class QRMIProvider(Provider):
     def is_ready_to_ungate(self, task: QRMITask, position=None) -> bool:
         # QRMI reports no queue position, so position is accepted to match the
         # interface and the sidecar's call, and ignored. Ready means the task
-        # has left the queue.
+        # is running on the device or has completed. Failed and cancelled are
+        # not ready, task_failed reports them.
         name = self._status(task)
         return name in _READY_STATES if name else False
+
+    def task_failed(self, task: QRMITask) -> bool:
+        name = self._status(task)
+        return name in _FAILED_STATES if name else False
 
     def queue_position(self, task: QRMITask):
         # QRMI has no queue position, so report 1 once the task runs and None before

@@ -63,7 +63,7 @@ The quantum handler also enforces admission control, which is always on unless t
 5. When the task is next in line, or already running, annotate each worker with the job id and the session, then remove the gate.
 6. Wait for the workers to reach Succeeded or Failed, write the done marker so the scout's release proceeds, and exit.
 
-If the task is never found or fails, the sidecar ungates anyway so the workers are not stranded, and exits non zero so it shows.
+The sidecar ungates the workers only when the scout's task is running or has completed. If the task fails, is cancelled, or is never found, the workers stay gated, the sidecar tells the scout to release its session at once, and it exits non zero so it shows. Delete the job to clear the gated workers. The one exception is a rehearsal, where the scout exits without submitting anything, for example with no credentials. Then the workers are released with no session.
 
 ## Priority and preemption
 

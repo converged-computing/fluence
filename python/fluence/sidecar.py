@@ -50,10 +50,6 @@ def _poll(provider, task, poll_interval, ungate, position=1):
     log(f"{mode} mode: polling queue position, ungating at {position} or closer")
     last = object()
     # A vendor call can fail for a while and recover, so those are retried.
-    # A bug in our own code fails the same way every time and never
-    # recovers, and while it retries a session that already started keeps
-    # billing with nothing using it. So programming errors stop the poll at
-    # once, and so does any error that keeps happening.
     max_errors = int(os.environ.get("FLUENCE_POLL_MAX_ERRORS", 10))
     errors = 0
     while True:
@@ -143,19 +139,13 @@ def main():
         _hold_for_workers(namespace, gang_group, pod_name)
         sys.exit(0)
     if task is None:
-        log("ERROR: could not discover quantum task")
-        if not observe:
-            # fail open so the workers are not stranded
-            ungate_pods(
-                wait_for_gated_pods(
-                    namespace, gang_group, exclude=pod_name, timeout=ungate_timeout
-                ),
-                "",
-                namespace,
-                backend=placed_backend,
-                attributes=placed_attrs,
-            )
-            _hold_for_workers(namespace, gang_group, pod_name)
+        # The scout neither published a task nor exited, so something is
+        # wrong with it. Releasing the workers would start them on a run that
+        # has no quantum task, so they stay gated. Delete the job to clear them.
+        log(
+            "ERROR: could not discover the quantum task. The workers stay gated, "
+            "delete the job to clear them"
+        )
         sys.exit(1)
 
     job_id = provider.job_id(task)
@@ -168,25 +158,16 @@ def main():
         sys.exit(0 if ready else 1)
 
     if not ready:
-        # fail open so the workers are not stranded. The session goes with
-        # them: the scout is still holding it, and workers that ran outside
-        # it would leave it open and idle, which a dedicated session bills
+        # The task failed, was cancelled, or could not be followed. There is
+        # nothing for the workers to use, so they stay gated, and the scout is
+        # told to stop holding its session so it closes now instead of when
+        # the hold times out. Delete the job to clear the workers.
         log(
-            "ERROR: ungating anyway so the gang is not stranded, but the task "
-            "produced no result"
+            "ERROR: the quantum task is not usable. The workers stay gated and "
+            "the scout releases its session now. Delete the job to clear them"
         )
-        ungate_pods(
-            gated_pods_from_env()
-            or wait_for_gated_pods(
-                namespace, gang_group, exclude=pod_name, timeout=ungate_timeout
-            ),
-            job_id,
-            namespace,
-            session_id=provider.session_id(task),
-            backend=placed_backend,
-            attributes=placed_attrs,
-        )
-        _hold_for_workers(namespace, gang_group, pod_name)
+        if not handoff.mark_workers_done():
+            log("WARNING: could not tell the scout to release its session")
         sys.exit(1)
 
     # ungate the workers, stamping the job id and the session first
