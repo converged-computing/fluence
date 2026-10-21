@@ -470,39 +470,101 @@ def test_poll_retries_a_vendor_error_then_succeeds(monkeypatch):
     assert sidecar._poll(Recovering(), object(), 0, ungate=True) is True
 
 
-def test_fail_open_hands_the_workers_the_session(monkeypatch):
-    """When the poll fails the workers are released anyway. They must get
-    the session id, or they run outside a session the scout still holds."""
+def _sidecar_with(monkeypatch, task, ready, scout_exited=False):
+    """Run the sidecar's main with a fake provider. Returns what it did."""
     from fluence import sidecar
 
-    calls = {}
-    monkeypatch.setattr(sidecar, "_poll", lambda *a, **k: False)
+    did = {"ungated": None, "marked": False}
+    monkeypatch.setattr(sidecar, "_poll", lambda *a, **k: ready)
     monkeypatch.setattr(sidecar, "_hold_for_workers", lambda *a, **k: None)
     monkeypatch.setattr(sidecar, "gated_pods_from_env", lambda: ["worker-0"])
+    monkeypatch.setattr(sidecar, "wait_for_gated_pods", lambda *a, **k: ["worker-0"])
     monkeypatch.setattr(
         sidecar,
         "ungate_pods",
-        lambda pods, job_id, ns, **kw: calls.update(kw) or len(pods),
+        lambda pods, job_id, ns, **kw: did.update(ungated={"job_id": job_id, **kw})
+        or len(pods),
     )
     monkeypatch.setattr(sidecar, "placement_from_env", lambda: ("ibm_x", {}))
     monkeypatch.setattr(sidecar, "namespace_from_env", lambda: "default")
+    monkeypatch.setattr(
+        sidecar.handoff,
+        "mark_workers_done",
+        lambda *a, **k: did.update(marked=True) or True,
+    )
+    monkeypatch.setattr(sidecar.handoff, "scout_exited", lambda *a, **k: scout_exited)
 
     class P:
         name = "fake"
 
         def find_my_task(self, uid, backend, timeout):
-            return "task"
+            return task
 
-        def job_id(self, task):
+        def job_id(self, t):
             return "job-1"
 
-        def session_id(self, task):
+        def session_id(self, t):
             return "sess-1"
 
     monkeypatch.setattr(sidecar, "resolve_from_env", lambda: P())
     monkeypatch.setenv("FLUENCE_OBSERVE", "false")
+    code = 0
     try:
         sidecar.main()
     except SystemExit as e:
-        assert e.code == 1
-    assert calls.get("session_id") == "sess-1"
+        code = e.code
+    did["code"] = code
+    return did
+
+
+def test_a_task_that_is_not_ready_leaves_the_workers_gated(monkeypatch):
+    """A failed or cancelled task has nothing for the workers. Releasing them
+    would only spend money on a run that already failed."""
+    did = _sidecar_with(monkeypatch, task="task", ready=False)
+    assert did["ungated"] is None
+    assert did["code"] == 1
+
+
+def test_a_task_that_is_not_ready_tells_the_scout_to_release(monkeypatch):
+    """The scout holds its session until the workers are done. They will
+    never run, so the marker is written now and the session closes."""
+    did = _sidecar_with(monkeypatch, task="task", ready=False)
+    assert did["marked"] is True
+
+
+def test_a_task_that_cannot_be_found_leaves_the_workers_gated(monkeypatch):
+    did = _sidecar_with(monkeypatch, task=None, ready=False, scout_exited=False)
+    assert did["ungated"] is None
+    assert did["code"] == 1
+
+
+def test_a_rehearsal_still_releases_the_workers(monkeypatch):
+    """The scout exited with nothing submitted, no credentials. That is the
+    mock run, and the workers go with no session."""
+    did = _sidecar_with(monkeypatch, task=None, ready=False, scout_exited=True)
+    assert did["ungated"] is not None
+    assert did["ungated"]["job_id"] == ""
+    assert not did["ungated"].get("session_id")
+    assert did["code"] == 0
+
+
+def test_a_ready_task_releases_the_workers_with_the_session(monkeypatch):
+    did = _sidecar_with(monkeypatch, task="task", ready=True)
+    assert did["ungated"]["job_id"] == "job-1"
+    assert did["ungated"]["session_id"] == "sess-1"
+
+
+def test_qrmi_ready_means_running_or_completed(monkeypatch):
+    from fluence.providers import qrmi as q
+
+    prov = q.QRMIProvider()
+    for name, ready, failed in [
+        ("QUEUED", False, False),
+        ("RUNNING", True, False),
+        ("COMPLETED", True, False),
+        ("FAILED", False, True),
+        ("CANCELLED", False, True),
+    ]:
+        monkeypatch.setattr(prov, "_status", lambda task, n=name: n)
+        assert prov.is_ready_to_ungate(object()) is ready, name
+        assert prov.task_failed(object()) is failed, name
