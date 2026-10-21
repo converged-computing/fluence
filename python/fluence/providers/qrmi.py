@@ -18,8 +18,24 @@ from fluence import handoff
 
 # qrmi_type values whose ResourceType name cannot be derived from them
 _RESOURCE_TYPE_ALIASES = {
+    "qiskit-runtime-service": "IBMQiskitRuntimeService",
     "direct-access": "IBMQuantumSystem",  # legacy name for ibm-quantum-system
     "ibm-direct-access": "IBMQuantumSystem",
+}
+
+# the infix QRMI puts in its variable names for each IBM type, as in
+# <backend>_QRMI_IBM_QRS_IAM_APIKEY
+_ENV_INFIX = {
+    "IBMQiskitRuntimeService": "_QRMI_IBM_QRS",
+    "IBMQuantumSystem": "_QRMI_IBM_QS",
+}
+
+# what the infix variables default to, or are derived from, when only the
+# IBM_CLOUD_TOKEN and IBM_CLOUD_CRN a workload Secret provides are present.
+# The sampler derives the same set for the scout.
+_IBM_DEFAULTS = {
+    "_ENDPOINT": "https://quantum.cloud.ibm.com/api/v1",
+    "_IAM_ENDPOINT": "https://iam.cloud.ibm.com",
 }
 
 # kept upper case when deriving a ResourceType name
@@ -56,8 +72,9 @@ def _pascal(qrmi_type: str, acronyms=True) -> str:
 
 def _resource_type_enum(qrmi_type: str):
     """The QRMI ResourceType for a qrmi_type string. An alias first, then the
-    name derived from the string. Falls back to the first member with a warning
-    rather than failing on a QRMI version we have not seen."""
+    name derived from the string. Raises when nothing matches. A guessed type
+    reads the wrong credentials and asks the wrong service about the task, so
+    it is never better than stopping."""
     from qrmi import ResourceType
 
     q = (qrmi_type or "").lower()
@@ -70,12 +87,29 @@ def _resource_type_enum(qrmi_type: str):
         rt = getattr(ResourceType, name, None)
         if rt is not None:
             return rt
-    log(
-        f"[qrmi] WARNING: no ResourceType matched {qrmi_type!r} "
-        f"(tried {candidates}); falling back to a default member"
+    members = [k for k in vars(ResourceType) if not k.startswith("_")]
+    raise ValueError(
+        f"no QRMI ResourceType matches {qrmi_type!r}, tried {candidates}, "
+        f"QRMI has {members}"
     )
-    members = [v for k, v in vars(ResourceType).items() if not k.startswith("_")]
-    return members[0] if members else None
+
+
+def _derive_ibm_env(backend: str, rtype) -> None:
+    """Fill in <backend><infix>_* from IBM_CLOUD_TOKEN and IBM_CLOUD_CRN,
+    never overwriting a variable that is already set. The webhook copies the
+    workload's Secret env onto the sidecar, and that Secret holds the plain
+    token and CRN, not QRMI's names."""
+    name = rtype if isinstance(rtype, str) else getattr(rtype, "name", str(rtype))
+    infix = _ENV_INFIX.get(name.rsplit(".", 1)[-1])
+    if not infix:
+        return
+    values = dict(_IBM_DEFAULTS)
+    if os.environ.get("IBM_CLOUD_TOKEN"):
+        values["_IAM_APIKEY"] = os.environ["IBM_CLOUD_TOKEN"]
+    if os.environ.get("IBM_CLOUD_CRN"):
+        values["_SERVICE_CRN"] = os.environ["IBM_CLOUD_CRN"]
+    for suffix, value in values.items():
+        os.environ.setdefault(backend + infix + suffix, value)
 
 
 def _status_name(status) -> str:
@@ -235,35 +269,37 @@ class QRMIProvider(Provider):
             import qrmi
 
             rt = _resource_type_enum(task.resource_type)
+            _derive_ibm_env(
+                task.backend,
+                _RESOURCE_TYPE_ALIASES.get((task.resource_type or "").lower(), rt),
+            )
             task._resource = qrmi.QuantumResource(task.backend, rt)
         return task._resource
 
-    def _status(self, task: QRMITask) -> "str | None":
-        try:
-            status = self._qrmi_resource(task).task_status(task.job_id)
-            return _status_name(status)
-        except Exception as e:
-            log(f"[qrmi] task_status error (will retry): {e}")
-            return None
+    def _status(self, task: QRMITask) -> str:
+        # Errors are raised, not swallowed. The sidecar's poll loop counts
+        # them and gives up after FLUENCE_POLL_MAX_ERRORS, which tells the
+        # scout to release its session. Swallowed, a status call that can
+        # never work polled forever while the scout held the session.
+        return _status_name(self._qrmi_resource(task).task_status(task.job_id))
 
     def is_ready_to_ungate(self, task: QRMITask, position=None) -> bool:
         # QRMI reports no queue position, so position is accepted to match the
         # interface and the sidecar's call, and ignored. Ready means the task
         # is running on the device or has completed. Failed and cancelled are
         # not ready, task_failed reports them.
-        name = self._status(task)
-        return name in _READY_STATES if name else False
+        return self._status(task) in _READY_STATES
 
     def task_failed(self, task: QRMITask) -> bool:
-        name = self._status(task)
-        return name in _FAILED_STATES if name else False
+        return self._status(task) in _FAILED_STATES
 
     def queue_position(self, task: QRMITask):
         # QRMI has no queue position, so report 1 once the task runs and None before
-        name = self._status(task)
-        if name and name in _READY_STATES:
-            return 1
-        return None
+        try:
+            name = self._status(task)
+        except Exception:
+            return None
+        return 1 if name in _READY_STATES else None
 
     def job_id(self, task: QRMITask) -> str:
         return task.job_id

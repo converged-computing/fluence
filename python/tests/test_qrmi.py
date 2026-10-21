@@ -85,8 +85,9 @@ def test_resource_type_derivation_covers_multiple_vendors():
     # just a new qrmi_type in config. Verify with a fake ResourceType enum.
     from fluence.providers import qrmi as qmod
 
+    # the member names QRMI actually has
     fake = types.SimpleNamespace(
-        QiskitRuntimeService="QiskitRuntimeService",
+        IBMQiskitRuntimeService="IBMQiskitRuntimeService",
         IBMQuantumSystem="IBMQuantumSystem",
         PasqalCloud="PasqalCloud",
     )
@@ -95,13 +96,57 @@ def test_resource_type_derivation_covers_multiple_vendors():
     sys.modules["qrmi"] = fake_mod
     try:
         assert (
-            qmod._resource_type_enum("qiskit-runtime-service") == "QiskitRuntimeService"
+            qmod._resource_type_enum("qiskit-runtime-service")
+            == "IBMQiskitRuntimeService"
         )
         assert qmod._resource_type_enum("ibm-quantum-system") == "IBMQuantumSystem"
         assert qmod._resource_type_enum("direct-access") == "IBMQuantumSystem"  # alias
         assert qmod._resource_type_enum("pasqal-cloud") == "PasqalCloud"
+        # an unknown type stops, it is never guessed
+        try:
+            qmod._resource_type_enum("no-such-type")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("an unknown type was guessed")
     finally:
         sys.modules.pop("qrmi", None)
+
+
+def test_sidecar_derives_qrmi_env_from_the_secret():
+    """The Secret gives the sidecar IBM_CLOUD_TOKEN and IBM_CLOUD_CRN. QRMI
+    reads <backend>_QRMI_IBM_QRS_*, so those are derived, and an explicit
+    value is never overwritten. No fixtures, the file's own runner calls
+    tests with no arguments."""
+    from fluence.providers import qrmi as qmod
+
+    keys = ("IBM_CLOUD_TOKEN", "IBM_CLOUD_CRN") + tuple(
+        k for k in os.environ if k.startswith("ibm_fez_QRMI")
+    )
+    saved = {k: os.environ.get(k) for k in keys}
+    try:
+        for k in keys:
+            os.environ.pop(k, None)
+        os.environ["IBM_CLOUD_TOKEN"] = "tok"
+        os.environ["IBM_CLOUD_CRN"] = "crn"
+        os.environ["ibm_fez_QRMI_IBM_QRS_ENDPOINT"] = "https://mine"
+        qmod._derive_ibm_env("ibm_fez", "IBMQiskitRuntimeService")
+        assert os.environ["ibm_fez_QRMI_IBM_QRS_IAM_APIKEY"] == "tok"
+        assert os.environ["ibm_fez_QRMI_IBM_QRS_SERVICE_CRN"] == "crn"
+        assert (
+            os.environ["ibm_fez_QRMI_IBM_QRS_IAM_ENDPOINT"]
+            == "https://iam.cloud.ibm.com"
+        )
+        assert os.environ["ibm_fez_QRMI_IBM_QRS_ENDPOINT"] == "https://mine"
+    finally:
+        for k in list(os.environ):
+            if k.startswith("ibm_fez_QRMI"):
+                del os.environ[k]
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
 
 
 def test_pascal_transform_acronym_aware():
@@ -303,11 +348,15 @@ def test_enum_like_status_is_normalized():
     assert prov.is_ready_to_ungate(task) is True
 
 
-def test_status_error_is_not_ready_not_raising():
+def test_status_error_reaches_the_poll_loop_and_it_gives_up():
+    """A status call that keeps failing must end the poll, so the scout is
+    told to release its session. Swallowed, it polled forever."""
+
     class Boom:
         def task_status(self, job_id):
-            raise RuntimeError("transient")
+            raise RuntimeError("ibm_fez_QRMI_IBM_QRS_ENDPOINT is not set")
 
+    from fluence import sidecar
     from fluence.providers.qrmi import QRMIProvider, QRMITask
 
     prov = QRMIProvider()
@@ -315,7 +364,21 @@ def test_status_error_is_not_ready_not_raising():
         job_id="j", backend="ibm_fez", resource_type="qiskit-runtime-service"
     )
     task._resource = Boom()
-    assert prov.is_ready_to_ungate(task) is False
+    try:
+        prov.is_ready_to_ungate(task)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("the status error was swallowed")
+    saved = os.environ.get("FLUENCE_POLL_MAX_ERRORS")
+    os.environ["FLUENCE_POLL_MAX_ERRORS"] = "3"
+    try:
+        assert sidecar._poll(prov, task, 0, ungate=True) is False
+    finally:
+        if saved is None:
+            del os.environ["FLUENCE_POLL_MAX_ERRORS"]
+        else:
+            os.environ["FLUENCE_POLL_MAX_ERRORS"] = saved
 
 
 # ── job id / session id accessors ─────────────────────────────────────────────
