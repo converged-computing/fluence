@@ -189,6 +189,40 @@ func TestSharedScoutWiredAsRealSidecar(t *testing.T) {
 	}
 }
 
+// The rehearsal label is the only thing that lets the sidecar release the
+// workers when the scout submits nothing. It must reach the workload and the
+// scout's sidecar, and be absent from both without the label.
+func TestRehearsalLabelReachesWorkloadAndSidecar(t *testing.T) {
+	ns, group, job := "default", "qr", "qr-job"
+	par := int32(2)
+	for _, labeled := range []bool{true, false} {
+		cs := fake.NewSimpleClientset(&batchv1.Job{
+			ObjectMeta: metav1.ObjectMeta{Name: job, Namespace: ns},
+			Spec:       batchv1.JobSpec{Parallelism: &par, Completions: &par}})
+		m := &webhook.Mutator{Clientset: cs}
+		pod := sharedQPUPod(ns, group, "qr-0", job, "0")
+		if labeled {
+			pod.Labels[RehearsalLabel] = "true"
+		}
+		ops := m.Mutate(context.Background(), pod)
+
+		_, onWorkload := envOp(ops, RehearsalEnv)
+		onSidecar := false
+		for _, op := range ops {
+			if c, ok := op.Value.(corev1.Container); ok && c.Name == SidecarContainerName {
+				for _, e := range c.Env {
+					if e.Name == RehearsalEnv && e.Value == "true" {
+						onSidecar = true
+					}
+				}
+			}
+		}
+		if onWorkload != labeled || onSidecar != labeled {
+			t.Errorf("labeled=%v: %s on workload=%v, on sidecar=%v", labeled, RehearsalEnv, onWorkload, onSidecar)
+		}
+	}
+}
+
 // Shared mode never creates an extra pod. A full gang (scout index 0 +
 // workers) is N members, so the application runs exactly N times (not N+1 as
 // the old submitter-pod model did).

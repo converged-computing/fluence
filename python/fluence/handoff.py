@@ -88,8 +88,9 @@ def wait(timeout, interval=5, path=None, log=None) -> "dict | None":
 
 
 # the interceptor writes this when the scout's interpreter exits with no task
-# published, so a rehearsal with no credentials does not leave the workers
-# gated until the discovery timeout
+# published, so the sidecar stops waiting instead of running to the discovery
+# timeout. It says the scout is gone, not that releasing the workers is safe.
+# Only FLUENCE_REHEARSAL says that
 EXITED_FILENAME = "scout-exited"
 
 

@@ -470,7 +470,7 @@ def test_poll_retries_a_vendor_error_then_succeeds(monkeypatch):
     assert sidecar._poll(Recovering(), object(), 0, ungate=True) is True
 
 
-def _sidecar_with(monkeypatch, task, ready, scout_exited=False):
+def _sidecar_with(monkeypatch, task, ready, scout_exited=False, rehearsal=False):
     """Run the sidecar's main with a fake provider. Returns what it did."""
     from fluence import sidecar
 
@@ -508,6 +508,7 @@ def _sidecar_with(monkeypatch, task, ready, scout_exited=False):
 
     monkeypatch.setattr(sidecar, "resolve_from_env", lambda: P())
     monkeypatch.setenv("FLUENCE_OBSERVE", "false")
+    monkeypatch.setenv("FLUENCE_REHEARSAL", "true" if rehearsal else "false")
     code = 0
     try:
         sidecar.main()
@@ -538,10 +539,21 @@ def test_a_task_that_cannot_be_found_leaves_the_workers_gated(monkeypatch):
     assert did["code"] == 1
 
 
-def test_a_rehearsal_still_releases_the_workers(monkeypatch):
-    """The scout exited with nothing submitted, no credentials. That is the
-    mock run, and the workers go with no session."""
+def test_a_scout_that_exits_without_a_task_is_an_error(monkeypatch):
+    """No task and no rehearsal label means the scout failed, for example
+    with missing credentials. The workers must not start on a run with no
+    quantum task."""
     did = _sidecar_with(monkeypatch, task=None, ready=False, scout_exited=True)
+    assert did["ungated"] is None
+    assert did["code"] == 1
+
+
+def test_a_rehearsal_still_releases_the_workers(monkeypatch):
+    """Labeled a rehearsal, so no task is expected and the workers go with
+    no session."""
+    did = _sidecar_with(
+        monkeypatch, task=None, ready=False, scout_exited=True, rehearsal=True
+    )
     assert did["ungated"] is not None
     assert did["ungated"]["job_id"] == ""
     assert not did["ungated"].get("session_id")

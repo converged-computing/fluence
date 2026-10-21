@@ -37,6 +37,13 @@ const (
 	// does not ungate.
 	ObserveLabel = "fluence.flux-framework.org/observe"
 
+	// RehearsalLabel says a run is meant to submit nothing. The webhook sets
+	// RehearsalEnv on the workload and the sidecar. Only then may the sidecar
+	// release workers when the scout exits without a task. Without it a scout
+	// that submitted nothing is an error and the workers stay gated.
+	RehearsalLabel = "fluence.flux-framework.org/rehearsal"
+	RehearsalEnv   = "FLUENCE_REHEARSAL"
+
 	// DependencyKindQuantumSubmit is the readiness Kind for the quantum resource
 	// type: worker pods wait for a quantum submission to reach the device queue.
 	// First concrete instance of the general Dependency primitive (dependency.go).
@@ -160,6 +167,7 @@ func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *
 	n := resolveGangSize(ctx, m, pod, g)
 	mode := coordinationMode(pod)
 	observe := spec.Label(pod, ObserveLabel) == "true"
+	rehearsal := rehearsalEnv(pod)
 	cores := placement.PodCores(pod)
 
 	// No coordination. A standalone quantum pod, or an explicitly independent
@@ -170,10 +178,11 @@ func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *
 		ops := admissionOps(pod, pod.Namespace+"/"+pod.Name, cores)
 		ops = append(ops, interceptorOps(pod)...)
 		ops = append(ops, handoffOps(pod)...)
+		ops = append(ops, rehearsalOps(pod, rehearsal)...)
 		if observe {
 			sc := sidecarFor(m)
 			sc.EnsureRBAC(ctx, pod.Namespace)
-			ops = append(ops, sc.ContainerOps(pod, true, nil)...)
+			ops = append(ops, sc.ContainerOps(pod, true, rehearsal)...)
 		}
 		log.Printf("[fluence-webhook] quantum %s/%s mode=%s (standalone/independent, observe=%v)",
 			pod.Namespace, pod.Name, mode, observe)
@@ -186,10 +195,29 @@ func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *
 	m.EnsurePodGroup(ctx, pod.Namespace, g, pod.Name, n-1)
 	m.RecordAdmission(ctx, pod.Namespace, g, cores*int(n))
 	ops := admissionOps(pod, pod.Namespace+"/"+g, 0)
+	ops = append(ops, rehearsalOps(pod, rehearsal)...)
 	if isScout(ctx, m, pod, g) {
-		return append(ops, h.mutateScout(ctx, m, pod, g)...)
+		return append(ops, h.mutateScout(ctx, m, pod, g, rehearsal)...)
 	}
 	return append(ops, h.mutateWorker(ctx, m, pod, g, n)...)
+}
+
+// rehearsalEnv is the env that marks a rehearsal, or nil when the pod does
+// not carry the label.
+func rehearsalEnv(pod *corev1.Pod) []corev1.EnvVar {
+	if spec.Label(pod, RehearsalLabel) != "true" {
+		return nil
+	}
+	return []corev1.EnvVar{{Name: RehearsalEnv, Value: "true"}}
+}
+
+// rehearsalOps puts the rehearsal env on the workload containers.
+func rehearsalOps(pod *corev1.Pod, env []corev1.EnvVar) []spec.Op {
+	var ops []spec.Op
+	for _, e := range env {
+		ops = append(ops, setContainerEnvOps(pod, e)...)
+	}
+	return ops
 }
 
 // mutateScout wires the single scout member (indexed-Job completion index
@@ -197,7 +225,7 @@ func (h *quantumHandler) Mutate(ctx context.Context, m webhook.MutatorAPI, pod *
 // and runs the REAL submit, the interceptor in tag mode, RBAC, and the sidecar
 // told which worker group to ungate (FLUENCE_GANG_GROUP). The scout is one
 // of the N members, so the application is NOT run an extra time. Never gated.
-func (h *quantumHandler) mutateScout(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string) []spec.Op {
+func (h *quantumHandler) mutateScout(ctx context.Context, m webhook.MutatorAPI, pod *corev1.Pod, group string, rehearsal []corev1.EnvVar) []spec.Op {
 	pg := group + ScoutGroupSuffix
 	m.EnsurePodGroup(ctx, pod.Namespace, pg, pod.Name, 1)
 	ops := linkGroupOps(pod, pg)
@@ -206,7 +234,7 @@ func (h *quantumHandler) mutateScout(ctx context.Context, m webhook.MutatorAPI, 
 	ops = append(ops, roleEnvOps(pod, RoleScout)...) // FLUENCE_COORDINATION_ROLE=scout
 	sc := sidecarFor(m)
 	sc.EnsureRBAC(ctx, pod.Namespace)
-	extra := []corev1.EnvVar{{Name: GangGroupEnv, Value: group}}
+	extra := append([]corev1.EnvVar{{Name: GangGroupEnv, Value: group}}, rehearsal...)
 	ops = append(ops, sc.ContainerOps(pod, false, extra)...)
 	log.Printf("[fluence-webhook] quantum scout %s/%s, group %s (ungates workers %q)",
 		pod.Namespace, pod.Name, pg, group)

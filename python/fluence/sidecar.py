@@ -12,6 +12,11 @@ Environment, all set by the webhook
   FLUENCE_GANG_GROUP              group label of the workers to ungate
   FLUENCE_GATED_PODS              optional explicit list of worker pod names
   FLUENCE_OBSERVE                 true for observe mode
+  FLUENCE_REHEARSAL               true for a run meant to submit nothing. Only
+                                  then are the workers released, with no
+                                  session, when the scout exits without a task.
+                                  Set from the fluence.flux-framework.org/rehearsal
+                                  pod label
   FLUXION_BACKEND                 the backend the scheduler chose
   FLUENCE_TASK_DISCOVERY_TIMEOUT  seconds to wait for the task (default 300)
   FLUENCE_WORKER_TIMEOUT          seconds to hold for the workers (default 3600)
@@ -100,6 +105,7 @@ def main():
     gang_group = os.environ.get("FLUENCE_GANG_GROUP", "")
     backend = os.environ.get("FLUXION_BACKEND", "")
     observe = os.environ.get("FLUENCE_OBSERVE", "").lower() == "true"
+    rehearsal = os.environ.get("FLUENCE_REHEARSAL", "").lower() == "true"
     discovery_timeout = int(os.environ.get("FLUENCE_TASK_DISCOVERY_TIMEOUT", 300))
     poll_interval = int(os.environ.get("FLUENCE_POLL_INTERVAL", 2))
     ungate_timeout = int(os.environ.get("FLUENCE_UNGATE_TIMEOUT", 120))
@@ -110,7 +116,8 @@ def main():
     log("starting the fluence sidecar")
     log(
         f"  pod_uid={pod_uid} namespace={namespace} group={group} "
-        f"gang_group={gang_group} backend={backend} observe={observe}"
+        f"gang_group={gang_group} backend={backend} observe={observe} "
+        f"rehearsal={rehearsal}"
     )
 
     placed_backend, placed_attrs = placement_from_env()
@@ -121,12 +128,10 @@ def main():
     log(f"resolved provider: {provider.name}")
 
     task = provider.find_my_task(pod_uid, backend, discovery_timeout)
-    if task is None and handoff.scout_exited() and not observe:
-        # a rehearsal, or an application that never submitted. Release the
-        # workers with no session and hold for them as usual
-        log(
-            "the scout finished without submitting a task, releasing the workers with no session"
-        )
+    if task is None and rehearsal and not observe:
+        # Asked for a run that submits nothing. Release the workers with no
+        # session and hold for them as usual.
+        log("rehearsal, no task expected, releasing the workers with no session")
         ungate_pods(
             wait_for_gated_pods(
                 namespace, gang_group, exclude=pod_name, timeout=ungate_timeout
@@ -139,14 +144,29 @@ def main():
         _hold_for_workers(namespace, gang_group, pod_name)
         sys.exit(0)
     if task is None:
-        # The scout neither published a task nor exited, so something is
-        # wrong with it. Releasing the workers would start them on a run that
-        # has no quantum task, so they stay gated. Delete the job to clear them.
-        log(
-            "ERROR: could not discover the quantum task. The workers stay gated, "
-            "delete the job to clear them"
-        )
+        # No task and this is not a rehearsal. The scout failed before it
+        # submitted, for example with missing credentials, or never finished
+        # submitting. Releasing the workers would start them on a run with no
+        # quantum task, so they stay gated. Delete the job to clear them.
+        if handoff.scout_exited():
+            log(
+                "ERROR: the scout exited without submitting a task. The workers "
+                "stay gated, delete the job to clear them. If this run was meant "
+                "to submit nothing, label the pods "
+                "fluence.flux-framework.org/rehearsal=true"
+            )
+        else:
+            log(
+                "ERROR: could not discover the quantum task. The workers stay "
+                "gated, delete the job to clear them"
+            )
         sys.exit(1)
+
+    if rehearsal:
+        log(
+            "WARNING: this is labeled a rehearsal but the scout submitted a task. "
+            "Using it, since it is already paid for"
+        )
 
     job_id = provider.job_id(task)
     log(f"discovered task, job_id={job_id}")

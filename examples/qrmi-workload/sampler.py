@@ -3,8 +3,10 @@
 
 fluence chooses the backend and the webhook forwards via FLUXION_BACKEND.
 This acquires a session on it, runs a Bell circuit through the QRMI sampler,
-prints the counts, and releases the session. Without credentials it prints
-what it would need and exits, so the same pod works as a rehearsal.
+prints the counts, and releases the session. With FLUENCE_REHEARSAL=true,
+set by the webhook from the fluence.flux-framework.org/rehearsal pod label,
+it prints what it would need and exits without touching the vendor. Without
+the label, missing credentials is an error.
 The session is opened in batch mode unless FLUENCE_QRMI_SESSION_MODE is set
 to dedicated.
 """
@@ -193,12 +195,20 @@ def main():
         ),
     )
     missing = missing_credentials(backend, rtype)
-    if missing:
-        print("missing: ", ", ".join(missing))
+    if os.environ.get("FLUENCE_REHEARSAL", "").lower() == "true":
+        if missing:
+            print("missing: ", ", ".join(missing))
         print(
             "\nrehearsal, nothing acquired or submitted. The placement and the handoff worked."
         )
         return
+    if missing:
+        sys.exit(
+            "missing credentials: {}. Nothing was submitted. Label the pods "
+            "fluence.flux-framework.org/rehearsal=true to run without them".format(
+                ", ".join(missing)
+            )
+        )
 
     qr = resource(backend, rtype)
     session = os.environ.get("FLUENCE_QUANTUM_SESSION_ID")

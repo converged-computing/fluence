@@ -40,8 +40,8 @@ def install() -> None:
 
 
 def _mark_exit() -> None:
-    # tell the sidecar the application ended, so a scout that never submitted
-    # releases its workers instead of leaving them gated
+    # tell the sidecar the application ended, so it stops waiting for a task.
+    # The sidecar releases the workers only if the run is a rehearsal
     try:
         from fluence import handoff
 
