@@ -63,7 +63,7 @@ The quantum handler also enforces admission control, which is always on unless t
 5. When the task is next in line, or already running, annotate each worker with the job id and the session, then remove the gate.
 6. Wait for the workers to reach Succeeded or Failed, write the done marker so the scout's release proceeds, and exit.
 
-The sidecar ungates the workers only when the scout's task is running or has completed. If the task fails, is cancelled, or is never found, the workers stay gated, the sidecar tells the scout to release its session at once, and it exits non zero so it shows. Delete the job to clear the gated workers. The one exception is a rehearsal, where the scout exits without submitting anything, for example with no credentials. Then the workers are released with no session.
+The sidecar ungates the workers only when the scout's task is running or has completed. If the task fails, is cancelled, or is never found, the workers stay gated, the sidecar tells the scout to release its session at once, and it exits non zero so it shows. Delete the job to clear the gated workers. The one exception is a rehearsal, which you ask for with the pod label `fluence.flux-framework.org/rehearsal: "true"`. The webhook passes it to the workload and the sidecar as `FLUENCE_REHEARSAL=true`. The workload submits nothing and the sidecar releases the workers with no session. Without the label, a scout that exits without submitting, for example because its credentials are missing, is an error. The workers stay gated and the sidecar exits non zero.
 
 ## Priority and preemption
 
