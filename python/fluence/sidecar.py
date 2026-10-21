@@ -70,8 +70,8 @@ def _poll(provider, task, poll_interval, ungate, position=1):
                 log(f"queue position: {pos}")
                 last = pos
             errors = 0
-        except (TypeError, AttributeError, NameError) as e:
-            log(f"ERROR: poll failed with a programming error, not retrying: {e!r}")
+        except (TypeError, AttributeError, NameError, ValueError) as e:
+            log(f"ERROR: poll failed with an error retrying cannot fix: {e!r}")
             return False
         except Exception as e:
             errors += 1
